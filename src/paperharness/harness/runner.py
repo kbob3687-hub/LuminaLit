@@ -3,11 +3,13 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from paperharness.contracts.run import RunRequest, RunResult, RunState
+from paperharness.agent.classifier import UNREPAIRABLE, FailureContext
+from paperharness.contracts.run import RunPlan, RunRequest, RunResult, RunState
 from paperharness.harness.store import RunStore
 from paperharness.sandbox.base import SandboxClosedError, SandboxSession, SandboxUnavailableError
 
 INSTALL_COMMAND = ["python", "-m", "pip", "install", "-r", "requirements.txt"]
+MAX_ACTIONS_PER_REPAIR = 20
 
 
 def git_clone(request: RunRequest, run_dir: Path) -> str:
@@ -45,11 +47,13 @@ class HarnessRunner:
         llm,
         sandbox_factory: Callable[[RunRequest, Path], SandboxSession],
         cloner: Callable[[RunRequest, Path], str] = git_clone,
+        aci_factory: Callable[[SandboxSession, Path, RunPlan, int], object] | None = None,
     ):
         self.store = store
         self.llm = llm
         self.sandbox_factory = sandbox_factory
         self.cloner = cloner
+        self.aci_factory = aci_factory
 
     def run(self, run_id: str, request: RunRequest) -> RunResult:
         run_dir = self.store.run_dir(run_id)
@@ -106,13 +110,27 @@ class HarnessRunner:
                 {"exit_code": test.exit_code, "stderr_tail": test.stderr_tail},
             )
 
-            verified = test.exit_code == 0 and not test.timed_out
-            if verified and plan.expected_artifact:
-                verified = (workspace / plan.expected_artifact).exists()
+            verified = self._is_verified(test, plan, workspace)
+            attempts = 1
+            failure_category = None if verified else "smoke_test_failed"
+            outcome = "succeeded" if verified else "failed"
+
+            if not verified and self.aci_factory is not None and request.max_repairs > 0:
+                healed = self._self_heal(run_id, request, session, workspace, plan, test)
+                verified = healed["verified"]
+                attempts = healed["attempts"]
+                failure_category = healed["failure_category"]
+                outcome = "succeeded" if verified else healed["outcome"]
 
             state = RunState.SUCCEEDED if verified else RunState.FAILED
             self.store.write_text(run_id, "patch.diff", session.export_diff())
-            self.store.write_text(run_id, "report.md", f"# Report\n\nverified={verified}\n")
+            self.store.write_text(
+                run_id,
+                "report.md",
+                "# Report\n\n"
+                f"outcome={outcome}\nverified={verified}\nattempts={attempts}\n"
+                f"failure_category={failure_category}\n",
+            )
             self.store.write_text(
                 run_id,
                 "environment.json",
@@ -129,10 +147,10 @@ class HarnessRunner:
 
             result = RunResult(
                 run_id=run_id,
-                outcome="succeeded" if verified else "failed",
+                outcome=outcome,
                 verified=verified,
-                attempts=1,
-                failure_category=None if verified else "smoke_test_failed",
+                attempts=attempts,
+                failure_category=failure_category,
                 resolved_revision=plan.resolved_revision,
                 patch_url=f"/api/runs/{run_id}/patch",
                 environment_url=f"/api/runs/{run_id}/environment",
@@ -150,6 +168,102 @@ class HarnessRunner:
             return self._fail(run_id, "service_interrupted", f"sandbox unavailable: {exc}")
         finally:
             session.close()
+
+    def _is_verified(self, test, plan: RunPlan, workspace: Path) -> bool:
+        if test.exit_code != 0 or test.timed_out:
+            return False
+        if plan.expected_artifact:
+            return (workspace / plan.expected_artifact).exists()
+        return True
+
+    def _self_heal(
+        self,
+        run_id: str,
+        request: RunRequest,
+        session: SandboxSession,
+        workspace: Path,
+        plan: RunPlan,
+        first_test,
+    ) -> dict:
+        """DIAGNOSING → REPAIRING → TESTING 循环，预算由 max_repairs 控制。
+
+        模型不拥有控制流：只通过 propose_action 出动作，循环、重验、认输全在本方法。
+        """
+        aci = self.aci_factory(session, workspace, plan, request.timeout_seconds)
+        history: list = []
+        attempts = 1
+        category: str | None = None
+        outcome = "budget_exceeded"
+        test = first_test
+
+        for round_no in range(1, request.max_repairs + 1):
+            self.store.write_status(run_id, RunState.DIAGNOSING, {"attempt": round_no})
+            category = self.llm.classify_failure(
+                FailureContext(
+                    exit_code=test.exit_code,
+                    timed_out=test.timed_out,
+                    stdout_tail=test.stdout_tail,
+                    stderr_tail=test.stderr_tail,
+                )
+            )
+            self.store.append_event(
+                run_id,
+                RunState.DIAGNOSING,
+                "diagnosis",
+                f"failure classified as {category}",
+                {"failure_class": category, "attempt": round_no},
+            )
+            if category in UNREPAIRABLE:
+                outcome = "unrepairable"
+                break
+
+            self.store.write_status(run_id, RunState.REPAIRING, {"attempt": round_no})
+            for _ in range(MAX_ACTIONS_PER_REPAIR):
+                action = self.llm.propose_action(history)
+                observation = aci.execute(action)
+                history.append(observation)
+                self.store.append_event(
+                    run_id,
+                    RunState.REPAIRING,
+                    action.action,
+                    observation.summary,
+                    {"ok": observation.ok, "exit_code": observation.exit_code},
+                )
+                if action.action == "finish_repair":
+                    break
+                if action.action == "run_smoke_test" and observation.exit_code == 0:
+                    break
+            self.store.append_event(
+                run_id,
+                RunState.REPAIRING,
+                "repair_round",
+                f"repair round {round_no} finished",
+            )
+
+            self.store.write_status(run_id, RunState.TESTING, {"attempt": round_no + 1})
+            session.set_network(False)
+            test = session.execute(plan.command, timeout_seconds=request.timeout_seconds)
+            attempts += 1
+            self.store.append_event(
+                run_id,
+                RunState.TESTING,
+                "test",
+                f"smoke test finished (attempt {attempts})",
+                {"exit_code": test.exit_code, "attempt": attempts},
+            )
+            if self._is_verified(test, plan, workspace):
+                return {
+                    "verified": True,
+                    "attempts": attempts,
+                    "failure_category": category,
+                    "outcome": "succeeded",
+                }
+        return {
+            "verified": False,
+            "attempts": attempts,
+            "failure_category": category,
+            "outcome": outcome,
+        }
 
     def _fail(self, run_id: str, category: str, message: str) -> RunResult:
         result = RunResult(
