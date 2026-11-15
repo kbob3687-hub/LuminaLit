@@ -9,6 +9,8 @@ def make_runner(tmp_path, results=None, artifact_path=None, cloner=None, factory
     store = RunStore(tmp_path)
 
     def default_factory(request, run_dir):
+        (run_dir / "workspace").mkdir(parents=True, exist_ok=True)
+        (run_dir / "workspace" / "requirements.txt").write_text("", encoding="utf-8")
         return FakeSandboxSession(
             results, artifact_path=artifact_path, workspace=run_dir / "workspace"
         )
