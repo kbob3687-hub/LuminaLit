@@ -1,0 +1,18 @@
+{
+  "id": "hardcoded-path",
+  "repo_url": "https://github.com/kbob3687-hub/paperharness-targets",
+  "revision": "42214c2fe000932c0dadf6849806660167077c4f",
+  "python_version": "3.10",
+  "command": [
+    "python",
+    "main.py"
+  ],
+  "expected_artifact": "out.txt",
+  "failure_class": "hardcoded_path",
+  "repairable": true,
+  "allowed_actions": [
+    "replace_exact"
+  ],
+  "expected_final": "succeeded",
+  "notes": "输入输出写死 /data 与 /tmp。预期 replace_exact 改成相对路径 data/input.csv 与 out.txt。分支 hardcoded-path。"
+}

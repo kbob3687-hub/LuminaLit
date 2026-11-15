@@ -1,0 +1,18 @@
+{
+  "id": "version-conflict",
+  "repo_url": "https://github.com/kbob3687-hub/paperharness-targets",
+  "revision": "accfa5c5f482385edae7678ad71818e979fa926c",
+  "python_version": "3.10",
+  "command": [
+    "python",
+    "main.py"
+  ],
+  "expected_artifact": "out.txt",
+  "failure_class": "version_conflict",
+  "repairable": true,
+  "allowed_actions": [
+    "install_requirement"
+  ],
+  "expected_final": "succeeded",
+  "notes": "requirements.txt 锁 numpy==2.0.0，代码用 np.float_（numpy 2 已移除）。预期改装 numpy<2 修复。分支 version-conflict。"
+}

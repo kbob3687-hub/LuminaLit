@@ -1,13 +1,16 @@
 {
   "id": "clean-example",
-  "repo_url": "https://github.com/paperharness-demo/clean-example",
-  "revision": "0000000000000000000000000000000000000000",
+  "repo_url": "https://github.com/kbob3687-hub/paperharness-targets",
+  "revision": "a99b2b41ab223a91bace2c86d43ff9bb9548c3a1",
   "python_version": "3.10",
-  "command": ["python", "main.py"],
+  "command": [
+    "python",
+    "main.py"
+  ],
   "expected_artifact": "out.txt",
   "failure_class": "none",
   "repairable": true,
   "allowed_actions": [],
   "expected_final": "succeeded",
-  "notes": "基线靶场：依赖齐全、命令直接跑通，预期零修复一次成功。repairable=true 表示可达 succeeded（此处无需任何修复动作）。revision 为占位，仓库建立后更新。"
+  "notes": "基线靶场：依赖齐全、命令直接跑通，预期零修复一次成功（repairable=true 表示可达 succeeded）。分支 clean-example。"
 }

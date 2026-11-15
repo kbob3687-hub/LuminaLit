@@ -1,0 +1,18 @@
+{
+  "id": "deprecated-api",
+  "repo_url": "https://github.com/kbob3687-hub/paperharness-targets",
+  "revision": "093ecd35f5b1f242d02aa0411d05ec3a40f2ec7d",
+  "python_version": "3.10",
+  "command": [
+    "python",
+    "main.py"
+  ],
+  "expected_artifact": "out.txt",
+  "failure_class": "deprecated_api",
+  "repairable": true,
+  "allowed_actions": [
+    "replace_exact"
+  ],
+  "expected_final": "succeeded",
+  "notes": "mylib.load 已去掉 verbose 参数。预期 replace_exact 删除该参数。分支 deprecated-api。"
+}
