@@ -1,0 +1,18 @@
+{
+  "id": "missing-dependency",
+  "repo_url": "https://github.com/kbob3687-hub/paperharness-targets",
+  "revision": "c6784189ca8faf81117fb1ecfabf4e5cc9f788fc",
+  "python_version": "3.10",
+  "command": [
+    "python",
+    "main.py"
+  ],
+  "expected_artifact": "out.txt",
+  "failure_class": "missing_dependency",
+  "repairable": true,
+  "allowed_actions": [
+    "install_requirement"
+  ],
+  "expected_final": "succeeded",
+  "notes": "requirements.txt 没列 PyYAML，main.py 第一行 import yaml 就炸。预期 install_requirement 修复。分支 missing-dependency。"
+}

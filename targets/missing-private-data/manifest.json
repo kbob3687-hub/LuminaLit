@@ -1,0 +1,16 @@
+{
+  "id": "missing-private-data",
+  "repo_url": "https://github.com/kbob3687-hub/paperharness-targets",
+  "revision": "df424d0da23bc97dc4c45ae2e11bf487967625d2",
+  "python_version": "3.10",
+  "command": [
+    "python",
+    "main.py"
+  ],
+  "expected_artifact": null,
+  "failure_class": "missing_private_data",
+  "repairable": false,
+  "allowed_actions": [],
+  "expected_final": "failed",
+  "notes": "需要内部私有数据集，公开仓库拿不到。系统应判 missing_private_data 并停止，不允许虚假成功。分支 missing-private-data。"
+}

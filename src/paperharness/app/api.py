@@ -1,4 +1,5 @@
 import json
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -18,9 +19,21 @@ TARGETS = [
 ]
 
 
-def create_app(store: RunStore, runner: HarnessRunner) -> tuple[FastAPI, RunWorker]:
-    app = FastAPI(title="PaperHarness API")
+def create_app(
+    store: RunStore,
+    runner: HarnessRunner,
+    targets: list[dict[str, object]] | None = None,
+) -> tuple[FastAPI, RunWorker]:
     worker = RunWorker(store=store, runner=runner)
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        worker.start()
+        yield
+        worker.stop()
+
+    app = FastAPI(title="PaperHarness API", lifespan=lifespan)
+    target_list = targets if targets is not None else TARGETS
 
     @app.get("/api/health")
     def health():
@@ -28,7 +41,7 @@ def create_app(store: RunStore, runner: HarnessRunner) -> tuple[FastAPI, RunWork
 
     @app.get("/api/targets")
     def targets():
-        return TARGETS
+        return target_list
 
     @app.post("/api/runs", status_code=202)
     def create_run(request: RunRequest):

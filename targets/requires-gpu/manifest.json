@@ -1,0 +1,16 @@
+{
+  "id": "requires-gpu",
+  "repo_url": "https://github.com/kbob3687-hub/paperharness-targets",
+  "revision": "d000cdb9eb295de356b33eb20c7afb3593510f94",
+  "python_version": "3.10",
+  "command": [
+    "python",
+    "main.py"
+  ],
+  "expected_artifact": null,
+  "failure_class": "requires_gpu",
+  "repairable": false,
+  "allowed_actions": [],
+  "expected_final": "failed",
+  "notes": "确实需要 GPU，CPU 沙箱修不好。系统应判 requires_gpu 并停止。分支 requires-gpu。"
+}

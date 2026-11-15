@@ -11,12 +11,19 @@ from paperharness.sandbox.fake import FakeSandboxSession
 
 def make_client(tmp_path):
     store = RunStore(tmp_path)
+
+    def factory(request, run_dir):
+        (run_dir / "workspace").mkdir(parents=True, exist_ok=True)
+        (run_dir / "workspace" / "requirements.txt").write_text("", encoding="utf-8")
+        return FakeSandboxSession(
+            artifact_path="out.txt", workspace=run_dir / "workspace"
+        )
+
     runner = HarnessRunner(
         store=store,
         llm=FakeLLM(),
-        sandbox_factory=lambda request, run_dir: FakeSandboxSession(
-            artifact_path="out.txt", workspace=run_dir / "workspace"
-        ),
+        sandbox_factory=factory,
+        cloner=lambda request, run_dir: "fake-commit",
     )
     app, worker = create_app(store=store, runner=runner)
     worker.start()
