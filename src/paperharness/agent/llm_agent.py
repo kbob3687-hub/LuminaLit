@@ -12,6 +12,8 @@
 import json
 import os
 
+from pydantic import TypeAdapter
+
 from paperharness.agent.classifier import FailureContext, classify_by_rules
 from paperharness.contracts.run import (
     FinishRepairAction,
@@ -115,11 +117,12 @@ class OpenAICompatibleLLM:
         )
         if not transcript:
             transcript = "（首轮，尚无动作历史，报错见上一条用户消息）"
+        adapter = TypeAdapter(ToolAction)
         last_error: Exception | None = None
         for _ in range(3):
             try:
                 data = self._chat_json(ACTION_SYSTEM_PROMPT, transcript)
-                return ToolAction.model_validate(data)
+                return adapter.validate_python(data)
             except Exception as exc:  # noqa: BLE001 - 重试后兜底
                 last_error = exc
         return FinishRepairAction(
