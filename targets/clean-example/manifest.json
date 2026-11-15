@@ -1,0 +1,13 @@
+{
+  "id": "clean-example",
+  "repo_url": "https://github.com/paperharness-demo/clean-example",
+  "revision": "0000000000000000000000000000000000000000",
+  "python_version": "3.10",
+  "command": ["python", "main.py"],
+  "expected_artifact": "out.txt",
+  "failure_class": "none",
+  "repairable": true,
+  "allowed_actions": [],
+  "expected_final": "succeeded",
+  "notes": "基线靶场：依赖齐全、命令直接跑通，预期零修复一次成功。repairable=true 表示可达 succeeded（此处无需任何修复动作）。revision 为占位，仓库建立后更新。"
+}

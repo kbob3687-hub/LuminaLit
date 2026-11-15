@@ -14,6 +14,7 @@ from paperharness.harness.runner import HarnessRunner
 from paperharness.harness.store import RunStore
 from paperharness.sandbox.docker_sandbox import create_docker_sandbox
 from paperharness.sandbox.fake import FakeSandboxSession
+from paperharness.targets import load_targets, public_view
 
 
 def build_app(runs_root: str | Path | None = None, backend: str | None = None):
@@ -29,9 +30,14 @@ def build_app(runs_root: str | Path | None = None, backend: str | None = None):
     else:
         raise ValueError(f"unknown sandbox backend: {backend}")
 
+    targets_root = Path(os.environ.get("PAPERHARNESS_TARGETS", "targets"))
+    targets = (
+        public_view(load_targets(targets_root)) if targets_root.is_dir() else None
+    )
+
     store = RunStore(runs_root)
     runner = HarnessRunner(store=store, llm=FakeLLM(), sandbox_factory=factory)
-    return create_app(store=store, runner=runner)
+    return create_app(store=store, runner=runner, targets=targets)
 
 
 app, worker = build_app()

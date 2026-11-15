@@ -19,7 +19,11 @@ TARGETS = [
 ]
 
 
-def create_app(store: RunStore, runner: HarnessRunner) -> tuple[FastAPI, RunWorker]:
+def create_app(
+    store: RunStore,
+    runner: HarnessRunner,
+    targets: list[dict[str, object]] | None = None,
+) -> tuple[FastAPI, RunWorker]:
     worker = RunWorker(store=store, runner=runner)
 
     @asynccontextmanager
@@ -29,6 +33,7 @@ def create_app(store: RunStore, runner: HarnessRunner) -> tuple[FastAPI, RunWork
         worker.stop()
 
     app = FastAPI(title="PaperHarness API", lifespan=lifespan)
+    target_list = targets if targets is not None else TARGETS
 
     @app.get("/api/health")
     def health():
@@ -36,7 +41,7 @@ def create_app(store: RunStore, runner: HarnessRunner) -> tuple[FastAPI, RunWork
 
     @app.get("/api/targets")
     def targets():
-        return TARGETS
+        return target_list
 
     @app.post("/api/runs", status_code=202)
     def create_run(request: RunRequest):

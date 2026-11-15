@@ -1,0 +1,13 @@
+{
+  "id": "missing-dependency",
+  "repo_url": "https://github.com/paperharness-demo/missing-dependency",
+  "revision": "0000000000000000000000000000000000000000",
+  "python_version": "3.10",
+  "command": ["python", "main.py"],
+  "expected_artifact": "out.txt",
+  "failure_class": "missing_dependency",
+  "repairable": true,
+  "allowed_actions": ["install_requirement"],
+  "expected_final": "succeeded",
+  "notes": "requirements.txt 缺 PyYAML，预期一轮 install_requirement 修复。revision 为占位，仓库建立后更新。"
+}
