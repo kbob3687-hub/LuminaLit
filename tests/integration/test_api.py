@@ -17,6 +17,7 @@ def make_client(tmp_path):
         sandbox_factory=lambda request, run_dir: FakeSandboxSession(
             artifact_path="out.txt", workspace=run_dir / "workspace"
         ),
+        cloner=lambda request, run_dir: "fake-commit",
     )
     app, worker = create_app(store=store, runner=runner)
     worker.start()

@@ -5,15 +5,23 @@ from paperharness.harness.store import RunStore
 from paperharness.sandbox.fake import FakeSandboxSession
 
 
-def make_runner(tmp_path, results=None, artifact_path=None):
+def make_runner(tmp_path, results=None, artifact_path=None, cloner=None, factory=None):
     store = RunStore(tmp_path)
 
-    def factory(request, run_dir):
+    def default_factory(request, run_dir):
         return FakeSandboxSession(
             results, artifact_path=artifact_path, workspace=run_dir / "workspace"
         )
 
-    runner = HarnessRunner(store=store, llm=FakeLLM(), sandbox_factory=factory)
+    def default_cloner(request, run_dir):
+        return request.revision or "fake-commit"
+
+    runner = HarnessRunner(
+        store=store,
+        llm=FakeLLM(),
+        sandbox_factory=factory or default_factory,
+        cloner=cloner or default_cloner,
+    )
     return runner, store
 
 
@@ -54,3 +62,30 @@ def test_runner_failure_is_not_verified(tmp_path):
     assert result.verified is False
     assert result.outcome == "failed"
     assert store.read_status(run_id)["state"] == RunState.FAILED.value
+
+
+def test_clone_failure_marks_failed(tmp_path):
+    def broken_cloner(request, run_dir):
+        raise RuntimeError("git clone boom")
+
+    runner, store = make_runner(tmp_path, cloner=broken_cloner)
+    request = RunRequest(repo_url="https://github.com/a/b", command=["python", "main.py"])
+    run_id = store.create_run(request)
+    result = runner.run(run_id, request)
+    assert result.outcome == "failed"
+    assert result.failure_category == "clone_failed"
+    assert store.read_status(run_id)["failure_category"] == "clone_failed"
+
+
+def test_sandbox_unavailable_marks_service_interrupted(tmp_path):
+    from paperharness.sandbox.base import SandboxUnavailableError
+
+    def dead_factory(request, run_dir):
+        raise SandboxUnavailableError("no docker engine")
+
+    runner, store = make_runner(tmp_path, factory=dead_factory)
+    request = RunRequest(repo_url="https://github.com/a/b", command=["python", "main.py"])
+    run_id = store.create_run(request)
+    result = runner.run(run_id, request)
+    assert result.outcome == "failed"
+    assert result.failure_category == "service_interrupted"
