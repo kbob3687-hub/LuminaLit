@@ -15,6 +15,7 @@ class FakeSandboxSession:
         self.workspace = workspace or Path(".")
         self.network_enabled = True
         self.closed = False
+        self.cleanup_errors: list[str] = []  # 与 DockerSandboxSession 对齐
         self.environment: dict[str, str] = {}
         self.commands: list[list[str]] = []
 
