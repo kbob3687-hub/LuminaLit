@@ -28,6 +28,9 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app):
+        # 重启恢复：上次崩溃遗留的非终态 run 一律标 failed/service_interrupted，
+        # 不留永远"运行中"的僵尸状态（设计 6.3 / DoD）。
+        store.recover_interrupted()
         worker.start()
         yield
         worker.stop()
@@ -73,11 +76,21 @@ def create_app(
         status = store.read_status(run_id)
         if status is None:
             raise HTTPException(status_code=404, detail={"code": "run_not_found"})
-        if status.get("state") == RunState.QUEUED.value:
+        state = status.get("state")
+        if state == RunState.QUEUED.value:
             store.write_status(run_id, RunState.CANCELLED, {})
             store.append_event(run_id, RunState.CANCELLED, "cancel", "queued run cancelled")
             return {"run_id": run_id, "state": RunState.CANCELLED.value}
-        return {"run_id": run_id, "state": status.get("state")}
+        if state in {
+            RunState.SUCCEEDED.value,
+            RunState.FAILED.value,
+            RunState.CANCELLED.value,
+        }:
+            # 重复取消返回当前终态，不产生第二个任务（契约 13.6）
+            return {"run_id": run_id, "state": state}
+        # 运行中：终止当前容器，工作线程在最近阶段边界收敛到 cancelled
+        worker.request_cancel(run_id)
+        return {"run_id": run_id, "state": state}
 
     @app.get("/api/runs/{run_id}/report", response_class=PlainTextResponse)
     def get_report(run_id: str):

@@ -186,7 +186,7 @@ Agent 只能拿到 `Observation`，永远拿不到 `SandboxSession`。动作 sch
 
 `GET /api/runs/{run_id}/events?after=<seq>` 返回序号大于 `<seq>` 的事件数组，按序号升序。
 
-`POST /api/runs/{run_id}/cancel` 返回 `{"run_id": "...", "state": "cancelled"}` 或当前状态；排队中的任务会被取消，运行中的任务本骨架阶段不中断。
+`POST /api/runs/{run_id}/cancel` 返回 `{"run_id": "...", "state": "cancelled"}` 或当前状态；排队中的任务直接取消（worker 取出时跳过）；运行中的任务终止当前容器并在阶段边界收敛为 `cancelled`；重复取消返回当前终态，不产生第二个任务。
 
 `GET /api/runs/{run_id}/report` 返回 `text/markdown`。
 

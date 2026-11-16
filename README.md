@@ -148,7 +148,7 @@ docs/         接口契约、队员开工指南、设计与计划
 ## 开发
 
 ```
-.venv/Scripts/python -m pytest -q      # 36 passed
+.venv/Scripts/python -m pytest -q      # 全套测试
 .venv/Scripts/python -m ruff check .   # All checks passed
 ```
 
@@ -161,5 +161,6 @@ docs/         接口契约、队员开工指南、设计与计划
 - ✅ 真 Docker 沙箱（九项安全验收通过）、契约冻结、靶场 8 个全部上线
 - ✅ 自愈循环状态机 + 真 DeepSeek 客户端（三调用点实测通过）
 - ✅ 真 Docker + 真 DeepSeek 端到端跑通
+- ✅ 运行中取消（终止容器、阶段边界收敛 `cancelled`）、服务重启恢复（非终态标 `service_interrupted`）、worker 异常兜底（`internal_error`，工作线程不死）
 - ⏳ 队员：ACI 校验层、沙箱安全测试、前端
-- ⏳ 待补：运行中取消、服务重启恢复、环境清单依赖版本采集、2 个真实论文靶场替换
+- ⏳ 待补：环境清单依赖版本采集、2 个真实论文靶场替换

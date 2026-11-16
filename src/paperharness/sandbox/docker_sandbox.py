@@ -15,6 +15,8 @@ from paperharness.contracts.run import ExecResult, RunRequest
 from paperharness.sandbox.base import SandboxClosedError, SandboxUnavailableError
 
 TAIL_LIMIT = 2000
+TAIL_BYTES = 16384  # 尾部滚动窗口字节数，覆盖 2000 字符的最坏 UTF-8 编码
+MAX_LOG_BYTES = 50 * 1024 * 1024  # 单条流上限：超出截断并在日志文件里打标
 CONTAINER_USER = "1000:1000"
 WORKSPACE_MOUNT = "/workspace"
 MEMORY_LIMIT = "2g"
@@ -49,6 +51,8 @@ class DockerSandboxSession:
         self._exec_seq = 0
         self._network_enabled = True
         self._closed = False
+        # close() 清理失败不抛异常，但必须记录在这里，由 Harness 写事件和清单。
+        self.cleanup_errors: list[str] = []
 
         docker = _load_docker_module()
         self._docker = docker
@@ -142,17 +146,18 @@ class DockerSandboxSession:
         started = time.monotonic()
         self._exec_seq += 1
         seq = f"{self._exec_seq:03d}"
+        out_path = self.logs_dir / f"exec-{seq}.out"
+        err_path = self.logs_dir / f"exec-{seq}.err"
+        stdout_path = f"logs/{out_path.name}"
+        stderr_path = f"logs/{err_path.name}"
+        # 先建空文件：超时提前返回时日志路径也一定存在（契约：完整输出只进日志文件）
+        out_path.touch()
+        err_path.touch()
         holder: dict[str, Any] = {}
 
         def _run() -> None:
             try:
-                holder["exec"] = self._container.exec_run(
-                    cmd=list(command),
-                    workdir=WORKSPACE_MOUNT,
-                    user=CONTAINER_USER,
-                    environment=dict(self._environment),
-                    demux=True,
-                )
+                self._exec_streaming(command, out_path, err_path, holder)
             except self._docker.errors.DockerException as exc:
                 holder["error"] = exc
 
@@ -160,10 +165,9 @@ class DockerSandboxSession:
         thread.start()
         thread.join(timeout_seconds)
         duration_ms = int((time.monotonic() - started) * 1000)
-        stdout_path, stderr_path = self._write_logs(seq, b"", b"")
 
         if thread.is_alive():
-            self._kill()
+            self._kill_quietly()
             self._closed = True
             return ExecResult(
                 exit_code=None,
@@ -175,18 +179,71 @@ class DockerSandboxSession:
         if "error" in holder:
             raise SandboxUnavailableError(f"exec failed: {holder['error']}")
 
-        exit_code, output = holder["exec"].exit_code, holder["exec"].output
-        stdout, stderr = output[0] or b"", output[1] or b""
-        stdout_path, stderr_path = self._write_logs(seq, stdout, stderr)
         return ExecResult(
-            exit_code=exit_code,
+            exit_code=holder.get("exit_code"),
             timed_out=False,
             duration_ms=duration_ms,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
-            stdout_tail=_tail(stdout.decode(errors="replace")),
-            stderr_tail=_tail(stderr.decode(errors="replace")),
+            stdout_tail=holder.get("stdout_tail", ""),
+            stderr_tail=holder.get("stderr_tail", ""),
         )
+
+    def _exec_streaming(
+        self,
+        command: list[str],
+        out_path: Path,
+        err_path: Path,
+        holder: dict[str, Any],
+    ) -> None:
+        """流式执行：输出边读边写日志文件，不整段进内存。
+
+        单条流超过 MAX_LOG_BYTES 后停止写文件（继续排空管道避免 exec 卡死），
+        并在日志里打截断标记；内存只保留尾部滚动窗口。
+        """
+        created = self._client.api.exec_create(
+            container=self._container.id,
+            cmd=list(command),
+            stdout=True,
+            stderr=True,
+            user=CONTAINER_USER,
+            environment=dict(self._environment),
+            workdir=WORKSPACE_MOUNT,
+        )
+        exec_id = created["Id"]
+        written = {"stdout": 0, "stderr": 0}
+        truncated = {"stdout": False, "stderr": False}
+        tails = {"stdout": b"", "stderr": b""}
+        handles = {
+            "stdout": out_path.open("ab"),
+            "stderr": err_path.open("ab"),
+        }
+        try:
+            stream = self._client.api.exec_start(exec_id, stream=True, demux=True)
+            for chunk in stream:
+                if not isinstance(chunk, tuple) or len(chunk) != 2:
+                    continue
+                for name, data in zip(("stdout", "stderr"), chunk):
+                    if not data:
+                        continue
+                    written[name] += len(data)
+                    if written[name] > MAX_LOG_BYTES:
+                        if not truncated[name]:
+                            truncated[name] = True
+                            handles[name].write(
+                                f"\n[paperharness] {name} truncated at "
+                                f"{MAX_LOG_BYTES} bytes\n".encode()
+                            )
+                        continue  # 丢弃超额字节，但继续读，防止管道写满阻塞 exec
+                    handles[name].write(data)
+                    tails[name] = (tails[name] + data)[-TAIL_BYTES:]
+        finally:
+            for handle in handles.values():
+                handle.close()
+        inspect = self._client.api.exec_inspect(exec_id)
+        holder["exit_code"] = inspect.get("ExitCode")
+        holder["stdout_tail"] = _tail(tails["stdout"].decode(errors="replace"))
+        holder["stderr_tail"] = _tail(tails["stderr"].decode(errors="replace"))
 
     def set_network(self, enabled: bool) -> None:
         if self._closed:
@@ -230,41 +287,65 @@ class DockerSandboxSession:
         return (stdout or b"").decode(errors="replace")
 
     def close(self) -> None:
+        """幂等清理；失败不抛异常（不能盖掉 run 的真实结果），但必须记入 cleanup_errors。"""
         if self._closed:
             return
         self._closed = True
-        self._kill()
-        self._remove_container()
-        self._remove_network()
+        try:
+            self._container.reload()
+            if self._container.status == "running":
+                self._container.kill()
+        except self._docker.errors.NotFound:
+            pass  # 容器已不存在，无需 kill
+        except self._docker.errors.DockerException as exc:
+            self._record_cleanup_failure(f"kill failed: {exc}")
+        try:
+            self._container.remove(force=True)
+        except self._docker.errors.NotFound:
+            pass
+        except self._docker.errors.DockerException as exc:
+            self._record_cleanup_failure(f"container remove failed: {exc}")
+        try:
+            self._network.remove()
+        except self._docker.errors.NotFound:
+            pass
+        except self._docker.errors.DockerException as exc:
+            self._record_cleanup_failure(f"network remove failed: {exc}")
+        self._verify_no_residue()
 
     # --------------------------------------------------------------- cleanup
 
-    def _kill(self) -> None:
+    def _kill_quietly(self) -> None:
+        """超时强杀：尽力而为，不记录（close 后的残留核对才是权威判定）。"""
         try:
             self._container.kill()
         except self._docker.errors.DockerException:
             pass
 
-    def _remove_container(self) -> None:
+    def _verify_no_residue(self) -> None:
+        """close 后按 label 核对：安全测试清单第 3 节的判据，也兜底捕获静默残留。"""
         try:
-            self._container.remove(force=True)
-        except self._docker.errors.DockerException:
-            pass
+            leftovers = self._client.containers.list(
+                all=True, filters={"label": f"paperharness.run_id={self.run_id}"}
+            )
+            if leftovers:
+                self._record_cleanup_failure(
+                    f"{len(leftovers)} container(s) still present after close"
+                )
+            networks = self._client.networks.list(
+                filters={"label": f"paperharness.run_id={self.run_id}"}
+            )
+            if networks:
+                self._record_cleanup_failure(
+                    f"{len(networks)} network(s) still present after close"
+                )
+        except self._docker.errors.DockerException as exc:
+            self._record_cleanup_failure(f"post-close residue check failed: {exc}")
 
-    def _remove_network(self) -> None:
-        try:
-            self._network.remove()
-        except self._docker.errors.DockerException:
-            pass
+    def _record_cleanup_failure(self, message: str) -> None:
+        self.cleanup_errors.append(message)
 
     # ------------------------------------------------------------------ logs
-
-    def _write_logs(self, seq: str, stdout: bytes, stderr: bytes) -> tuple[str, str]:
-        out_path = self.logs_dir / f"exec-{seq}.out"
-        err_path = self.logs_dir / f"exec-{seq}.err"
-        out_path.write_bytes(stdout)
-        err_path.write_bytes(stderr)
-        return f"logs/{out_path.name}", f"logs/{err_path.name}"
 
 
 def _tail(text: str) -> str:

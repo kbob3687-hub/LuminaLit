@@ -1,8 +1,35 @@
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, JsonValue
+from pydantic import BaseModel, Field, JsonValue, field_validator
+
+
+def validate_repo_url(url: str) -> str:
+    """安全契约：repo_url 只允许 https:// 公开 Git 地址。
+
+    拒绝本地路径（git clone 支持本地目录）、file://、ssh://、
+    内嵌凭据、空 host、裸 host、query/fragment——防止把宿主机
+    任意目录 clone 进 workspace 再挂进容器。
+    """
+    if not url or any(ord(ch) < 0x20 or ch.isspace() for ch in url):
+        raise ValueError("repo_url must be a non-empty https:// URL without whitespace")
+    parsed = urlsplit(url)
+    if parsed.scheme != "https":
+        raise ValueError(
+            "repo_url must start with https:// "
+            "(local paths, file:// and ssh:// are not allowed)"
+        )
+    if parsed.username or parsed.password:
+        raise ValueError("repo_url must not embed credentials")
+    if not parsed.hostname:
+        raise ValueError("repo_url must include a host")
+    if not parsed.path or parsed.path == "/":
+        raise ValueError("repo_url must point to a repository path, not a bare host")
+    if parsed.query or parsed.fragment:
+        raise ValueError("repo_url must not include query or fragment")
+    return url
 
 
 class RunRequest(BaseModel):
@@ -13,6 +40,11 @@ class RunRequest(BaseModel):
     python_version: Literal["3.10", "3.11"] | None = None
     timeout_seconds: int = Field(default=300, ge=30, le=900)
     max_repairs: int = Field(default=3, ge=0, le=5)
+
+    @field_validator("repo_url")
+    @classmethod
+    def _validate_repo_url(cls, value: str) -> str:
+        return validate_repo_url(value)
 
 
 class RunPlan(BaseModel):

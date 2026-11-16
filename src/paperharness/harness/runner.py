@@ -1,11 +1,18 @@
 import json
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 from paperharness.agent.classifier import UNREPAIRABLE, FailureContext, classify_by_rules
-from paperharness.contracts.run import RunPlan, RunRequest, RunResult, RunState
+from paperharness.contracts.run import (
+    RunPlan,
+    RunRequest,
+    RunResult,
+    RunState,
+    validate_repo_url,
+)
 from paperharness.harness.store import RunStore
 from paperharness.sandbox.base import SandboxClosedError, SandboxSession, SandboxUnavailableError
 
@@ -15,14 +22,25 @@ MAX_ACTIONS_PER_REPAIR = 20
 TOTAL_BUDGET_FACTOR = 3
 TOTAL_BUDGET_GRACE_SECONDS = 60
 TIME_BUDGET_EXHAUSTED = "time_budget_exceeded"
+LLM_UNAVAILABLE = "llm_unavailable"
 
 
 class TimeBudgetExceeded(RuntimeError):
     """本次运行的墙钟预算耗尽。"""
 
 
+class _RunCancelled(RuntimeError):
+    """用户请求取消：在阶段边界抛出，由 run() 收敛到 CANCELLED 终态。"""
+
+
 def git_clone(request: RunRequest, run_dir: Path) -> str:
     """默认 cloner：宿主机 clone 仓库（契约 1.1：沙箱不做任何 git 网络操作）。"""
+    # 防御纵深：即使绕过 API 的 schema 校验，也绝不允许本地路径/file:///
+    # ssh:// 源——git clone 支持本地目录，会把宿主机任意目录搬进容器挂载区。
+    try:
+        validate_repo_url(request.repo_url)
+    except ValueError as exc:
+        raise ValueError(f"invalid repo_url: {exc}") from exc
     workspace = run_dir / "workspace"
     subprocess.run(
         ["git", "clone", request.repo_url, str(workspace)],
@@ -63,6 +81,77 @@ class HarnessRunner:
         self.sandbox_factory = sandbox_factory
         self.cloner = cloner
         self.aci_factory = aci_factory
+        # run_id -> (取消事件, 当前 session)；abort() 由 API 线程跨线程调用。
+        self._active: dict[str, tuple[threading.Event, SandboxSession | None]] = {}
+        self._active_lock = threading.RLock()
+
+    # ----------------------------------------------------------- 取消控制
+
+    def abort(self, run_id: str) -> bool:
+        """请求取消一个运行中的 run（API 线程调用，契约 13.6：终止当前容器）。
+
+        置取消事件 + 立即销毁容器；工作线程在最近的阶段边界收敛到
+        CANCELLED 终态。对未在跑的 run 返回 False。
+        """
+        with self._active_lock:
+            entry = self._active.get(run_id)
+        if entry is None:
+            return False
+        event, session = entry
+        event.set()
+        if session is not None:
+            try:
+                session.close()  # 幂等；杀容器让阻塞中的 execute 尽快返回
+            except Exception:  # noqa: BLE001, S110 - 取消路径尽力而为
+                pass
+        return True
+
+    def _register_active(
+        self, run_id: str, cancel: threading.Event, session: SandboxSession | None = None
+    ) -> None:
+        with self._active_lock:
+            self._active[run_id] = (cancel, session)
+
+    def _unregister_active(self, run_id: str) -> None:
+        with self._active_lock:
+            self._active.pop(run_id, None)
+
+    def _check_cancel(self, run_id: str) -> None:
+        """阶段边界检查：用户已取消就立即停止，不再消耗预算和 LLM 调用。"""
+        if self._cancel_requested(run_id):
+            raise _RunCancelled()
+
+    def _cancel_requested(self, run_id: str) -> bool:
+        with self._active_lock:
+            entry = self._active.get(run_id)
+        return entry is not None and entry[0].is_set()
+
+    def _cancelled(self, run_id: str, session, attempts: int) -> RunResult:
+        """CANCELLED 终态：不 export 不到的 patch 就留空，不留僵尸状态。"""
+        result = RunResult(
+            run_id=run_id,
+            outcome="cancelled",
+            verified=False,
+            attempts=attempts,
+            patch_url=f"/api/runs/{run_id}/patch",
+            report_url=f"/api/runs/{run_id}/report",
+        )
+        patch = ""
+        if session is not None:
+            try:
+                patch = session.export_diff()
+            except Exception:  # noqa: BLE001 - 会话可能已被 abort 关闭
+                patch = ""
+        self.store.write_text(run_id, "patch.diff", patch)
+        self.store.write_text(
+            run_id, "report.md", "# Report\n\noutcome=cancelled\nverified=False\n"
+        )
+        self.store.write_status(run_id, RunState.CANCELLED, {})
+        self.store.append_event(
+            run_id, RunState.CANCELLED, "final", "run cancelled", {"outcome": "cancelled"}
+        )
+        self.store.write_result(run_id, result)
+        return result
 
     def run(self, run_id: str, request: RunRequest) -> RunResult:
         run_dir = self.store.run_dir(run_id)
@@ -73,16 +162,23 @@ class HarnessRunner:
             + request.timeout_seconds * TOTAL_BUDGET_FACTOR
             + TOTAL_BUDGET_GRACE_SECONDS
         )
+        cancel = threading.Event()
+        self._register_active(run_id, cancel)
+        attempts = 1
         try:
             session = self.sandbox_factory(request, run_dir)
         except SandboxUnavailableError as exc:
+            self._unregister_active(run_id)
             return self._fail(run_id, "service_interrupted", f"sandbox unavailable: {exc}")
+        self._register_active(run_id, cancel, session)
         try:
+            self._check_cancel(run_id)
             self.store.write_status(run_id, RunState.PREPARING, {})
             try:
                 resolved_revision = self.cloner(request, run_dir)
             except Exception as exc:  # noqa: BLE001
                 return self._fail(run_id, "clone_failed", f"clone failed: {exc}")
+            self._check_cancel(run_id)
             self.store.append_event(
                 run_id,
                 RunState.PREPARING,
@@ -91,8 +187,14 @@ class HarnessRunner:
             )
 
             self.store.write_status(run_id, RunState.PLANNING, {})
-            plan = self.llm.propose_run_plan(request)
+            try:
+                plan = self.llm.propose_run_plan(request)
+            except Exception as exc:  # noqa: BLE001 - LLM 网关故障不杀死 worker（设计 18.4）
+                return self._fail(
+                    run_id, LLM_UNAVAILABLE, f"plan generation failed: {exc}", session=session
+                )
             plan = plan.model_copy(update={"resolved_revision": resolved_revision})
+            self._check_cancel(run_id)
             self.store.write_text(run_id, "run_plan.json", plan.model_dump_json(indent=2))
             self.store.append_event(
                 run_id,
@@ -180,18 +282,27 @@ class HarnessRunner:
             )
             self.store.write_result(run_id, result)
             return result
+        except _RunCancelled:
+            return self._cancelled(run_id, session, attempts)
         except TimeBudgetExceeded as exc:
             return self._fail(
                 run_id, TIME_BUDGET_EXHAUSTED, str(exc), outcome="budget_exceeded", session=session
             )
         except SandboxClosedError as exc:
+            if self._cancel_requested(run_id):
+                return self._cancelled(run_id, session, attempts)
             return self._fail(run_id, "timeout", f"sandbox closed: {exc}", session=session)
         except SandboxUnavailableError as exc:
+            if self._cancel_requested(run_id):
+                return self._cancelled(run_id, session, attempts)
             return self._fail(
                 run_id, "service_interrupted", f"sandbox unavailable: {exc}", session=session
             )
         finally:
             session.close()
+            # 清理失败不许吞掉：宁可报出来（事件 + 环境清单 + 报告），不能装没看见。
+            self._record_cleanup_failures(run_id, session)
+            self._unregister_active(run_id)
 
     def _is_verified(self, test, plan: RunPlan, workspace: Path) -> bool:
         if test.exit_code != 0 or test.timed_out:
@@ -225,6 +336,7 @@ class HarnessRunner:
         failure = first_failure
 
         for round_no in range(1, request.max_repairs + 1):
+            self._check_cancel(run_id)
             self.store.write_status(run_id, RunState.DIAGNOSING, {"attempt": round_no})
             category = self.llm.classify_failure(self._context(failure))
             self.store.append_event(
@@ -242,6 +354,7 @@ class HarnessRunner:
             for _ in range(MAX_ACTIONS_PER_REPAIR):
                 action = self.llm.propose_action(history)
                 observation = aci.execute(action)
+                self._check_cancel(run_id)
                 history.append(observation)
                 self.store.append_event(
                     run_id,
@@ -300,6 +413,7 @@ class HarnessRunner:
         install = session.execute(
             INSTALL_COMMAND, timeout_seconds=self._step_timeout(request, deadline)
         )
+        self._check_cancel(run_id)
         self.store.append_event(
             run_id,
             RunState.INSTALLING,
@@ -313,6 +427,7 @@ class HarnessRunner:
         self.store.write_status(run_id, RunState.TESTING, {"attempt": attempt} if attempt else {})
         session.set_network(False)
         test = session.execute(plan.command, timeout_seconds=self._step_timeout(request, deadline))
+        self._check_cancel(run_id)
         self.store.append_event(
             run_id,
             RunState.TESTING,
@@ -337,6 +452,43 @@ class HarnessRunner:
         if remaining <= 1:
             raise TimeBudgetExceeded("total wall-clock budget exhausted")
         return max(1, min(request.timeout_seconds, remaining))
+
+    def _record_cleanup_failures(self, run_id: str, session: SandboxSession) -> None:
+        """沙箱清理失败必须可见：写 cleanup_failed 事件，并在环境清单/报告里记数。
+
+        不改变 run 的 outcome（结果已定），但硬指标"容器清理失败为 0"
+        依赖这里的记数才能被审计。
+        """
+        errors = list(getattr(session, "cleanup_errors", None) or [])
+        if not errors:
+            return
+        status = self.store.read_status(run_id) or {}
+        try:
+            state = RunState(status.get("state", RunState.FAILED.value))
+        except ValueError:
+            state = RunState.FAILED
+        self.store.append_event(
+            run_id,
+            state,
+            "cleanup_failed",
+            "; ".join(errors)[:2000],
+            {"count": len(errors), "failures": [error[:300] for error in errors]},
+        )
+        environment: dict = {}
+        existing = self.store.read_text(run_id, "environment.json")
+        if existing:
+            try:
+                environment = json.loads(existing)
+            except json.JSONDecodeError:
+                environment = {}
+        environment["cleanup_failures"] = len(errors)
+        self.store.write_text(
+            run_id,
+            "environment.json",
+            json.dumps(environment, ensure_ascii=False, indent=2),
+        )
+        report = self.store.read_text(run_id, "report.md") or "# Report\n\n"
+        self.store.write_text(run_id, "report.md", report + f"cleanup_failures={len(errors)}\n")
 
     def _fail(
         self,
