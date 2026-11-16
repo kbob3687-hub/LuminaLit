@@ -1,0 +1,6 @@
+# 真实论文复现样例的锁定依赖（容器 Python 3.10+ 可用）
+#
+# 两个包都要求 numpy>=2.0，UMAP 还要求 numba>=0.60，而 numba 对 numpy 有版本上界，
+# 这一条是整个依赖链最容易炸的地方：容器里务必 install 完再跑一次完整 freeze。
+pysindy==2.1.0
+umap-learn==0.6.0
