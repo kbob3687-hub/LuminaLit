@@ -88,6 +88,48 @@ class RunStore:
                 self._read_json(self.run_dir(run_id) / "request.json")
             )
 
+    def recover_interrupted(self) -> list[str]:
+        """服务启动时调用（设计 6.3）：非终态 run 一律标 failed/service_interrupted。
+
+        不自动续跑、不假装任务仍在执行；幂等，终态 run 不动。
+        """
+        terminal = {
+            RunState.SUCCEEDED.value,
+            RunState.FAILED.value,
+            RunState.CANCELLED.value,
+        }
+        recovered: list[str] = []
+        if not self.root.exists():
+            return recovered
+        for run_dir in sorted(path for path in self.root.iterdir() if path.is_dir()):
+            run_id = run_dir.name
+            status = self.read_status(run_id)
+            if not status or status.get("state") in terminal:
+                continue
+            self.write_status(
+                run_id, RunState.FAILED, {"failure_category": "service_interrupted"}
+            )
+            self.append_event(
+                run_id,
+                RunState.FAILED,
+                "final",
+                "run failed: service_interrupted",
+                {"failure_category": "service_interrupted"},
+            )
+            self.write_result(
+                run_id,
+                RunResult(
+                    run_id=run_id,
+                    outcome="failed",
+                    verified=False,
+                    attempts=1,
+                    failure_category="service_interrupted",
+                    report_url=f"/api/runs/{run_id}/report",
+                ),
+            )
+            recovered.append(run_id)
+        return recovered
+
     def write_result(self, run_id: str, result: RunResult) -> None:
         with self._lock:
             self._write_json(

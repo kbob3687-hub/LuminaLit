@@ -89,14 +89,21 @@ class OpenAICompatibleLLM:
         return json.loads(response.json()["choices"][0]["message"]["content"])
 
     def propose_run_plan(self, request: RunRequest) -> RunPlan:
-        data = self._chat_json(
-            "根据仓库信息给出运行计划，只输出 JSON："
-            '{"resolved_revision":"<commit>","python_version":"3.10|3.11",'
-            '"command":["python","main.py"],"expected_artifact":"out.txt 或 null",'
-            '"source":"user|target_manifest|repository_analysis"}',
-            request.model_dump_json(),
-        )
-        return RunPlan.model_validate(data)
+        last: Exception | None = None
+        for _ in range(2):  # 设计 18.4：单次失败做一次短重试，持续失败抛给 runner 记 llm_unavailable
+            try:
+                data = self._chat_json(
+                    "根据仓库信息给出运行计划，只输出 JSON："
+                    '{"resolved_revision":"<commit>","python_version":"3.10|3.11",'
+                    '"command":["python","main.py"],"expected_artifact":"out.txt 或 null",'
+                    '"source":"user|target_manifest|repository_analysis"}',
+                    request.model_dump_json(),
+                )
+                return RunPlan.model_validate(data)
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+        assert last is not None  # 循环至少执行一次
+        raise last
 
     def classify_failure(self, context: FailureContext) -> str:
         hit = classify_by_rules(context)
