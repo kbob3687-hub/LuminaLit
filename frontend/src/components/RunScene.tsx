@@ -5,6 +5,7 @@ import { labelOf, type RunEvent, type RunState, type RunStatus } from "../types"
 import {
   aciTrace,
   buildLoop,
+  buildProgress,
   buildRows,
   buildStages,
   isActionEvent,
@@ -14,6 +15,8 @@ import {
 } from "../runModel";
 import { StageTrack } from "./StageTrack";
 import { LoopStrip } from "./LoopStrip";
+import { ProgressBand } from "./ProgressBand";
+import { ReportPanel } from "./ReportPanel";
 import { Drawer } from "./Drawer";
 import { AciPanel, LoopPanel, PlanPanel, StagePanel } from "./DrawerPanels";
 
@@ -32,6 +35,7 @@ type Panel =
   | { type: "loop" }
   | { type: "stage"; id: StageView["id"] }
   | { type: "plan" }
+  | { type: "report" }
   | null;
 
 /** 截图模式：关掉入场动画，避免无头渲染抓到 opacity:0 的中间帧。 */
@@ -44,9 +48,24 @@ interface Props {
   events: RunEvent[];
   onCancel?: () => void;
   cancelling?: boolean;
+  /**
+   * 轮询自身出错（网络断、后端 5xx）。必须和"任务卡住"区分开：
+   * 轮询断了界面会停在最后一帧，看上去和任务没进展一模一样。
+   */
+  pollError?: string | null;
+  /** 本次运行的靶场名（用户选的那张卡）。直链进来看不到，就留空。 */
+  targetName?: string;
 }
 
-export function RunScene({ mode, status, events, onCancel, cancelling }: Props) {
+export function RunScene({
+  mode,
+  status,
+  events,
+  onCancel,
+  cancelling,
+  pollError,
+  targetName,
+}: Props) {
   const [panel, setPanel] = useState<Panel>(() => {
     // 演示/截图直链：?panel=aci&seq=7 / ?panel=loop（只读，不影响业务逻辑）
     const q = new URLSearchParams(window.location.search);
@@ -54,16 +73,20 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
     if (which === "aci") return { type: "aci", seq: Number(q.get("seq") ?? 0) };
     if (which === "loop") return { type: "loop" };
     if (which === "plan") return { type: "plan" };
+    if (which === "report") return { type: "report" };
     return null;
   });
   const state: RunState = status?.state ?? "queued";
   const replay = mode === "replay";
   /** 有没有"听到"后端说话。回放模式下本地时间轴就是数据源，恒为真。 */
   const connected = replay || status !== null;
+  /** 后端已经收尾：终态之后再显示"当前阶段 XX 已持续 0s"就成了假信息。 */
+  const terminal = ["succeeded", "failed", "cancelled"].includes(state);
 
   const stages = useMemo(() => buildStages(events, status?.state), [events, status?.state]);
   const loop = useMemo(() => buildLoop(events, status?.state), [events, status?.state]);
   const rows = useMemo(() => buildRows(events), [events]);
+  const runId = status?.run_id ?? null;
 
   /**
    * 当前状态已持续多久（本地观测，不是后端时间戳——契约里没有）。
@@ -91,6 +114,14 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
 
   const stageElapsedMs = Math.max(0, Date.now() - stateSince.current + tick * 0);
   const silent = connected && rows.length === 0 && stageElapsedMs > 4000;
+
+  // 整体进度：已完成部分是事实，剩余部分是经验估算（runModel.buildProgress）。
+  // 依赖 tick 才会每秒重算——否则倒计时会停在进入页面那一刻。
+  const progress = useMemo(
+    () => buildProgress(events, stages, status?.state),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [events, stages, status?.state, tick],
+  );
 
   const blockedCount = rows.filter((r) => r.blocked).length;
   const reviewCount = rows.filter((r) => r.name !== "install" && r.name !== "test").length;
@@ -151,6 +182,16 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
           PaperHarness
         </div>
 
+        {/* 靶场名来自用户选的那张卡，不写死；直链进来没有名字就不显示 */}
+        {targetName && (
+          <div
+            className="max-w-[220px] truncate rounded-[5px] border border-rule-hi bg-white/[.03] px-2 py-0.5 font-mono text-[10.5px] text-ink-mid"
+            title={targetName}
+          >
+            {targetName}
+          </div>
+        )}
+
         <div className="font-mono text-[11px] tracking-[.04em] text-ink-muted">
           {status?.run_id ? `run_${status.run_id.slice(0, 8)}` : "run_—"}
         </div>
@@ -184,10 +225,26 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
         <div className="font-mono text-[10px] text-ink-muted">
           {replay
             ? `${events.length} 事件 · 离线回放（未连后端）`
-            : connected
-              ? `${events.length} 事件 · 1s 轮询`
-              : "等待首个响应"}
+            : !connected
+              ? "等待首个响应"
+              : terminal
+                ? `${events.length} 事件 · 轮询已停（终态）`
+                : `${events.length} 事件 · 1s 轮询`}
         </div>
+        <button
+          onClick={() => setPanel({ type: "report" })}
+          className={clsx(
+            "cursor-pointer rounded-[7px] border px-4 py-2 text-xs transition-colors",
+            terminal
+              ? state === "succeeded"
+                ? "border-pass/50 bg-pass/[.10] text-pass hover:bg-pass/[.18]"
+                : "border-reject/45 bg-reject/[.08] text-reject hover:bg-reject/[.16]"
+              : "border-rule-hi bg-white/[.03] text-ink-mid hover:border-ink-muted hover:text-ink",
+          )}
+          title="report.md / patch.diff / result.json，可下载"
+        >
+          结果报告
+        </button>
         <button
           onClick={() => setPanel({ type: "plan" })}
           className="cursor-pointer rounded-[7px] border border-rule-hi bg-white/[.03] px-4 py-2 text-xs text-ink-mid transition-colors hover:border-ink-muted hover:text-ink"
@@ -242,20 +299,46 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
             {replay ? "离线回放 · 逐条事件时间轴" : "真实运行 · 状态与事件来自后端"}
             {" · "}
             <b className="font-medium text-warn">{blockedCount} 次拦截</b>
-            {activeStage && (
+            {terminal ? (
+              <>
+                {" · 已结束 · 共 "}
+                <b className="font-medium text-ink-mid">{events.length}</b> 条事件
+              </>
+            ) : activeStage ? (
               <>
                 {" · 当前阶段 "}
                 <b className="font-medium text-ink-mid">{activeStage.label}</b>
                 {` 已持续 ${fmtSec(stageElapsedMs)}`}
               </>
-            )}
-            {silent && (
+            ) : null}
+            {silent && !terminal && (
               <>
                 {" · "}
-                <b className="font-medium text-warn">后端本阶段无新事件</b>
+                <b className="font-medium text-warn">
+                  {state === "preparing"
+                    ? "git clone 进行中，此阶段后端不写动作事件"
+                    : state === "planning"
+                      ? "正在生成运行计划，此阶段后端不写动作事件"
+                      : "后端本阶段无新事件"}
+                </b>
               </>
             )}
           </p>
+
+          {/* 轮询断了要说清楚：否则界面停在最后一帧，看起来像任务卡住 */}
+          {pollError && !replay && (
+            <div className="mt-3 max-w-[74ch] rounded-[9px] border border-warn/35 bg-warn/[.06] px-3.5 py-2.5">
+              <div className="font-mono text-[10px] tracking-[.16em] text-warn/90 uppercase">
+                界面与后端的连接中断（§4.2 轮询已停）
+              </div>
+              <p className="mt-1 text-[12.5px] leading-relaxed text-ink-mid">
+                最后一次同步停在 <b className="text-ink">{state}</b>，
+                {events.length} 条事件。任务本身可能仍在后端执行，
+                刷新页面会重新拉取，不是任务卡住。
+                <span className="mt-1 block font-mono text-[11px] text-warn/80">{pollError}</span>
+              </p>
+            </div>
+          )}
 
           {isFailed && (
             <div className="mt-3 max-w-[74ch] rounded-[9px] border border-reject/30 bg-reject/[.055] px-3.5 py-2.5">
@@ -263,6 +346,26 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
                 失败原因 · {failureCategory || "未分类"}
               </div>
               <p className="mt-1 text-[12.5px] leading-relaxed text-ink-mid">{failureNote}</p>
+            </div>
+          )}
+
+          {/* 终态一定有三份文件可交付：报告 / 补丁 / 结果 JSON */}
+          {terminal && (
+            <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
+              <button
+                onClick={() => setPanel({ type: "report" })}
+                className={clsx(
+                  "cursor-pointer rounded-[7px] border px-3.5 py-1.5 font-mono text-[11.5px] transition-colors",
+                  state === "succeeded"
+                    ? "border-pass/45 bg-pass/[.10] text-pass hover:bg-pass/[.18]"
+                    : "border-reject/40 bg-reject/[.07] text-reject hover:bg-reject/[.14]",
+                )}
+              >
+                打开结果报告 →
+              </button>
+              <span className="font-mono text-[10.5px] leading-relaxed text-ink-muted">
+                report.md · patch.diff · result.json 三份文件，可预览、复制、下载
+              </span>
             </div>
           )}
         </div>
@@ -273,6 +376,9 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
           <Stat value={0} label="逃逸" tone="good" />
         </div>
       </section>
+
+      {/* ── 整体进度：百分比 + 倒计时 + 分段条 ── */}
+      <ProgressBand p={progress} state={state} />
 
       {/* ── 3D 阶段轨道 ── */}
       <section className="relative shrink-0 overflow-hidden border-b border-rule px-6 pt-7 pb-6 [perspective:1400px] [perspective-origin:50%_42%]">
@@ -354,6 +460,18 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
               </motion.button>
             ))}
           </AnimatePresence>
+
+          {/* 动作少不等于卡住：把"还有多少条非动作事件"摆出来，省得以为是没跑 */}
+          {rows.length > 0 && events.length > rows.length && (
+            <div className="mt-3 flex flex-wrap items-baseline gap-x-2 gap-y-1 border-t border-white/[.05] pt-3 font-mono text-[10.5px] leading-relaxed text-ink-muted">
+              <span>
+                另有 <b className="text-ink-mid">{events.length - rows.length}</b> 条事件不是动作
+              </span>
+              <span className="text-ink-muted/60">
+                （clone、计划解析、阶段迁移），可在上方阶段条里逐格查看——动作流本来就只收动作。
+              </span>
+            </div>
+          )}
         </div>
 
         <aside className="min-h-0 overflow-y-auto border-l border-rule bg-gradient-to-b from-white/[.018] to-transparent p-5">
@@ -394,7 +512,10 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
                   >
                     {r.blocked ? "✕" : "✓"}
                   </span>
-                  <span className="w-[74px] shrink-0 truncate font-mono text-[10.5px] text-ink-mid">
+                  <span
+                    className="w-[92px] shrink-0 truncate font-mono text-[10.5px] text-ink-mid"
+                    title={r.name}
+                  >
                     {r.name.replace("_requirement", "").replace("_exact", "")}
                   </span>
                   <span
@@ -402,6 +523,7 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
                       "min-w-0 flex-1 truncate font-mono text-[10.5px]",
                       r.blocked ? "text-reject" : "text-ink-muted",
                     )}
+                    title={r.target || r.result}
                   >
                     {r.target || r.result}
                   </span>
@@ -414,6 +536,7 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
       {/* ── 抽屉 ── */}
       <Drawer
         open={panel !== null}
+        wide={panel?.type === "report" || panel?.type === "plan"}
         title={drawerTitle(panel, openedEvent, stages, loop)}
         subtitle={drawerSubtitle(panel, openedEvent)}
         onClose={() => setPanel(null)}
@@ -433,6 +556,7 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
           return <StagePanel stage={stage} events={events} state={state} />;
         })()}
         {panel?.type === "plan" && <PlanPanel status={status} />}
+        {panel?.type === "report" && <ReportPanel runId={runId} status={status} />}
       </Drawer>
     </div>
   );
@@ -449,6 +573,7 @@ function drawerTitle(
     return loop.rounds.length ? `自愈回环 · ${loop.rounds.length} 轮` : "自愈回环";
   if (panel?.type === "stage")
     return `阶段详情 · ${stages.find((s) => s.id === panel.id)?.label ?? panel.id}`;
+  if (panel?.type === "report") return "结果报告";
   return "运行计划与结果";
 }
 
@@ -456,6 +581,7 @@ function drawerSubtitle(panel: Panel, event: RunEvent | undefined): string | und
   if (panel?.type === "aci" && event)
     return isBlockedEvent(event) ? "校验失败：零副作用拦截" : "校验通过：动作已执行";
   if (panel?.type === "stage") return "该阶段全部事件（后端原样）";
+  if (panel?.type === "report") return "report.md · patch.diff · result.json（后端落盘原文）";
   return undefined;
 }
 
@@ -487,46 +613,52 @@ function ActionLine({ row }: { row: ActionRow }) {
   return (
     <>
       <motion.div
-        whileHover={{ x: 4, backgroundColor: "rgb(255 255 255 / .045)" }}
-        transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+        whileHover={{ x: 3, backgroundColor: "rgb(255 255 255 / .04)" }}
+        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
         className={clsx(
-          "relative -mx-[13px] mb-0.5 grid grid-cols-[74px_20px_166px_minmax(0,1fr)_116px] items-center gap-[11px] rounded-md px-[13px] py-[9px] font-mono text-[12.5px]",
+          // 列宽按"时间 图标 动作 参数 结果"分配：结果列用 max-content，
+          // 宁可挤参数列也不截断结论（`20 matches` 截成 `20 ma…` 就没信息了）
+          "relative -mx-[13px] grid grid-cols-[62px_15px_146px_minmax(0,1fr)_minmax(104px,max-content)] items-center gap-x-[10px] rounded-[5px] border-b border-white/[.045] px-[13px] py-[8px] font-mono text-[12px] last:border-b-0",
           row.blocked &&
-            "-ml-[13px] bg-gradient-to-r from-reject/[.11] to-reject/[.03] pl-[15px] shadow-[inset_2px_0_0_var(--color-reject)] hover:from-reject/[.19] hover:to-reject/[.05]",
+            "border-b-reject/15 bg-gradient-to-r from-reject/[.11] to-reject/[.02] pl-[15px] shadow-[inset_2px_0_0_var(--color-reject)] hover:from-reject/[.18] hover:to-reject/[.04]",
         )}
       >
-        <span className="text-[11px] tabular-nums text-ink-muted">{row.ts}</span>
+        <span className="text-[10.5px] tabular-nums text-ink-muted/85">{row.ts}</span>
         <span
           className={clsx(
-            "text-center text-[13px]",
-            row.kind === "reject" ? "font-bold text-reject" : "text-ink-muted",
+            "text-center text-[12px]",
+            row.kind === "reject" ? "font-bold text-reject" : "text-ink-muted/70",
           )}
         >
           {sym}
         </span>
-        <span className="truncate text-ink">{row.name}</span>
+        <span className="truncate text-[11.5px] text-ink" title={row.name}>
+          {row.name}
+        </span>
         <span
           className={clsx(
-            "truncate text-xs",
+            "truncate text-[11.5px]",
             row.blocked ? "text-[rgb(255_180_170_/_0.9)]" : "text-ink-mid",
           )}
+          title={row.target}
         >
           {row.target}
         </span>
         <span
           className={clsx(
-            "truncate text-right text-[11.5px]",
+            "max-w-[300px] justify-self-end truncate text-right text-[11.5px] tabular-nums",
             row.kind === "reject" && "font-semibold text-reject",
             row.kind === "ok" && "text-pass",
             row.kind === "call" && "text-ink-muted",
           )}
+          title={row.result}
         >
           {row.result}
         </span>
       </motion.div>
 
       {row.reason && (
-        <div className="mb-0.5 -mx-[13px] flex items-baseline gap-2.5 rounded-b-md px-[13px] pt-1.5 pb-2.5 pl-10 font-mono text-[11px] leading-relaxed text-[rgb(255_140_128_/_0.9)]">
+        <div className="mb-0.5 -mx-[13px] flex items-baseline gap-2.5 rounded-b-md px-[13px] pt-1 pb-2 pl-[87px] font-mono text-[10.5px] leading-relaxed text-[rgb(255_140_128_/_0.9)]">
           <span className="text-reject/50">└</span>
           <span>{row.reason}</span>
         </div>

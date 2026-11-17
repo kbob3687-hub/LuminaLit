@@ -13,9 +13,28 @@ type Scene = "select" | "welcome" | "run";
 /** 截图模式下把所有过渡时长压成 0，避免无头渲染抓到半透明中间帧。 */
 const STILL = new URLSearchParams(window.location.search).get("still") === "1";
 
+/**
+ * 观测者名字：存在浏览器本地，不再写死一个人名。
+ *
+ * 之前 WelcomeScene 直接 `<WelcomeScene userName="嘉豪" />`，换个人用就变成
+ * 别人的名字。现在留空就用「观测者」兜底，在选靶场页可以改成自己的名字。
+ */
+const NAME_KEY = "ph.observer";
+const FALLBACK_NAME = "观测者";
+
+function readName(): string {
+  try {
+    return localStorage.getItem(NAME_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 export default function App() {
   const [scene, setScene] = useState<Scene>("select");
-  const [paper, setPaper] = useState({ name: "PySINDy", id: "paper-pysindy" });
+  /** 靶场名不再是硬编码的 "PySINDy"：默认空，由用户点的那张卡决定。 */
+  const [paper, setPaper] = useState({ name: "", id: "" });
+  const [observer, setObserver] = useState(readName);
   const [bursts, setBursts] = useState<ParticleBurst[]>([]);
   const [runId, setRunId] = useState<string | null>(() => {
     // ?run=<id> 直接盯一个已存在的 run（调试/答辩演示用，不经过选择页）
@@ -97,6 +116,19 @@ export default function App() {
     setBursts([{ x, y, color, count: n, speed: 2.6, life: 70 }]);
   }, []);
 
+  /** 改名即时生效并落盘；空值回落到默认称谓，避免欢迎页出现「欢迎您，」。 */
+  const rename = useCallback((v: string) => {
+    setObserver(v);
+    try {
+      localStorage.setItem(NAME_KEY, v);
+    } catch {
+      /* 隐私模式下写不进去，不影响本次会话 */
+    }
+  }, []);
+
+  /** 真正显示的名字：留空时用「观测者」，不硬编码任何具体人名。 */
+  const displayName = observer.trim() || FALLBACK_NAME;
+
   // 进入运行场景后：拦截行持续喷粒子
   useEffect(() => {
     if (scene !== "run") return;
@@ -114,16 +146,17 @@ export default function App() {
     };
   }, [scene, fire]);
 
-  // 选论文 / 仓库 → 真接口创建 run → 欢迎页 → 运行页
-  const pick = async (p: { name: string; id: string; repo: string }) => {
+  // 选靶场 / 仓库 → 真接口创建 run → 欢迎页 → 运行页
+  const pick = async (p: { name: string; id: string; repo: string; revision?: string }) => {
     setPaper({ name: p.name, id: p.id });
     setPickError(null);
 
     if (!demo) {
-      // 契约 §4.1：POST /api/runs 只接受 repo_url，202 返回 run_id
+      // 契约 §4.1：POST /api/runs 只接受 repo_url，202 返回 run_id；
+      // revision 用来命中同一仓库下的具体靶场，见 src/targets.ts 的说明。
       setCreating(true);
       try {
-        const res = await createRun({ repo_url: p.repo });
+        const res = await createRun({ repo_url: p.repo, revision: p.revision });
         setRunId(res.run_id);
       } catch (err) {
         const e = err as ApiError;
@@ -160,13 +193,20 @@ export default function App() {
       <AnimatePresence mode="wait">
         {scene === "select" && (
           <SceneShell key="select">
-            <SelectScene onPick={pick} disabled={creating} error={pickError} />
+            <SelectScene
+              onPick={pick}
+              disabled={creating}
+              error={pickError}
+              demo={demo}
+              observer={observer}
+              onObserver={rename}
+            />
           </SceneShell>
         )}
 
         {scene === "welcome" && (
           <SceneShell key="welcome">
-            <WelcomeScene paperName={paper.name} userName="嘉豪" />
+            <WelcomeScene paperName={paper.name || "目标仓库"} userName={displayName} />
           </SceneShell>
         )}
 
@@ -176,6 +216,8 @@ export default function App() {
               mode={mode}
               status={status}
               events={events}
+              targetName={paper.name || undefined}
+              pollError={demo ? null : live.error}
               cancelling={cancelling}
               onCancel={async () => {
                 if (!runId) return;

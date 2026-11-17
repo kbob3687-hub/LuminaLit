@@ -12,12 +12,15 @@ export function Drawer({
   subtitle,
   onClose,
   children,
+  wide,
 }: {
   open: boolean;
   title: string;
   subtitle?: string;
   onClose: () => void;
   children: React.ReactNode;
+  /** 报告 / 计划这类含长文本或 diff 的面板需要更宽，否则只能横向滚。 */
+  wide?: boolean;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -41,7 +44,11 @@ export function Drawer({
             onClick={onClose}
           />
           <motion.aside
-            className="absolute inset-y-0 right-0 flex w-[min(560px,94vw)] flex-col border-l border-rule-hi bg-surface/95 shadow-[-30px_0_80px_-30px_rgb(0_0_0_/_0.9)] backdrop-blur-xl"
+            className={
+              wide
+                ? "absolute inset-y-0 right-0 flex w-[min(760px,96vw)] flex-col border-l border-rule-hi bg-surface/95 shadow-[-30px_0_80px_-30px_rgb(0_0_0_/_0.9)] backdrop-blur-xl"
+                : "absolute inset-y-0 right-0 flex w-[min(560px,94vw)] flex-col border-l border-rule-hi bg-surface/95 shadow-[-30px_0_80px_-30px_rgb(0_0_0_/_0.9)] backdrop-blur-xl"
+            }
             initial={STILL ? false : { x: 40, opacity: 0 }}
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: 40, opacity: 0 }}

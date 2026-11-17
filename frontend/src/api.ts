@@ -39,7 +39,12 @@ export function targets() {
   return req<Target[]>("/api/targets");
 }
 
-export function createRun(body: { repo_url: string; command?: string[] }) {
+/**
+ * 提交运行。`revision` 不是可选装饰：同一 repo_url 下挂了多个内置靶场，
+ * 后端按 repo_url 匹配靶场、按 revision 检出代码，不带 revision 只会跑到
+ * 仓库默认分支（多数靶场分支因此永远不会被命中）。
+ */
+export function createRun(body: { repo_url: string; revision?: string; command?: string[] }) {
   return req<{ run_id: string; state: string }>("/api/runs", {
     method: "POST",
     body: JSON.stringify(body),
@@ -63,4 +68,19 @@ export async function getText(path: string): Promise<string> {
   const res = await fetch(`${BASE}${path}`);
   if (!res.ok) throw new ApiError(`HTTP ${res.status}`, res.status);
   return res.text();
+}
+
+/**
+ * 结果报告（后端 `report.md` 原文）。
+ *
+ * 运行中会 404（`report_not_ready`）——后端只在收尾时落盘，这不是错误，
+ * 界面用「报告尚未生成」表示即可。`patch.diff` 同理，但没有 diff 时后端
+ * 回空串而不是 404（无改动 = 空补丁，是正常结果）。
+ */
+export function getReport(runId: string) {
+  return getText(`/api/runs/${runId}/report`);
+}
+
+export function getPatch(runId: string) {
+  return getText(`/api/runs/${runId}/patch`);
 }

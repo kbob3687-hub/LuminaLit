@@ -215,6 +215,107 @@ export function buildStages(events: RunEvent[], state: RunState | undefined): St
   });
 }
 
+// ───────────────────────────────────────────────────────── 进度估计
+
+/**
+ * 整体进度 + 倒计时。
+ *
+ * 两段拼起来，谁也不冒充谁：
+ *   1. **已完成部分**由事件推导（阶段状态 + 该阶段实际耗时），这一段是事实；
+ *   2. **剩余部分**是本文件里的经验耗时（STAGE_EST），这一段是估算。
+ *
+ * 界面上必须把两者分开写（「已运行 00:41 / 预估 01:19 / 剩余 00:38」），
+ * 因为契约里没有 ETA 字段，硬编一个漂亮的倒计时等于编数据。
+ */
+export interface ProgressView {
+  /** 0–100 整数 */
+  pct: number;
+  /** 从首条事件算起的墙钟；终态用最后一条事件的时间 */
+  elapsedMs: number;
+  /** 预估剩余；终态为 0，没有任何事件时为 null */
+  etaMs: number | null;
+  /** 已运行 + 预估剩余 */
+  totalMs: number | null;
+  /** 正处在自愈回环里（进度条会标「重跑中」） */
+  looping: boolean;
+  /** 有没有真实事件可依据 */
+  basis: "events" | "guess";
+}
+
+/** 各阶段经验耗时（ms）。只喂给「预估剩余」，不是契约字段。 */
+const STAGE_EST: Partial<Record<RunState, number>> = {
+  preparing: 32_000, // git clone，实测 14–40s
+  planning: 8_000,
+  installing: 45_000, // pip install，实测 10–90s
+  testing: 22_000,
+  diagnosing: 6_000,
+  repairing: 45_000,
+};
+
+/** 各阶段在总进度里的权重（合计 90，余下 10 是收尾）。 */
+const STAGE_WEIGHT: Partial<Record<RunState, number>> = {
+  queued: 2,
+  preparing: 26,
+  planning: 6,
+  installing: 34,
+  testing: 22,
+};
+
+/** 进度条上的阶段分界刻度（0–1），与上面权重逐项对应。 */
+export const PROGRESS_TICKS = [0.022, 0.311, 0.378, 0.756];
+
+export function buildProgress(
+  events: RunEvent[],
+  stages: StageView[],
+  state: RunState | undefined,
+): ProgressView {
+  const current = state ?? "queued";
+  const terminal = TERMINAL.has(current);
+  const startAt = events.length ? Date.parse(events[0].timestamp) : null;
+  const endAt = terminal && events.length ? Date.parse(events.at(-1)!.timestamp) : Date.now();
+  const elapsedMs = startAt !== null ? Math.max(0, endAt - startAt) : 0;
+
+  let pct = 0;
+  let remaining = 0;
+
+  for (const s of stages) {
+    const w = STAGE_WEIGHT[s.id as RunState] ?? 0;
+    const est = STAGE_EST[s.id as RunState] ?? 0;
+
+    if (s.status === "done") {
+      pct += w;
+    } else if (s.status === "bad") {
+      // 这一格开始了但没做完，只记一半，别把失败画成完成
+      pct += w * 0.5;
+    } else if (s.status === "active") {
+      const ran = s.durationMs ?? 0;
+      // 没有事件时也从 8% 起步，让条子"动起来"而不是贴着 0
+      const ratio = est > 0 ? Math.min(0.92, Math.max(0.08, ran / est)) : 0.12;
+      pct += w * ratio;
+      if (est > 0) remaining += Math.max(0, est - ran);
+    } else if (!terminal) {
+      remaining += est;
+    }
+  }
+
+  // 成功才算 100；失败/取消停在已经走到的位置，不回流也不补满
+  pct = current === "succeeded" ? 100 : Math.min(96, pct);
+
+  // 还没有任何事件时也给一个数：全按经验耗时估，总比 "--:--" 有用。
+  // 第一条事件到齐后立刻被真实耗时替代。
+  const etaMs = terminal ? 0 : remaining > 0 ? remaining : null;
+  const totalMs = etaMs === null ? null : elapsedMs + etaMs;
+
+  return {
+    pct: Math.round(pct),
+    elapsedMs,
+    etaMs,
+    totalMs,
+    looping: current === "diagnosing" || current === "repairing",
+    basis: events.length ? "events" : "guess",
+  };
+}
+
 // ───────────────────────────────────────────────────── 自愈回环
 
 export interface LoopAction {
@@ -341,7 +442,16 @@ export function buildRows(events: RunEvent[]): ActionRow[] {
             : "call",
       name: e.kind,
       target: isExec ? "plan.command" : targetOf(e),
-      result: isExec ? `exit ${code ?? "?"}` : blocked ? labelOfEvent(e) : e.message.slice(0, 52),
+      // install 事件没带 exit_code（依赖为空时后端直接 skipped），
+      // 硬写 `exit ?` 等于把"没有这个字段"当成"退出码未知"，
+      // 这时退回事件原文更有信息量。
+      result: isExec
+        ? code !== null
+          ? `exit ${code}`
+          : e.message.slice(0, 40)
+        : blocked
+          ? labelOfEvent(e)
+          : e.message.slice(0, 52),
       blocked,
       reason: blocked ? e.message : undefined,
     });
