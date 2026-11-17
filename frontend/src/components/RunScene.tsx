@@ -96,6 +96,16 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
   const reviewCount = rows.filter((r) => r.name !== "install" && r.name !== "test").length;
   const isFailed = state === "failed";
 
+  /**
+   * 失败原因的人话版。后端只回 failure_category（`_fail` 里也只存了
+   * "clone failed: <异常>"），前端不做诊断，只把已知类别的常见成因写清，
+   * 免得界面上只有 `clone_failed` 三个字，看的人以为是界面坏了。
+   */
+  const failureCategory = labelOf(status?.result?.failure_category ?? "");
+  const failureNote =
+    FAILURE_HINTS[failureCategory] ??
+    (failureCategory ? FAILURE_HINT_FALLBACK : "后端没给出 failure_category，无法判断失败环节。");
+
   const headline = useMemo(() => {
     if (state === "succeeded") return { text: "复现成功", accent: "已验证通过" };
     if (state === "failed")
@@ -246,6 +256,15 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
               </>
             )}
           </p>
+
+          {isFailed && (
+            <div className="mt-3 max-w-[74ch] rounded-[9px] border border-reject/30 bg-reject/[.055] px-3.5 py-2.5">
+              <div className="font-mono text-[10px] tracking-[.16em] text-reject/85 uppercase">
+                失败原因 · {failureCategory || "未分类"}
+              </div>
+              <p className="mt-1 text-[12.5px] leading-relaxed text-ink-mid">{failureNote}</p>
+            </div>
+          )}
         </div>
 
         <div className="flex gap-9">
@@ -304,6 +323,15 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
                   <div className="mt-2 text-[11px] text-ink-muted">
                     该阶段只更新 state、不产生事件，已持续 {fmtSec(stageElapsedMs)}。
                     界面不替它编进度——下方 trace 由 GET /api/runs/{"{id}"}/events 增量拉取。
+                  </div>
+                </>
+              ) : events.length > 0 ? (
+                <>
+                  <div className="text-ink-mid">
+                    已收到 <b>{events.length}</b> 条事件，但都不是动作
+                  </div>
+                  <div className="mt-2 text-[11px] text-ink-muted">
+                    该阶段（{state}）只写状态迁移，模型还没动手。动作会在这之后逐条追加。
                   </div>
                 </>
               ) : (
@@ -551,6 +579,30 @@ function fmtSec(ms: number): string {
   const m = Math.floor(s / 60);
   return `${m}m${String(s % 60).padStart(2, "0")}s`;
 }
+
+/**
+ * 已知失败类别 → 人话解释。写成常量而不是散落在 JSX 里，方便和
+ * `aci/errors.py` 的标签逐条对照；类别名与后端逐字相同，不做映射。
+ */
+const FAILURE_HINTS: Record<string, string> = {
+  clone_failed:
+    "克隆没完成：后端最多等 240 秒，而 git clone 不支持断点续传。若报错是 " +
+    "fetch-pack: invalid index-pack output，说明 pack 数据在传输中被截断——" +
+    "不是连不上，是没下完。可直接改用镜像前缀重试（例：https://ghfast.top/ + 原仓库地址）。",
+  smoke_test_failed:
+    "测试命令跑完了但退出码非零。若当前是 fake 沙箱，通常是它并不真正产出 " +
+    "expected_artifact，属于沙箱行为差异，不是代码问题。",
+  install_failed: "依赖没装上：requirements 里的包在沙箱内装不下来，或不在允许的依赖清单里。",
+  requirement_rejected: "依赖字符串被校验层拦下（含命令分隔符等），这一步没有产生副作用。",
+  missing_dependency: "缺依赖导致 import 失败，进入自愈回环后仍未补齐。",
+  llm_unavailable: "生成运行计划时模型不可用（网关或配额），没进入执行阶段。",
+  service_interrupted: "沙箱不可用或后端服务中断，本次运行被打断，可重试。",
+  time_budget_exceeded: "整体墙钟预算耗尽，被强制结束——通常是某一步一直没返回。",
+};
+
+const FAILURE_HINT_FALLBACK =
+  "后端只回了失败类别，没带更细的 stderr 摘要。要把 git / pip 的原始报错带到界面上，" +
+  "需要后端在失败事件里补上 stderr 的头几行（属于 harness 的改动，前端无法自行补齐）。";
 
 function stageLabelOf(state: RunState): string {
   const map: Record<string, string> = {
