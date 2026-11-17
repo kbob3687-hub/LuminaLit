@@ -1,81 +1,146 @@
 import { AnimatePresence, motion } from "motion/react";
 import clsx from "clsx";
-import { useMemo } from "react";
-import { labelOf, type RunState, type RunStatus } from "../types";
-import { stageIndex } from "../hooks/useRunPolling";
+import { useMemo, useState } from "react";
+import { labelOf, type RunEvent, type RunState, type RunStatus } from "../types";
+import {
+  aciTrace,
+  buildLoop,
+  buildRows,
+  buildStages,
+  isActionEvent,
+  isBlockedEvent,
+  type ActionRow,
+  type StageView,
+} from "../runModel";
+import { StageTrack, dur } from "./StageTrack";
+import { LoopStrip } from "./LoopStrip";
+import { Drawer } from "./Drawer";
+import { AciPanel, LoopPanel, PlanPanel, StagePanel } from "./DrawerPanels";
 
 /**
  * 场景 3：运行现场。
  *
- * 三层结构（对应 DESIGN.md §1.2）：
+ * 所有"进度"都由后端事件推导（runModel），组件不按索引猜。
+ * 三层结构（DESIGN.md §1.2）：
  *   Hero     当前状态 + 三个关键数字
- *   Track    3D 阶段轨道（当前阶段抬高 + 发光，鼠标驱动倾斜）
- *   Body     动作流（左）+ 遥测（右）
+ *   Track    3D 阶段轨道 + 自愈回环条
+ *   Body     动作流（左）+ 遥测 / ACI 审查（右）
  */
 
-const STAGES: { id: RunState | "succeeded"; label: string }[] = [
-  { id: "queued", label: "排队" },
-  { id: "preparing", label: "创建容器" },
-  { id: "planning", label: "生成计划" },
-  { id: "installing", label: "安装依赖" },
-  { id: "testing", label: "运行测试" },
-  { id: "diagnosing", label: "诊断失败" },
-  { id: "repairing", label: "修复中" },
-  { id: "succeeded", label: "成功" },
-];
+type Panel =
+  | { type: "aci"; seq: number }
+  | { type: "loop" }
+  | { type: "stage"; id: StageView["id"] }
+  | { type: "plan" }
+  | null;
 
-export interface ActionRow {
-  seq: number;
-  ts: string;
-  kind: "call" | "reject" | "finish" | "ok";
-  name: string;
-  target: string;
-  result: string;
-  blocked?: boolean;
-  reason?: string;
-}
+/** 截图模式：关掉入场动画，避免无头渲染抓到 opacity:0 的中间帧。 */
+const STILL = new URLSearchParams(window.location.search).get("still") === "1";
 
 interface Props {
   status: RunStatus | null;
-  rows: ActionRow[];
+  events: RunEvent[];
   onCancel?: () => void;
   cancelling?: boolean;
 }
 
-export function RunScene({ status, rows, onCancel, cancelling }: Props) {
-  const state = status?.state ?? "queued";
-  const idx = stageIndex(state);
-  const isFailed = state === "failed";
+export function RunScene({ status, events, onCancel, cancelling }: Props) {
+  const [panel, setPanel] = useState<Panel>(() => {
+    // 演示/截图直链：?panel=aci&seq=7 / ?panel=loop（只读，不影响业务逻辑）
+    const q = new URLSearchParams(window.location.search);
+    const which = q.get("panel");
+    if (which === "aci") return { type: "aci", seq: Number(q.get("seq") ?? 0) };
+    if (which === "loop") return { type: "loop" };
+    if (which === "plan") return { type: "plan" };
+    return null;
+  });
+  const state: RunState = status?.state ?? "queued";
+  const connected = status !== null;
+
+  const stages = useMemo(() => buildStages(events, status?.state), [events, status?.state]);
+  const loop = useMemo(() => buildLoop(events, status?.state), [events, status?.state]);
+  const rows = useMemo(() => buildRows(events), [events]);
 
   const blockedCount = rows.filter((r) => r.blocked).length;
-  const callCount = rows.filter((r) => r.kind === "call" || r.kind === "reject").length;
+  const reviewCount = rows.filter((r) => r.name !== "install" && r.name !== "test").length;
+  const isFailed = state === "failed";
 
-  // 状态文案
   const headline = useMemo(() => {
     if (state === "succeeded") return { text: "复现成功", accent: "已验证通过" };
-    if (state === "failed") return { text: "复现失败", accent: labelOf(status?.result?.failure_category ?? "") || "未分类" };
+    if (state === "failed")
+      return {
+        text: "复现失败",
+        accent: labelOf(status?.result?.failure_category ?? "") || "未分类",
+      };
     if (state === "cancelled") return { text: "已取消", accent: "用户终止" };
-    if (state === "repairing") return { text: "修复中", accent: `第 ${status?.result?.attempts ?? 1} 轮` };
+    if (state === "repairing")
+      return { text: "修复中", accent: loop.doing ? `第 ${loop.rounds.at(-1)?.round ?? 1} 轮` : "执行中" };
+    if (!connected) return { text: "连接中", accent: "等待后端" };
+    if (state === "queued") return { text: "排队中", accent: "等待调度" };
     return { text: stageLabelOf(state), accent: "执行中" };
-  }, [state, status]);
+  }, [state, status, connected, loop]);
+
+  const activeStage = stages.find((s) => s.status === "active");
+  const openedEvent =
+    panel?.type === "aci" ? events.find((e) => e.sequence === panel.seq) : undefined;
 
   return (
-    <div className="grid h-full grid-rows-[auto_auto_auto_1fr]">
-      {/* ── 顶栏 ── */}
-      <header className="flex h-[58px] items-center gap-4 border-b border-rule bg-gradient-to-b from-white/[.035] to-transparent px-6 backdrop-blur-md">
+    <div className="flex h-full flex-col">
+      {/* ── 顶栏：状态徽标跟后端同步 ── */}
+      <header className="flex h-[58px] shrink-0 items-center gap-4 border-b border-rule bg-gradient-to-b from-white/[.035] to-transparent px-6 backdrop-blur-md">
         <div className="flex items-center gap-2.5 text-[13px] font-semibold tracking-[.1em]">
           <motion.i
-            className="block size-[7px] rounded-full bg-accent shadow-[0_0_12px_var(--color-accent)]"
-            animate={{ opacity: [0.35, 1, 0.35], scale: [0.85, 1.15, 0.85] }}
+            className={clsx(
+              "block size-[7px] rounded-full",
+              !connected
+                ? "bg-ink-muted"
+                : isFailed
+                  ? "bg-reject shadow-[0_0_12px_var(--color-reject)]"
+                  : state === "succeeded"
+                    ? "bg-pass shadow-[0_0_12px_var(--color-pass)]"
+                    : "bg-accent shadow-[0_0_12px_var(--color-accent)]",
+            )}
+            animate={
+              connected && !["succeeded", "failed", "cancelled"].includes(state)
+                ? { opacity: [0.35, 1, 0.35], scale: [0.85, 1.15, 0.85] }
+                : { opacity: 1, scale: 1 }
+            }
             transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
           />
           PaperHarness
         </div>
+
         <div className="font-mono text-[11px] tracking-[.04em] text-ink-muted">
-          {status?.run_id ? `run_${status.run_id.slice(0, 8)}` : "—"}
+          {status?.run_id ? `run_${status.run_id.slice(0, 8)}` : "run_—"}
         </div>
+
+        {/* 后端状态徽标：这是"状态栏"，值全部来自 GET /api/runs/{id} */}
+        <div
+          className={clsx(
+            "flex items-center gap-2 rounded-[6px] border px-2.5 py-1 font-mono text-[10.5px]",
+            !connected && "border-rule-hi text-ink-muted",
+            connected &&
+              !isFailed &&
+              state !== "succeeded" &&
+              "border-accent/45 bg-accent/[.08] text-[#9db4ff]",
+            state === "succeeded" && "border-pass/45 bg-pass/[.08] text-pass",
+            isFailed && "border-reject/45 bg-reject/[.10] text-reject",
+          )}
+          title="来自 GET /api/runs/{run_id} 的 state 字段，前端不改写"
+        >
+          <span className="opacity-70">state</span>
+          <span className="tracking-[.02em]">{connected ? state : "connecting"}</span>
+        </div>
+
         <div className="flex-1" />
-        <button className="cursor-pointer rounded-[7px] border border-rule-hi bg-white/[.03] px-4 py-2 text-xs text-ink-mid transition-colors hover:border-ink-muted hover:text-ink">
+
+        <div className="font-mono text-[10px] text-ink-muted">
+          {connected ? `${events.length} 事件 · 1s 轮询` : "等待首个响应"}
+        </div>
+        <button
+          onClick={() => setPanel({ type: "plan" })}
+          className="cursor-pointer rounded-[7px] border border-rule-hi bg-white/[.03] px-4 py-2 text-xs text-ink-mid transition-colors hover:border-ink-muted hover:text-ink"
+        >
           查看计划
         </button>
         <button
@@ -88,15 +153,17 @@ export function RunScene({ status, rows, onCancel, cancelling }: Props) {
       </header>
 
       {/* ── Hero ── */}
-      <section className="grid grid-cols-[1fr_auto] items-center gap-8 border-b border-rule px-6 pt-6 pb-5">
+      <section className="grid shrink-0 grid-cols-[1fr_auto] items-center gap-8 border-b border-rule px-6 pt-6 pb-5">
         <div className="min-w-0">
           <div className="mb-2 flex items-center gap-3.5">
             <motion.div
               className={clsx(
                 "size-[11px] rounded-full",
-                isFailed ? "bg-reject shadow-[0_0_0_4px_rgb(255_92_71_/_0.16),0_0_22px_var(--color-reject)]"
-                  : state === "succeeded" ? "bg-pass shadow-[0_0_0_4px_rgb(46_230_168_/_0.16),0_0_22px_var(--color-pass)]"
-                  : "bg-accent shadow-[0_0_0_4px_rgb(108_143_255_/_0.16),0_0_22px_var(--color-accent)]",
+                isFailed
+                  ? "bg-reject shadow-[0_0_0_4px_rgb(255_92_71_/_0.16),0_0_22px_var(--color-reject)]"
+                  : state === "succeeded"
+                    ? "bg-pass shadow-[0_0_0_4px_rgb(46_230_168_/_0.16),0_0_22px_var(--color-pass)]"
+                    : "bg-accent shadow-[0_0_0_4px_rgb(108_143_255_/_0.16),0_0_22px_var(--color-accent)]",
               )}
               animate={{ scale: [0.9, 1.1, 0.9] }}
               transition={{ duration: 1.8, repeat: Infinity, ease: "easeInOut" }}
@@ -121,156 +188,80 @@ export function RunScene({ status, rows, onCancel, cancelling }: Props) {
             </h2>
           </div>
           <p className="font-mono text-[11.5px] tracking-[.04em] text-ink-muted">
-            容器已隔离 · 网络已断开 ·{" "}
+            容器已隔离 · 网络默认断开 ·{" "}
             <b className="font-medium text-warn">{blockedCount} 次拦截</b>
+            {activeStage && (
+              <>
+                {" · 当前阶段 "}
+                <b className="font-medium text-ink-mid">{activeStage.label}</b>
+                {dur(activeStage.durationMs) && ` ${dur(activeStage.durationMs)}`}
+              </>
+            )}
           </p>
         </div>
 
         <div className="flex gap-9">
-          <Stat value={callCount} label="动作" />
+          <Stat value={reviewCount} label="ACI 审查" />
           <Stat value={blockedCount} label="拦截" tone="bad" />
           <Stat value={0} label="逃逸" tone="good" />
         </div>
       </section>
 
       {/* ── 3D 阶段轨道 ── */}
-      <section className="relative overflow-hidden border-b border-rule px-6 pt-7 pb-6 [perspective:1400px] [perspective-origin:50%_42%]">
-        <div className="absolute top-4 right-6 z-[3] flex items-center gap-2 rounded-full border border-accent/40 bg-accent/10 px-3 py-1.5 font-mono text-[10.5px] tracking-[.06em] text-[#9db4ff]">
-          <motion.span
-            className="block size-2.5 rounded-full border-[1.5px] border-[#9db4ff]/30 border-t-[#9db4ff]"
-            animate={{ rotate: 360 }}
-            transition={{ duration: 1.1, repeat: Infinity, ease: "linear" }}
-          />
-          修复回环 ×1
+      <section className="relative shrink-0 overflow-hidden border-b border-rule px-6 pt-7 pb-6 [perspective:1400px] [perspective-origin:50%_42%]">
+        <div className="absolute top-4 right-6 z-[3] flex items-center gap-2 rounded-full border border-rule-hi bg-white/[.03] px-3 py-1.5 font-mono text-[10.5px] tracking-[.06em] text-ink-muted">
+          点阶段看事件
         </div>
-
-        <div
-          className="flex items-center"
-          style={{
-            transformStyle: "preserve-3d",
-            transform:
-              "rotateX(calc(9deg + var(--my, 0) * -3deg)) rotateY(calc(var(--mx, 0) * 4deg)) translateZ(-40px)",
-            transition: "transform .5s cubic-bezier(.16,1,.3,1)",
-          }}
-        >
-          {STAGES.map((s, i) => {
-            const done = i < idx;
-            const active = i === idx && !["succeeded", "failed", "cancelled"].includes(state);
-            const bad = isFailed && i === idx;
-            return (
-              <div key={s.id} className="contents">
-                {i > 0 && (
-                  <div className="h-px flex-[0_0_18px]">
-                    <div
-                      className={clsx(
-                        "h-px w-full transition-colors duration-500",
-                        done ? "bg-gradient-to-r from-pass to-pass/35" : "bg-rule-hi",
-                      )}
-                    />
-                  </div>
-                )}
-                <motion.div
-                  className="min-w-0 flex-1"
-                  style={{ transformStyle: "preserve-3d" }}
-                  animate={{
-                    transform: active ? "translateZ(64px) scale(1.09)" : "translateZ(0) scale(1)",
-                  }}
-                  transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
-                >
-                  <div
-                    className={clsx(
-                      "relative mx-[7px] overflow-hidden rounded-[9px] border px-4 pt-4 pb-[15px] transition-colors duration-400",
-                      done && "border-pass/25 bg-gradient-to-br from-pass/[.09] to-white/[.008]",
-                      active && "border-accent/75 bg-gradient-to-br from-accent/20 to-accent/[.03] shadow-[0_22px_60px_-18px_rgb(108_143_255_/_0.85),0_0_0_1px_rgb(108_143_255_/_0.3)_inset,0_0_50px_-8px_rgb(108_143_255_/_0.5)]",
-                      bad && "border-reject/55 bg-gradient-to-br from-reject/[.13] to-white/[.008]",
-                      !done && !active && !bad && "border-rule bg-gradient-to-br from-white/[.075] to-white/[.018] opacity-55",
-                    )}
-                  >
-                    <div
-                      aria-hidden
-                      className="pointer-events-none absolute inset-0 opacity-50"
-                      style={{
-                        background:
-                          "radial-gradient(240px circle at 50% 0%, rgb(255 255 255 / .10), transparent 70%)",
-                      }}
-                    />
-                    <div
-                      className={clsx(
-                        "mb-2 font-mono text-[9.5px] tracking-[.14em]",
-                        active ? "text-accent" : "text-ink-muted",
-                      )}
-                    >
-                      {String(i + 1).padStart(2, "0")}
-                    </div>
-                    <div
-                      className={clsx(
-                        "truncate font-mono text-[11.5px]",
-                        active && "font-semibold text-[#cfdcff]",
-                        done && "text-pass",
-                        bad && "text-reject",
-                        !done && !active && !bad && "text-ink-mid",
-                      )}
-                    >
-                      {s.label}
-                    </div>
-                    <div className="mt-3 h-0.5 overflow-hidden rounded-sm bg-white/[.07]">
-                      <motion.div
-                        className={clsx(
-                          "h-full rounded-sm",
-                          bad
-                            ? "bg-reject"
-                            : done
-                              ? "bg-gradient-to-r from-pass/50 to-pass"
-                              : "bg-gradient-to-r from-accent to-pass",
-                        )}
-                        animate={
-                          active
-                            ? { width: ["18%", "58%"], marginLeft: ["0%", "22%"] }
-                            : { width: done || bad ? "100%" : "0%", marginLeft: "0%" }
-                        }
-                        transition={
-                          active
-                            ? { duration: 1.6, repeat: Infinity, repeatType: "reverse", ease: "easeInOut" }
-                            : { duration: 0.8, ease: [0.16, 1, 0.3, 1] }
-                        }
-                      />
-                    </div>
-                  </div>
-                </motion.div>
-              </div>
-            );
-          })}
-        </div>
+        <StageTrack stages={stages} onSelect={(id) => setPanel({ type: "stage", id })} />
       </section>
 
+      {/* ── 自愈回环：正在干什么 ── */}
+      <LoopStrip
+        loop={loop}
+        state={state}
+        onOpenAction={(seq) => setPanel({ type: "aci", seq })}
+        onOpenLoop={() => setPanel({ type: "loop" })}
+      />
+
       {/* ── 动作流 + 遥测 ── */}
-      <div className="grid min-h-0 grid-cols-1 lg:grid-cols-[1fr_296px]">
+      <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[1fr_296px]">
         <div className="min-h-0 overflow-y-auto px-6 py-5">
           <div className="sticky top-0 z-[2] mb-1.5 flex items-center justify-between border-b border-rule bg-void pt-0.5 pb-3">
             <div className="flex gap-[3px]">
               <button className="cursor-pointer rounded-[5px] border border-rule-hi bg-surface-hi px-3.5 py-1.5 text-xs text-ink">
                 动作流
               </button>
-              <button className="cursor-pointer rounded-[5px] border border-transparent px-3.5 py-1.5 text-xs text-ink-muted transition-colors hover:text-ink-mid">
-                补丁 diff
+              <button
+                onClick={() => setPanel({ type: "loop" })}
+                className="cursor-pointer rounded-[5px] border border-transparent px-3.5 py-1.5 text-xs text-ink-muted transition-colors hover:text-ink-mid"
+              >
+                自愈回环 {loop.rounds.length > 0 && `×${loop.rounds.length}`}
               </button>
             </div>
             <div className="font-mono text-[10.5px] tracking-[.03em] text-ink-muted">
-              {rows.length} 个动作 · ACI 审查 {callCount} 次 ·{" "}
+              {rows.length} 个动作 · ACI 审查 {reviewCount} 次 ·{" "}
               <b className="text-reject">拦截 {blockedCount} 次</b>
             </div>
           </div>
 
+          {rows.length === 0 && (
+            <div className="mt-10 text-center font-mono text-[11.5px] text-ink-muted">
+              等待后端事件…（日志与动作由 1000ms 轮询增量拉取）
+            </div>
+          )}
+
           <AnimatePresence initial={false}>
             {rows.map((r) => (
-              <motion.div
+              <motion.button
                 key={r.seq}
-                initial={{ opacity: 0, x: -18 }}
+                onClick={() => setPanel({ type: "aci", seq: r.seq })}
+                className="block w-full cursor-pointer text-left"
+                initial={STILL ? false : { opacity: 0, x: -18 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ duration: 0.42, ease: [0.16, 1, 0.3, 1] }}
               >
                 <ActionLine row={r} />
-              </motion.div>
+              </motion.button>
             ))}
           </AnimatePresence>
         </div>
@@ -279,11 +270,99 @@ export function RunScene({ status, rows, onCancel, cancelling }: Props) {
           <div className="mb-4 text-[10px] tracking-[.18em] text-ink-muted uppercase">
             沙箱遥测
           </div>
-          <Telemetry status={status} />
+          <Telemetry status={status} state={state} />
+
+          <div className="mt-6 mb-3 flex items-center justify-between">
+            <div className="text-[10px] tracking-[.18em] text-ink-muted uppercase">ACI 审查</div>
+            <span className="font-mono text-[10px] text-ink-muted">点条目看流水线</span>
+          </div>
+          <div className="rounded-[8px] border border-rule bg-white/[.015]">
+            {rows.filter((r) => r.name !== "install" && r.name !== "test").length === 0 && (
+              <div className="px-3 py-2.5 font-mono text-[10.5px] text-ink-muted">
+                还没有动作过门。
+              </div>
+            )}
+            {rows
+              .filter((r) => r.name !== "install" && r.name !== "test")
+              .slice(-5)
+              .reverse()
+              .map((r) => (
+                <button
+                  key={r.seq}
+                  onClick={() => setPanel({ type: "aci", seq: r.seq })}
+                  className="flex w-full cursor-pointer items-baseline gap-2 border-b border-white/[.04] px-3 py-2 text-left last:border-b-0 hover:bg-white/[.04]"
+                >
+                  <span
+                    className={clsx(
+                      "w-2.5 shrink-0 text-center font-mono text-[10px]",
+                      r.blocked ? "text-reject" : "text-pass",
+                    )}
+                  >
+                    {r.blocked ? "✕" : "✓"}
+                  </span>
+                  <span className="w-[74px] shrink-0 truncate font-mono text-[10.5px] text-ink-mid">
+                    {r.name.replace("_requirement", "").replace("_exact", "")}
+                  </span>
+                  <span
+                    className={clsx(
+                      "min-w-0 flex-1 truncate font-mono text-[10.5px]",
+                      r.blocked ? "text-reject" : "text-ink-muted",
+                    )}
+                  >
+                    {r.target || r.result}
+                  </span>
+                </button>
+              ))}
+          </div>
         </aside>
       </div>
+
+      {/* ── 抽屉 ── */}
+      <Drawer
+        open={panel !== null}
+        title={drawerTitle(panel, openedEvent, stages, loop)}
+        subtitle={drawerSubtitle(panel, openedEvent)}
+        onClose={() => setPanel(null)}
+      >
+        {panel?.type === "aci" && openedEvent && isActionEvent(openedEvent) && (
+          <AciPanel trace={aciTrace(openedEvent)} event={openedEvent} />
+        )}
+        {panel?.type === "loop" && (
+          <LoopPanel
+            loop={loop}
+            state={state}
+            onOpenAction={(seq) => setPanel({ type: "aci", seq })}
+          />
+        )}
+        {panel?.type === "stage" && (() => {
+          const stage = stages.find((s) => s.id === panel.id)!;
+          return <StagePanel stage={stage} events={events} state={state} />;
+        })()}
+        {panel?.type === "plan" && <PlanPanel status={status} />}
+      </Drawer>
     </div>
   );
+}
+
+function drawerTitle(
+  panel: Panel,
+  event: RunEvent | undefined,
+  stages: StageView[],
+  loop: ReturnType<typeof buildLoop>,
+): string {
+  if (panel?.type === "aci") return event ? `ACI 审查 · ${event.kind}` : "ACI 审查";
+  if (panel?.type === "loop")
+    return loop.rounds.length ? `自愈回环 · ${loop.rounds.length} 轮` : "自愈回环";
+  if (panel?.type === "stage")
+    return `阶段详情 · ${stages.find((s) => s.id === panel.id)?.label ?? panel.id}`;
+  return "运行计划与结果";
+}
+
+function drawerSubtitle(panel: Panel, event: RunEvent | undefined): string | undefined {
+  if (panel?.type === "aci" && event)
+    return isBlockedEvent(event) ? "校验失败：零副作用拦截" : "校验通过：动作已执行";
+  if (panel?.type === "stage") return "该阶段全部事件（后端原样）";
+  return undefined;
 }
 
 function Stat({ value, label, tone }: { value: number; label: string; tone?: "bad" | "good" }) {
@@ -291,7 +370,7 @@ function Stat({ value, label, tone }: { value: number; label: string; tone?: "ba
     <div className="text-right">
       <motion.div
         key={value}
-        initial={{ opacity: 0, y: 8 }}
+        initial={STILL ? false : { opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
         className={clsx(
@@ -302,9 +381,7 @@ function Stat({ value, label, tone }: { value: number; label: string; tone?: "ba
       >
         {String(value).padStart(2, "0")}
       </motion.div>
-      <div className="mt-2.5 text-[10px] tracking-[.16em] text-ink-muted uppercase">
-        {label}
-      </div>
+      <div className="mt-2.5 text-[10px] tracking-[.16em] text-ink-muted uppercase">{label}</div>
     </div>
   );
 }
@@ -319,7 +396,7 @@ function ActionLine({ row }: { row: ActionRow }) {
         whileHover={{ x: 4, backgroundColor: "rgb(255 255 255 / .045)" }}
         transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
         className={clsx(
-          "relative -mx-[13px] mb-0.5 grid cursor-default grid-cols-[104px_20px_166px_minmax(0,1fr)_116px] items-center gap-[11px] rounded-md px-[13px] py-[9px] font-mono text-[12.5px]",
+          "relative -mx-[13px] mb-0.5 grid grid-cols-[74px_20px_166px_minmax(0,1fr)_116px] items-center gap-[11px] rounded-md px-[13px] py-[9px] font-mono text-[12.5px]",
           row.blocked &&
             "-ml-[13px] bg-gradient-to-r from-reject/[.11] to-reject/[.03] pl-[15px] shadow-[inset_2px_0_0_var(--color-reject)] hover:from-reject/[.19] hover:to-reject/[.05]",
         )}
@@ -364,16 +441,16 @@ function ActionLine({ row }: { row: ActionRow }) {
   );
 }
 
-function Telemetry({ status }: { status: RunStatus | null }) {
-  const state = status?.state ?? "queued";
+function Telemetry({ status, state }: { status: RunStatus | null; state: RunState }) {
   const online = state === "installing";
+  const shot = status?.result;
   const items: { k: string; v: string; tone?: "on" | "off" | "warn" }[] = [
     { k: "容器", v: status?.run_id ? `harness-${status.run_id.slice(0, 6)}` : "—" },
     { k: "镜像", v: "base-py3.11" },
     { k: "挂载", v: "/workspace rw" },
-    { k: "网络", v: online ? "已连接" : "已断开", tone: online ? "on" : "off" },
-    { k: "PID", v: "7 / 128" },
-    { k: "用户", v: "1000:1000" },
+    { k: "网络", v: online ? "已连接（装依赖）" : "已断开", tone: online ? "on" : "off" },
+    { k: "尝试次数", v: shot ? String(shot.attempts) : "—" },
+    { k: "结果", v: shot ? `${shot.outcome}${shot.verified ? " · verified" : ""}` : "—" },
   ];
 
   return (
@@ -394,24 +471,22 @@ function Telemetry({ status }: { status: RunStatus | null }) {
           </span>
         </div>
       ))}
-      <div className="mt-3.5">
-        <div className="mb-1.5 flex justify-between font-mono text-[10px] text-ink-muted">
-          <span>内存</span>
-          <span>412 MB / 2 GB</span>
-        </div>
-        <div className="h-[3px] overflow-hidden rounded-sm bg-white/[.07]">
-          <motion.div
-            className="h-full rounded-sm bg-gradient-to-r from-accent to-pass shadow-[0_0_12px_rgb(108_143_255_/_0.7)]"
-            initial={{ width: "0%" }}
-            animate={{ width: "21%" }}
-            transition={{ duration: 1, ease: [0.16, 1, 0.3, 1] }}
-          />
-        </div>
-      </div>
     </>
   );
 }
 
 function stageLabelOf(state: RunState): string {
-  return STAGES.find((s) => s.id === state)?.label ?? state;
+  const map: Record<string, string> = {
+    queued: "排队中",
+    preparing: "准备环境",
+    planning: "生成计划",
+    installing: "安装依赖",
+    testing: "运行测试",
+    diagnosing: "诊断失败",
+    repairing: "修复中",
+    succeeded: "复现成功",
+    failed: "复现失败",
+    cancelled: "已取消",
+  };
+  return map[state] ?? state;
 }

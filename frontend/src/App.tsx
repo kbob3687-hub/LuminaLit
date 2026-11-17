@@ -1,52 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { SelectScene } from "./components/SelectScene";
 import { WelcomeScene } from "./components/WelcomeScene";
-import { RunScene, type ActionRow } from "./components/RunScene";
+import { RunScene } from "./components/RunScene";
 import { PARTICLE_COLORS, ParticleField, type ParticleBurst } from "./components/ParticleField";
 import { useRunPolling } from "./hooks/useRunPolling";
-import { createRun, ApiError } from "./api";
-import type { RunEvent, RunStatus } from "./types";
+import { useDemoRun } from "./hooks/useDemoRun";
+import { createRun, cancelRun, ApiError } from "./api";
 
 type Scene = "select" | "welcome" | "run";
 
 /** 截图模式下把所有过渡时长压成 0，避免无头渲染抓到半透明中间帧。 */
 const STILL = new URLSearchParams(window.location.search).get("still") === "1";
-
-const DEMO_ROWS: ActionRow[] = [
-  { seq: 1, ts: "00:50.1", kind: "call", name: "read_file", target: "src/model.py", result: "ok" },
-  { seq: 2, ts: "00:50.9", kind: "call", name: "search_text", target: '"import" · src/', result: "7 matches" },
-  { seq: 3, ts: "00:51.4", kind: "call", name: "read_file", target: "requirements.txt", result: "文件不存在" },
-  {
-    seq: 4,
-    ts: "00:52.3",
-    kind: "reject",
-    name: "read_file",
-    target: "../../etc/passwd",
-    result: "path_escape",
-    blocked: true,
-    reason: "路径越出 workspace 边界，已拒绝且未产生任何副作用",
-  },
-  { seq: 5, ts: "00:52.8", kind: "call", name: "replace_exact", target: "src/model.py:42", result: "1 occurrence" },
-  {
-    seq: 6,
-    ts: "00:53.1",
-    kind: "reject",
-    name: "install_requirement",
-    target: "numpy; rm -rf /",
-    result: "requirement_not_allowed",
-    blocked: true,
-    reason: "依赖字符串含命令分隔符，拒绝后未打开网络",
-  },
-  { seq: 7, ts: "00:53.9", kind: "ok", name: "install_requirement", target: "numpy==2.0.0", result: "exit 0" },
-  { seq: 8, ts: "00:54.6", kind: "finish", name: "finish_repair", target: '"补上 numpy 依赖"', result: "—" },
-];
-
-const DEMO_STATUS: RunStatus = {
-  run_id: "a3f29c8e1b4d4f2e",
-  state: "repairing",
-  result: null,
-};
 
 export default function App() {
   const [scene, setScene] = useState<Scene>("select");
@@ -66,19 +31,24 @@ export default function App() {
     if (initialScene !== "select") setScene(initialScene);
   }, [initialScene]);
 
-  /** 演示模式：默认开启，接后端时设 VITE_DEMO=0。 */
-  const demo = (import.meta.env.VITE_DEMO ?? "1") !== "0";
+  /**
+   * 演示模式：**默认关闭**，只在 `?demo=1` 或 `VITE_DEMO=1` 时回放脚本。
+   * 之前默认开着，界面上所有"进度"都是假数据——状态条跟后端毫无关系，
+   * 一进场就把阶段全点亮。真实后端是唯一事实来源。
+   */
+  const demo = q.get("demo") === "1" || import.meta.env.VITE_DEMO === "1";
 
-  const { status, events } = useRunPolling(demo ? null : runId, {
-    mock: demo ? { status: DEMO_STATUS, events: [] } : undefined,
-  });
+  const live = useRunPolling(demo ? null : runId);
+  const replay = useDemoRun(demo, Number(q.get("t") ?? 0));
+  const status = demo ? replay.status : live.status;
+  const events = demo ? replay.events : live.events;
 
   // 统一触发粒子爆发
   const fire = useCallback((x: number, y: number, color: string, n = 30) => {
     setBursts([{ x, y, color, count: n, speed: 2.6, life: 70 }]);
   }, []);
 
-  // 进入运行场景后：拦截行持续喷粒子 + 当前阶段冒粒子
+  // 进入运行场景后：拦截行持续喷粒子
   useEffect(() => {
     if (scene !== "run") return;
     const blocked = () => {
@@ -129,29 +99,7 @@ export default function App() {
     }, 3050);
   };
 
-  // 把真实事件映射成动作行（接后端时用）
-  const rows = useMemo(() => {
-    if (demo) return DEMO_ROWS;
-    return events
-      .filter((e: RunEvent) => e.kind !== "diagnosis" && e.kind !== "repair_round")
-      .map((e) => {
-        const blocked = /path_escape|not_allowed|not_unique|not_found|invalid_argument/.test(
-          e.kind + e.message,
-        );
-        return {
-          seq: e.sequence,
-          ts: new Date(e.timestamp).toISOString().slice(14, 21),
-          kind: blocked ? "reject" : ("call" as const),
-          name: e.kind,
-          target: String(e.data?.path ?? e.data?.requirement ?? ""),
-          result: e.message.slice(0, 40),
-          blocked,
-          reason: blocked ? e.message : undefined,
-        } satisfies ActionRow & { seq: number };
-      })
-      .slice(-60);
-  }, [demo, events]);
-
+  // 动作行、阶段条、回环全部在 RunScene 里由事件推导（runModel.ts）
   return (
     <div className="relative h-full overflow-hidden">
       {/* 景深层 */}
@@ -177,12 +125,11 @@ export default function App() {
           <SceneShell key="run">
             <RunScene
               status={status}
-              rows={rows}
+              events={events}
               cancelling={cancelling}
               onCancel={async () => {
                 if (!runId) return;
                 setCancelling(true);
-                const { cancelRun } = await import("./api");
                 try {
                   await cancelRun(runId);
                 } catch {

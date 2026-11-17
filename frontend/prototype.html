@@ -1893,9 +1893,32 @@ function simStop(){simTimers.forEach(clearTimeout);simTimers=[]}
 
 function bootRun(){
   const T=CUR, cid='harness-'+T.runId.replace(/^run_/,'');
+  // 进场只点亮"排队"：阶段状态按时间推进，不预置绿色。
+  // （真实前端由后端事件驱动，见 src/runModel.ts buildStages）
+  STAGES.forEach((s,i)=>{s.st=i===0?'active':'todo';s.elapsed=0;});
+  // hero 也不预置"修复中"：进场只描述当前真实阶段
+  $('#hero-dot').className='dot';
+  $('#hero-title').innerHTML='准备环境 <em>启动中</em>';
+  $('#hero-note').innerHTML='容器隔离 · 网络默认断开 · 暂停在 <b>queued</b>';
+  $('#loop-badge').style.display='none';
   $('#tb-run').textContent=T.runId+' · '+T.name;
   renderTrack(); renderRecent(); renderProcs(T.procsRun.map((p,i)=>i===0?{...p,st:'done'}:{...p,cmd:'pip install '+T.pin}));
   updateProgress(); showView('dash');
+
+  // 阶段推进（与下面的证据链时间对齐，不再一进场整排绿）
+  const stepStage=(i,st,el)=>{STAGES[i].st=st;STAGES[i].elapsed=el;renderTrack();updateProgress();};
+  simAt(400, ()=>{stepStage(0,'done',2);stepStage(1,'active',0);});
+  simAt(2600,()=>{stepStage(1,'done',6);stepStage(2,'active',0);});
+  simAt(5400,()=>{stepStage(2,'done',8);stepStage(3,'active',0);});
+  simAt(7600,()=>{stepStage(3,'bad',15);stepStage(5,'active',0);
+    $('#hero-dot').className='dot bad';
+    $('#hero-title').innerHTML='安装失败 <em>进入自愈</em>';
+    $('#hero-note').innerHTML='容器已隔离 · 网络已断开 · 失败已分类 <b>missing_dependency</b>';});
+  simAt(8000,()=>{stepStage(5,'done',4);stepStage(6,'active',6);
+    $('#hero-dot').className='dot warn';
+    $('#hero-title').innerHTML='修复中 <em>第 1 轮</em>';
+    $('#hero-note').innerHTML='模型动作逐个过 ACI 校验门 · <b>越界即拒绝</b>';
+    $('#loop-badge').style.display='flex';});
 
   // 阶段入场
   $$('#track .stage').forEach((s,i)=>{
@@ -1931,6 +1954,9 @@ function bootRun(){
     $('#hero-note').innerHTML='依赖已补齐 · 网络已恢复断开 · <b>等待真实产物</b>';
     renderProcs(T.procsRun);
     pushTerm('info','HARNESS','重跑 '+T.entry+'（冻结命令）· set_network(false)');
+    // 重跑：安装已修好，测试重新进入
+    stepStage(3,'done',15);
+    setTimeout(()=>{stepStage(4,'active',0);},600);
   });
 
   // 重跑日志（两篇论文的观测内容不同，这里按 target 分派）

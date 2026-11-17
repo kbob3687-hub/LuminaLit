@@ -44,6 +44,7 @@ export function useRunPolling(runId: string | null, opts: Options = {}) {
     stopped.current = false;
     cursor.current = 0;
     setEvents([]);
+    setStatus(null); // 换 run 必须清空旧状态，否则新 run 一进场就显示上一轮的绿
     setError(null);
 
     const tick = async () => {
