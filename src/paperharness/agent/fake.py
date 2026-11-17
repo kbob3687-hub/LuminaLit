@@ -30,4 +30,4 @@ class FakeLLM:
     def propose_action(self, history: list[Observation]) -> ToolAction:
         if self._actions:
             return self._actions.pop(0)
-        return FinishRepairAction(summary="no scripted action left")
+        return FinishRepairAction(action="finish_repair", summary="no scripted action left")
