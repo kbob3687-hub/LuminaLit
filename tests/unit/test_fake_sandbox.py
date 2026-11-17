@@ -14,8 +14,8 @@ def test_fake_sandbox_returns_scripted_results(tmp_path):
     session = FakeSandboxSession([first], artifact_path="out.txt", workspace=tmp_path)
     result = session.execute(["python", "main.py"], timeout_seconds=30)
     assert result.exit_code == 1
-    assert session.network_enabled is True
+    assert session.network_state is True
     session.set_network(False)
-    assert session.network_enabled is False
+    assert session.network_state is False
     session.close()
     assert session.closed is True

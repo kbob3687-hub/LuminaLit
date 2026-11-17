@@ -52,7 +52,7 @@ def test_13_aci_rejects_command_injection_in_requirement(offline_session):
         assert observation.summary == "requirement_not_allowed"
 
     assert offline_session.commands == [], "被拒绝的依赖串仍然触发了命令执行"
-    assert offline_session.network_enabled is True, "校验失败不该改变网络状态"
+    assert offline_session.network_state is True, "校验失败不该改变网络状态"
 
 
 def test_14_aci_rejects_path_env_override(offline_session):

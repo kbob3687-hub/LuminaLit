@@ -61,8 +61,12 @@ class PaperACI:
         self.workspace = Path(workspace).resolve(strict=False)
         self.plan = plan
         self.timeout_seconds = timeout_seconds
-        # 记录 ACI 进场时的网络状态，保证每轮动作结束后回到这个状态。
-        self._network_at_entry: bool | None = None
+        # ACI 自己维护网络状态。**不向会话查询**：契约 §1.2 写死沙箱不暴露状态
+        # 查询接口，`getattr(session, "network_enabled", True)` 在真沙箱上永远拿到
+        # 默认值 True，会让 install 之后把本该断开的网永久打开。
+        # 修复期基线约定为断网：runner 在跑测试前会 set_network(False)，自愈发生在
+        # 这个断网上下文里，所以 install 结束后必须回到断开状态。
+        self._network_state = False
 
     # ------------------------------------------------------------------ 入口
 
@@ -144,8 +148,15 @@ class PaperACI:
         if raw is None:
             return self._fail(action.action, errors.FILE_NOT_FOUND)
 
+        # 空 old 一律拒绝，不做特殊处理。不能用 `raw.count(b"") - 1` 推断：
+        # 那个值等于文件长度，长度恰好为 1 时会被判成"唯一命中"而真写入
+        # （b"x" + old="" + new="INJECTED" → b"INJECTEDx"）。设计 §10.6 要求
+        # 空 old 直接回 replace_not_unique。
+        if not action.old:
+            return self._fail(action.action, errors.REPLACE_NOT_UNIQUE)
+
         old = action.old.encode("utf-8")
-        occurrences = raw.count(old) if old else raw.count(b"") - 1
+        occurrences = raw.count(old)
         if occurrences == 0:
             return self._fail(action.action, errors.REPLACE_NOT_FOUND)
         if occurrences > 1:
@@ -219,23 +230,23 @@ class PaperACI:
 
     @contextmanager
     def _network(self, enabled: bool) -> Iterator[None]:
-        """临时切网络，`finally` 恢复调用前的状态。
+        """临时切网络，`finally` 恢复到**ACI 自己记录的状态**。
 
-        `finally` 是硬要求：装包中途抛异常（超时、容器已关）也必须把网络关
-        回去，否则后面所有动作都在联网状态下跑，「断网」这条隔离承诺当场失效。
+        为什么自己不查询会话：契约 §1.2 明确沙箱不暴露状态查询接口，调用方要
+        自己记录。真沙箱 `DockerSandboxSession` 只有私有 `_network_enabled`，
+        任何 `getattr(..., True)` 的兜底都会拿到默认值 True——装一次包就把断网
+        永久打开，隔离承诺当场失效。替身有公开属性，会让单测假绿。
+
+        `finally` 是硬要求：装包中途抛异常（超时、容器已关）也必须把网络关回去。
         """
-        previous = self._current_network()
+        previous = self._network_state
         self.session.set_network(enabled)
+        self._network_state = enabled
         try:
             yield
         finally:
             self.session.set_network(previous)
-
-    def _current_network(self) -> bool:
-        if self._network_at_entry is None:
-            value = getattr(self.session, "network_enabled", True)
-            self._network_at_entry = bool(value)
-        return self._network_at_entry
+            self._network_state = previous
 
     def _relative(self, path: Path) -> str:
         try:

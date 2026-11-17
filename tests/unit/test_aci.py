@@ -247,6 +247,26 @@ def test_11b_replace_exact_empty_old_is_not_unique(aci, workspace):
     assert result.summary == REPLACE_NOT_UNIQUE
 
 
+def test_11c_replace_exact_empty_old_on_single_byte_file(aci, workspace):
+    """空 old 碰上 1 字节文件，不许真写入。
+
+    这是队长 review 抓到的真实漏洞：旧实现用 `raw.count(b"") - 1` 判唯一，
+    该值等于文件长度，长度恰好为 1 时 occurrences==1 被判成"唯一命中"，
+    于是 b"x" + old="" + new="INJECTED" 会真的变成 b"INJECTEDx"。
+    设计 §10.6 要求空 old 一律 replace_not_unique。
+    """
+    target = workspace / "one.txt"
+    target.write_bytes(b"x")
+
+    result = aci.execute(
+        ReplaceExactAction(action="replace_exact", path="one.txt", old="", new="INJECTED")
+    )
+
+    assert result.ok is False
+    assert result.summary == REPLACE_NOT_UNIQUE
+    assert target.read_bytes() == b"x", "空 old 在 1 字节文件上真的写入了"
+
+
 def test_12_replace_exact_escape_has_no_side_effect(aci, workspace, tmp_path):
     outside = tmp_path / "outside.txt"
     outside.write_text("keep", encoding="utf-8")
@@ -267,19 +287,34 @@ def test_13_install_requirement_toggles_network(aci, session):
 
     assert result.ok is True
     assert session.commands == [["python", "-m", "pip", "install", "numpy==2.0.0"]]
-    # 装完必须回到进场时的状态
-    assert session.network_enabled is True
+    # ACI 自己维护网络状态，基线是断网（修复期发生在断网上下文中），装完必须回到断开。
+    assert session.network_state is False
 
 
-def test_13b_install_requirement_restores_disabled_network(aci, session):
-    session.network_enabled = False
-    aci = PaperACI(session, session.workspace, make_plan(), timeout_seconds=300)
+def test_13b_install_requirement_restores_baseline_after_enabling(workspace):
+    """装包过程中确实开网，装完回到断网基线。
 
-    aci.execute(
-        InstallRequirementAction(action="install_requirement", requirement="numpy")
-    )
+    这条是队长 review 要求的「断网进场 → install → 恢复断网」用例。
+    真沙箱只有私有 `_network_enabled`，任何向会话查询状态的写法都会拿到默认
+    True 而把网永久打开——必须靠 ACI 自记状态，不靠查询。
+    """
+    opened: list[bool] = []
 
-    assert session.network_enabled is False
+    class TrackingSession(FakeSandboxSession):
+        def set_network(self, enabled):
+            opened.append(enabled)
+            super().set_network(enabled)
+
+    session = TrackingSession(workspace=workspace)
+    session.set_network(False)  # 模拟 runner 在 testing 前断网
+    opened.clear()
+
+    aci = PaperACI(session, workspace, make_plan(), timeout_seconds=300)
+    aci.execute(InstallRequirementAction(action="install_requirement", requirement="numpy"))
+
+    # 时序：先开（装包），后关（恢复基线）
+    assert opened == [True, False]
+    assert session.network_state is False
 
 
 @pytest.mark.parametrize(
@@ -292,7 +327,7 @@ def test_13b_install_requirement_restores_disabled_network(aci, session):
     ],
 )
 def test_14_install_requirement_rejects_without_opening_network(aci, session, requirement):
-    session.network_enabled = False
+    session.set_network(False)
     result = aci.execute(
         InstallRequirementAction(action="install_requirement", requirement=requirement)
     )
@@ -301,7 +336,7 @@ def test_14_install_requirement_rejects_without_opening_network(aci, session, re
     assert result.summary == REQUIREMENT_NOT_ALLOWED
     assert session.commands == []
     # 校验失败不能开网
-    assert session.network_enabled is False
+    assert session.network_state is False
 
 
 def test_15_install_requirement_restores_network_on_exception(workspace):
@@ -310,7 +345,7 @@ def test_15_install_requirement_restores_network_on_exception(workspace):
             raise RuntimeError("container closed")
 
     session = BoomSession(workspace=workspace)
-    session.network_enabled = False
+    session.set_network(False)
     aci = PaperACI(session, workspace, make_plan(), timeout_seconds=300)
 
     with pytest.raises(RuntimeError):
@@ -318,7 +353,7 @@ def test_15_install_requirement_restores_network_on_exception(workspace):
             InstallRequirementAction(action="install_requirement", requirement="numpy")
         )
 
-    assert session.network_enabled is False
+    assert session.network_state is False
 
 
 def test_16_set_environment_allowed(aci, session):
@@ -350,7 +385,7 @@ def test_18_run_smoke_test_uses_plan_command(aci, session, workspace):
     result = aci.execute(RunSmokeTestAction(action="run_smoke_test"))
 
     assert session.commands == [["python", "-m", "app"]]
-    assert session.network_enabled is False
+    assert session.network_state is False
     assert result.ok is True
     assert result.exit_code == 0
 
