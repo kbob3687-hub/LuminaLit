@@ -83,6 +83,13 @@ class SandboxSession(Protocol):
 - 超时后 session 已死：抛 `SandboxClosedError`，Harness 记 `failed`，`failure_category=timeout`。
 - 两个异常类已定义在 `sandbox/base.py`，不要另造。
 
+### 1.5 requirements.txt 内容校验
+
+- `pip install -r requirements.txt` 读的是仓库自带的文件——内容来自任意公开仓库，与 AI 给的依赖串（§2.2 `install_requirement`）同属不可信输入。
+- Harness 在执行安装前对合并后的文件逐行校验（`harness/requirements_guard.py`）：跳过空行与 `#` 注释；单行规则与 §2.2 一致（拒绝分号、`&&`、`|`、反引号、`$(`、`@` 直引，必须能被 `packaging.Requirement` 解析）；另拒绝以 `-` 开头的 pip 选项与含反斜杠的续行。
+- 任一行不合法 → 整体拒绝，run 判 `failed`，`failure_category=requirements_rejected`，不执行任何 pip 命令（拒绝时零副作用）。
+- install 结束后网络一律关回断网（`try/finally`），execute 抛异常也不例外。
+
 ## 2. ACI 接口约定
 
 代码位置：`src/paperharness/aci/`（待写）。
