@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from "motion/react";
 import clsx from "clsx";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { labelOf, type RunEvent, type RunState, type RunStatus } from "../types";
 import {
   aciTrace,
@@ -12,7 +12,7 @@ import {
   type ActionRow,
   type StageView,
 } from "../runModel";
-import { StageTrack, dur } from "./StageTrack";
+import { StageTrack } from "./StageTrack";
 import { LoopStrip } from "./LoopStrip";
 import { Drawer } from "./Drawer";
 import { AciPanel, LoopPanel, PlanPanel, StagePanel } from "./DrawerPanels";
@@ -64,6 +64,33 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
   const stages = useMemo(() => buildStages(events, status?.state), [events, status?.state]);
   const loop = useMemo(() => buildLoop(events, status?.state), [events, status?.state]);
   const rows = useMemo(() => buildRows(events), [events]);
+
+  /**
+   * 当前状态已持续多久（本地观测，不是后端时间戳——契约里没有）。
+   *
+   * 用途只有一个：把"卡住"变得可见。后端在 preparing 阶段只写 state、
+   * 不写事件，界面就会一片空白；不给一个跳动的数字，看的人分不清是
+   * "没连上"还是"连上了但后端没话说"。
+   */
+  const stateSince = useRef<number>(Date.now());
+  const lastState = useRef<RunState | null>(null);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    if (lastState.current !== state) {
+      lastState.current = state;
+      stateSince.current = Date.now();
+    }
+  }, [state]);
+
+  useEffect(() => {
+    if (!connected || ["succeeded", "failed", "cancelled"].includes(state)) return;
+    const t = window.setInterval(() => setTick((n) => n + 1), 1000);
+    return () => window.clearInterval(t);
+  }, [connected, state]);
+
+  const stageElapsedMs = Math.max(0, Date.now() - stateSince.current + tick * 0);
+  const silent = connected && rows.length === 0 && stageElapsedMs > 4000;
 
   const blockedCount = rows.filter((r) => r.blocked).length;
   const reviewCount = rows.filter((r) => r.name !== "install" && r.name !== "test").length;
@@ -209,7 +236,13 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
               <>
                 {" · 当前阶段 "}
                 <b className="font-medium text-ink-mid">{activeStage.label}</b>
-                {dur(activeStage.durationMs) && ` ${dur(activeStage.durationMs)}`}
+                {` 已持续 ${fmtSec(stageElapsedMs)}`}
+              </>
+            )}
+            {silent && (
+              <>
+                {" · "}
+                <b className="font-medium text-warn">后端本阶段无新事件</b>
               </>
             )}
           </p>
@@ -260,10 +293,22 @@ export function RunScene({ mode, status, events, onCancel, cancelling }: Props) 
           </div>
 
           {rows.length === 0 && (
-            <div className="mt-10 text-center font-mono text-[11.5px] text-ink-muted">
-              {replay
-                ? "回放即将开始…（本地时间轴，逐条事件推进）"
-                : "等待后端事件…（日志与动作由 1000ms 轮询增量拉取）"}
+            <div className="mt-10 text-center font-mono text-[11.5px] leading-relaxed text-ink-muted">
+              {replay ? (
+                "回放即将开始…（本地时间轴，逐条事件推进）"
+              ) : silent ? (
+                <>
+                  <div className="text-warn">
+                    已连接后端，但它在 <b>{state}</b> 阶段没写任何动作事件
+                  </div>
+                  <div className="mt-2 text-[11px] text-ink-muted">
+                    该阶段只更新 state、不产生事件，已持续 {fmtSec(stageElapsedMs)}。
+                    界面不替它编进度——下方 trace 由 GET /api/runs/{"{id}"}/events 增量拉取。
+                  </div>
+                </>
+              ) : (
+                "等待后端事件…（日志与动作由 1000ms 轮询增量拉取）"
+              )}
             </div>
           )}
 
@@ -498,6 +543,13 @@ function Telemetry({ status, state }: { status: RunStatus | null; state: RunStat
       ))}
     </>
   );
+}
+
+function fmtSec(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m${String(s % 60).padStart(2, "0")}s`;
 }
 
 function stageLabelOf(state: RunState): string {

@@ -17,15 +17,18 @@ export default function App() {
   const [scene, setScene] = useState<Scene>("select");
   const [paper, setPaper] = useState({ name: "PySINDy", id: "paper-pysindy" });
   const [bursts, setBursts] = useState<ParticleBurst[]>([]);
-  const [runId, setRunId] = useState<string | null>(null);
+  const [runId, setRunId] = useState<string | null>(() => {
+    // ?run=<id> 直接盯一个已存在的 run（调试/答辩演示用，不经过选择页）
+    return new URLSearchParams(window.location.search).get("run");
+  });
   const [creating, setCreating] = useState(false);
   const [pickError, setPickError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const timer = useRef<number | null>(null);
 
-  /** 截图/演示直链：?scene=run / ?scene=welcome，并可用 ?still=1 关闭动画。 */
+  /** 截图/演示直链：?scene=run / ?scene=welcome，?run=<id> 直接盯一个 run。 */
   const q = new URLSearchParams(window.location.search);
-  const initialScene = (q.get("scene") as Scene | null) ?? "select";
+  const initialScene = (q.get("scene") as Scene | null) ?? (q.get("run") ? "run" : "select");
 
   useEffect(() => {
     if (initialScene !== "select") setScene(initialScene);
@@ -44,7 +47,7 @@ export default function App() {
    * ?demo=0 可以强制关掉回放（配合 ?live=1 做真联调）。
    */
   const apiBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
-  const canLive = Boolean(apiBase) || q.get("live") === "1";
+  const canLive = Boolean(apiBase) || q.get("live") === "1" || Boolean(q.get("run"));
   const wantReplay = q.get("demo") === "1" || import.meta.env.VITE_DEMO === "1";
   const mode: "live" | "replay" = wantReplay || !canLive ? "replay" : "live";
   const demo = mode === "replay";
