@@ -153,18 +153,54 @@ body{background:var(--void);color:var(--ink);font-family:var(--sans);overflow:hi
   box-shadow:0 0 12px var(--accent);animation:pulse 2s ease-in-out infinite}
 .tb-run{font-family:var(--mono);font-size:11px;color:var(--ink-muted)}
 .tb-sp{flex:1}
-/* 顶部迷你总进度 */
-.tb-progress{display:flex;align-items:center;gap:11px;cursor:pointer;padding:5px 12px;
-  border-radius:8px;border:1px solid transparent;transition:.3s}
+/* 顶部 3D 立体进度盘 */
+.tb-progress{display:flex;align-items:center;gap:13px;cursor:pointer;padding:4px 14px 4px 6px;
+  border-radius:11px;border:1px solid transparent;transition:.3s}
 .tb-progress:hover{border-color:var(--rule-hi);background:rgba(255,255,255,.04)}
-.tb-ring{width:30px;height:30px;transform:rotate(-90deg)}
-.tb-ring .bg{fill:none;stroke:rgba(255,255,255,.08);stroke-width:3}
-.tb-ring .fg{fill:none;stroke:var(--accent);stroke-width:3;stroke-linecap:round;
-  stroke-dasharray:88;stroke-dashoffset:88;transition:stroke-dashoffset .8s cubic-bezier(.16,1,.3,1);
-  filter:drop-shadow(0 0 4px rgba(108,143,255,.8))}
-.tb-eta{font-family:var(--mono);font-size:11px;color:var(--ink-mid);line-height:1.45;text-align:left}
+.g3d{width:54px;height:54px;perspective:95px;position:relative;flex:0 0 auto}
+.g3d-disc{position:absolute;inset:0;border-radius:50%;transform-style:preserve-3d;
+  transform:rotateX(20deg) rotateZ(-10deg);transition:transform .55s cubic-bezier(.16,1,.3,1)}
+.tb-progress:hover .g3d-disc{transform:rotateX(8deg) rotateZ(0deg) scale(1.07)}
+/* 盘体厚度：底层柱身 */
+.g3d-side{position:absolute;inset:0;border-radius:50%;transform:translateZ(-8px);
+  background:radial-gradient(circle at 42% 30%,#1c2336,#0a0d14 72%);
+  box-shadow:0 2px 0 #05070b,0 5px 0 #04060a,0 12px 22px rgba(0,0,0,.95)}
+.g3d-base{position:absolute;inset:0;border-radius:50%;transform:translateZ(0);
+  background:radial-gradient(circle at 34% 24%,#2f3a56,#12151e 62%,#090b11);
+  box-shadow:inset 0 1px 1px rgba(255,255,255,.2),inset 0 -2px 7px rgba(0,0,0,.8)}
+.g3d-arc{position:absolute;inset:0;border-radius:50%;transform:translateZ(3px);
+  background:conic-gradient(from -90deg,#b9ceff 0deg,#7d9dff calc(var(--p,0)*1.8deg),var(--accent) calc(var(--p,0)*3.6deg),rgba(255,255,255,.05) calc(var(--p,0)*3.6deg) 360deg);
+  -webkit-mask:radial-gradient(closest-side,transparent 55%,#000 56%);
+  mask:radial-gradient(closest-side,transparent 55%,#000 56%);
+  filter:drop-shadow(0 0 7px rgba(108,143,255,.95))}
+.g3d-ticks{position:absolute;inset:0;border-radius:50%;transform:translateZ(3.5px);
+  background:repeating-conic-gradient(from 0deg,rgba(255,255,255,.3) 0deg .7deg,transparent .7deg 15deg);
+  -webkit-mask:radial-gradient(closest-side,transparent 86%,#000 87%);
+  mask:radial-gradient(closest-side,transparent 86%,#000 87%);opacity:.7}
+/* 凸起中枢 */
+.g3d-boss{position:absolute;inset:14px;border-radius:50%;display:grid;place-items:center;
+  transform:translateZ(10px);
+  background:radial-gradient(circle at 34% 22%,#4d5c80,#1c2231 55%,#0c0f16);
+  box-shadow:inset 0 1.5px 2px rgba(255,255,255,.32),inset 0 -4px 8px rgba(0,0,0,.9),
+    0 4px 8px rgba(0,0,0,.7),0 0 0 1px rgba(255,255,255,.05);
+  font-family:var(--mono);font-size:10.5px;font-weight:600;color:#e6ecff;letter-spacing:-.03em;
+  text-shadow:0 1px 2px rgba(0,0,0,.95),0 0 10px rgba(108,143,255,.7)}
+.g3d-rim{position:absolute;inset:-1px;border-radius:50%;transform:translateZ(4px);pointer-events:none;
+  box-shadow:inset 0 1.5px 0 rgba(255,255,255,.32),inset 0 -2px 3px rgba(0,0,0,.55),
+    inset 0 0 0 1px rgba(255,255,255,.05)}
+.g3d-spec{position:absolute;inset:0;border-radius:50%;pointer-events:none;opacity:.4;transform:translateZ(11px);
+  background:linear-gradient(150deg,rgba(255,255,255,.6) 0%,rgba(255,255,255,.12) 20%,transparent 44%)}
+.g3d-shadow{position:absolute;left:5%;right:5%;bottom:-9px;height:10px;border-radius:50%;
+  background:radial-gradient(ellipse,rgba(108,143,255,.5),transparent 72%);filter:blur(5px)}
+.tb-eta{font-family:var(--mono);font-size:11px;color:var(--ink-mid);line-height:1.4;text-align:left}
 .tb-eta b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
-.tb-eta .sub{font-size:9.5px;color:var(--ink-muted);letter-spacing:.08em}
+.tb-eta .remain{display:flex;align-items:baseline;gap:6px;font-size:10px;color:var(--ink-muted);letter-spacing:.06em}
+.tb-eta .remain b{font-size:14.5px;letter-spacing:-.02em;text-shadow:0 0 18px rgba(108,143,255,.6)}
+.tb-eta .bar{height:3px;border-radius:2px;background:rgba(255,255,255,.09);margin:3px 0 2px;overflow:hidden}
+.tb-eta .bar i{display:block;height:100%;width:0;border-radius:2px;
+  background:linear-gradient(90deg,var(--accent),#a6c4ff);box-shadow:0 0 10px var(--accent);
+  transition:width .8s cubic-bezier(.16,1,.3,1)}
+.tb-eta .sub{font-size:9px;color:var(--ink-muted);letter-spacing:.07em}
 /* 主导航 */
 .nav{display:flex;gap:4px}
 .nav button{padding:8px 16px;border-radius:7px;border:1px solid transparent;background:transparent;
@@ -332,6 +368,8 @@ body{background:var(--void);color:var(--ink);font-family:var(--sans);overflow:hi
 .chip:hover{color:var(--ink);border-color:rgba(108,143,255,.6);background:rgba(108,143,255,.1);
   box-shadow:0 6px 20px -8px rgba(108,143,255,.5);transform:translateY(-2px)}
 .chip .cdot{width:5px;height:5px;border-radius:50%;background:var(--pass);box-shadow:0 0 6px var(--pass)}
+.chip .cx{opacity:0;margin-left:7px;font-size:10px;color:var(--accent);transition:.22s;display:inline-block}
+.chip:hover .cx{opacity:1;transform:translate(1px,-1px)}
 .sd-nav{display:flex;justify-content:space-between;padding:0 26px 24px}
 
 /* diff 块 */
@@ -343,6 +381,63 @@ body{background:var(--void);color:var(--ink);font-family:var(--sans);overflow:hi
 .diff .add{color:var(--pass);background:rgba(46,230,168,.07)}
 .diff .del{color:var(--reject);background:rgba(255,92,71,.07)}
 .diff .ctx{color:var(--ink-muted)}
+
+/* ═══════════════ 产物查看器（全屏自适应） ═══════════════ */
+#view-artifact{overflow:hidden}
+.av{display:flex;flex-direction:column;height:100%}
+.av-head{display:flex;align-items:center;gap:14px;padding:14px 26px;flex:0 0 auto;
+  border-bottom:1px solid var(--rule);background:linear-gradient(180deg,rgba(255,255,255,.02),transparent)}
+.av-back{display:inline-flex;align-items:center;gap:8px;padding:7px 14px;border-radius:8px;
+  border:1px solid var(--rule-hi);background:rgba(255,255,255,.03);color:var(--ink-mid);
+  font-family:var(--mono);font-size:11.5px;cursor:pointer;transition:.25s}
+.av-back:hover{color:var(--ink);border-color:rgba(108,143,255,.6);background:rgba(108,143,255,.1)}
+.av-back .arr{transition:transform .25s}
+.av-back:hover .arr{transform:translateX(-3px)}
+.av-file{font-family:var(--mono);font-size:15px;font-weight:600;letter-spacing:-.01em}
+.av-kind{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;color:var(--accent);
+  border:1px solid rgba(108,143,255,.38);background:rgba(108,143,255,.1);padding:3px 8px;border-radius:5px}
+.av-meta{margin-left:auto;display:flex;gap:20px;font-family:var(--mono);font-size:10.5px;color:var(--ink-muted)}
+.av-meta b{color:var(--ink-mid);font-weight:500}
+.av-body{flex:1;min-height:0;display:flex;overflow:hidden}
+.av-code{flex:1;min-width:0;overflow:auto;padding:16px 26px 44px;background:rgba(0,0,0,.28);
+  font-family:var(--mono);font-size:12px;line-height:1.9}
+.av-code .row{display:flex;gap:16px}
+.av-code .no{color:#353d54;user-select:none;text-align:right;min-width:26px;flex:0 0 auto}
+.av-code .ln{flex:1;white-space:pre;color:var(--ink-mid)}
+.av-code .ln .a{color:var(--accent)}
+.av-code .ln .p{color:var(--pass)}
+.av-code .ln .r{color:var(--reject)}
+.av-code .ln .w{color:var(--warn)}
+.av-code .ln .d{color:var(--ink-muted)}
+.av-code .ln .k{color:#b39cff}
+.av-report{flex:1;overflow:auto;padding:26px 30px 60px}
+.av-report .rp{max-width:960px;margin:0 auto;border:1px solid var(--rule);border-radius:12px;
+  background:linear-gradient(180deg,rgba(255,255,255,.025),rgba(255,255,255,.008));padding:26px 30px}
+.av-report h1{font-size:21px;letter-spacing:-.02em;margin:0 0 4px}
+.av-report .rp-sub{font-family:var(--mono);font-size:10.5px;color:var(--ink-muted);margin-bottom:20px}
+.av-report h2{font-size:12px;letter-spacing:.14em;color:var(--accent);text-transform:uppercase;
+  margin:26px 0 10px;font-weight:600}
+.av-report table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px}
+.av-report th,.av-report td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--rule)}
+.av-report th{color:var(--ink-muted);font-weight:500;font-size:10px;letter-spacing:.1em;text-transform:uppercase}
+.av-report td b{color:var(--ink)}
+.av-report .ok{color:var(--pass)}
+.av-report .bad{color:var(--reject)}
+
+/* 悬浮返回药丸 */
+.back-pill{position:fixed;left:24px;bottom:22px;z-index:70;display:none;align-items:center;gap:10px;
+  padding:9px 16px 9px 13px;border-radius:999px;border:1px solid var(--rule-hi);
+  background:rgba(18,21,30,.88);backdrop-filter:blur(16px);color:var(--ink-mid);
+  font-family:var(--mono);font-size:11.5px;cursor:pointer;
+  box-shadow:0 12px 34px -12px rgba(0,0,0,.95),inset 0 1px 0 rgba(255,255,255,.06);transition:.25s}
+.back-pill.on{display:inline-flex;animation:bpIn .34s cubic-bezier(.16,1,.3,1) both}
+@keyframes bpIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+.back-pill:hover{color:var(--ink);border-color:rgba(108,143,255,.6);background:rgba(29,37,56,.95);
+  transform:translateY(-1px);box-shadow:0 16px 38px -12px rgba(0,0,0,.95),0 0 0 3px rgba(108,143,255,.1)}
+.back-pill .arr{transition:transform .25s}
+.back-pill:hover .arr{transform:translateX(-3px)}
+.back-pill kbd{font-family:var(--mono);font-size:9px;padding:2px 6px;border-radius:4px;
+  border:1px solid var(--rule-hi);background:rgba(255,255,255,.06);color:var(--ink-muted)}
 
 /* ═══════════════ 沙箱实时页 ═══════════════ */
 .sb-grid{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:0;height:100%}
@@ -517,17 +612,27 @@ body{background:var(--void);color:var(--ink);font-family:var(--sans);overflow:hi
 
 <!-- ═══════ 场景 3：外壳（主控台 / 阶段详情 / 沙箱实时） ═══════ -->
 <section class="scene" id="scene-shell">
+  <button class="back-pill" id="back-pill"><span class="arr">←</span> 返回 <kbd>Esc</kbd></button>
   <div class="topbar">
     <div class="tb-brand" id="tb-brand"><i></i>PaperHarness</div>
     <div class="tb-run" id="tb-run">run_a3f29c · PySINDy</div>
     <div class="tb-sp"></div>
     <div class="tb-progress" id="tb-progress" title="点击回到主控台">
-      <svg class="tb-ring" viewBox="0 0 32 32">
-        <circle class="bg" cx="16" cy="16" r="14"></circle>
-        <circle class="fg" id="ring-fg" cx="16" cy="16" r="14"></circle>
-      </svg>
+      <div class="g3d" id="g3d">
+        <div class="g3d-disc">
+          <div class="g3d-side"></div>
+          <div class="g3d-base"></div>
+          <div class="g3d-arc"></div>
+          <div class="g3d-ticks"></div>
+          <div class="g3d-rim"></div>
+          <div class="g3d-boss"><span id="eta-pct">0%</span></div>
+          <div class="g3d-spec"></div>
+        </div>
+        <div class="g3d-shadow"></div>
+      </div>
       <div class="tb-eta">
-        <div><b id="eta-pct">0%</b> · 剩余 <b id="eta-left">--:--</b></div>
+        <div class="remain">剩余 <b id="eta-left">--:--</b></div>
+        <div class="bar"><i id="eta-bar"></i></div>
         <div class="sub" id="eta-elapsed">已运行 00:00 / 预估 01:13</div>
       </div>
     </div>
@@ -581,6 +686,7 @@ body{background:var(--void);color:var(--ink);font-family:var(--sans);overflow:hi
 
     <!-- 阶段详情 -->
     <div class="view" id="view-stage"></div>
+    <div class="view" id="view-artifact"></div>
 
     <!-- 沙箱实时 -->
     <div class="view" id="view-sandbox">
@@ -852,15 +958,55 @@ function go(name){
   setTimeout(()=>{from.classList.remove('on','out');to.classList.add('on');curScene=name;
     if(name==='welcome')playWelcome();
     if(name==='shell'&&!booted){booted=true;bootRun();}
+    if(name==='shell'){history.replaceState({view:'dash',stage:null,art:0},'','#run');
+      curView='dash';syncBackPill();}
   },420);
 }
-function showView(name){
-  curView=name;
-  $$('.view').forEach(v=>v.classList.remove('on'));
-  $('#view-'+name).classList.add('on');
-  $$('.nav button').forEach(b=>b.classList.toggle('on',b.dataset.nav===name||(name==='stage'&&b.dataset.nav==='dash')));
-  if(name==='sandbox') termFollow();
+/* ═══════════════ 视图切换 + 历史（浏览器后退 / Esc / 悬浮返回） ═══════════════ */
+let curArt=0;
+function hashFor(v){
+  if(v==='stage'&&curStage) return '#stage/'+curStage;
+  if(v==='artifact'&&curStage) return '#artifact/'+curStage+'/'+curArt;
+  if(v==='sandbox') return '#sandbox';
+  return '#run';
 }
+function syncBackPill(){
+  const b=$('#back-pill'); if(!b)return;
+  b.classList.toggle('on',curScene==='shell'&&curView!=='dash');
+}
+function applyNav(st){
+  st=st||{view:'dash'};
+  if(st.stage)curStage=st.stage;
+  if(typeof st.art==='number')curArt=st.art;
+  const name=st.view||'dash'; curView=name;
+  $$('.view').forEach(v=>v.classList.remove('on'));
+  const el=$('#view-'+name); if(el)el.classList.add('on');
+  if(name==='stage'&&curStage)renderStage();
+  if(name==='artifact'&&curStage)renderArtifact();
+  $$('.nav button').forEach(b=>b.classList.toggle('on',
+    b.dataset.nav===name||((name==='stage'||name==='artifact')&&b.dataset.nav==='dash')));
+  if(name==='sandbox')termFollow();
+  syncBackPill();
+}
+function showView(name,opts){
+  const st={view:name,stage:curStage,art:curArt};
+  applyNav(st);
+  if(opts&&opts.silent)return;
+  if(opts&&opts.replace)history.replaceState(st,'',hashFor(name));
+  else history.pushState(st,'',hashFor(name));
+}
+addEventListener('popstate',e=>applyNav(e.state||{view:'dash'}));
+function goBack(){
+  const ov=$$('.overlay.on')[0];
+  if(ov){ov.classList.remove('on');return}
+  if(curScene!=='shell')return;
+  if(history.state&&history.length>1){history.back();return}
+  showView('dash');
+}
+$('#back-pill').addEventListener('click',goBack);
+addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&curScene==='shell'&&curView!=='dash'){e.preventDefault();goBack()}
+});
 $$('.nav button').forEach(b=>b.addEventListener('click',()=>{
   const n=b.dataset.nav;
   if(n==='plan'){openModal('#ov-plan');return}
@@ -951,7 +1097,8 @@ function renderTrack(){
 function openStage(id){
   const s=STAGES.find(x=>x.id===id); if(!s)return;
   if(s.st==='todo'){toast('这一步还没开始，等它点亮后再看');return}
-  curStage=id; renderStage(); showView('stage');
+  const same=curView==='stage';
+  curStage=id; renderStage(); showView('stage',{replace:same});
 }
 function renderStage(){
   const i=STAGES.findIndex(x=>x.id===curStage), s=STAGES[i];
@@ -993,8 +1140,8 @@ function renderStage(){
        </div>
        <div class="panel" style="margin-top:16px">
          <div class="panel-t">产出</div>
-         <div class="panel-b"><div class="chips">${s.artifact.map(a=>`
-           <span class="chip"><span class="cdot"></span>${a[0]} · ${a[1]}</span>`).join('')}</div>
+         <div class="panel-b"><div class="chips">${s.artifact.map((a,j)=>`
+           <span class="chip" data-art="${j}" title="点击查看 ${esc(a[1])}"><span class="cdot"></span>${a[0]} · ${a[1]}<span class="cx">↗</span></span>`).join('')}</div>
          </div>
        </div>
        ${isRepair?`
@@ -1015,6 +1162,234 @@ function renderStage(){
    </div>`;
   $('#view-stage .crumb .c').addEventListener('click',()=>showView('dash'));
   $$('#view-stage [data-nav-stage]').forEach(b=>b.addEventListener('click',()=>openStage(b.dataset.navStage)));
+  $$('#view-stage .chip[data-art]').forEach(c=>c.addEventListener('click',
+    ()=>openArtifact(curStage,Number(c.dataset.art))));
+}
+
+/* ═══════════════ 产物查看器 ═══════════════ */
+function codeRows(txt){
+  return txt.split('\n').map((l,i)=>
+    `<div class="row"><span class="no">${i+1}</span><span class="ln">${esc(l)||' '}</span></div>`).join('');
+}
+const OUT_TXT=[
+'PaperHarness reproduce artifact',
+'--------------------------------------------',
+'run_id      run_a3f29c',
+'target      PySINDy  arXiv:2004.08424',
+'image       paperharness/target-pysindy:run_a3f29c',
+'command     python -I check.py         (frozen by plan, not editable)',
+'exit_code   0',
+'elapsed     01:12.8',
+'',
+'[discovered equations]',
+"(x)' = -2.000 x",
+"(y)' =  1.000 y",
+'',
+'[verification]',
+'field        expected     actual     tol      result',
+"x' coeff     -2.0         -2.000     1e-2     PASS",
+"y' coeff      1.0          1.000     1e-2     PASS",
+'artifact     out.txt      present     -        PASS',
+'',
+'[note]',
+'derivatives estimated by finite difference; deviation near 1e-4 is expected.'
+].join('\n');
+const STDERR_TXT=[
+'[stderr] python -I check.py',
+'Traceback (most recent call last):',
+'  File "/workspace/check.py", line 6, in <module>',
+'    import pysindy as ps',
+"ModuleNotFoundError: No module named 'pysindy'",
+'',
+'[harness] exit code = 1 · duration 3.4s · cwd /workspace',
+'[harness] captured 1 exception · classified as missing_dependency',
+'[sandbox] network still disabled (no outbound connection attempted)'
+].join('\n');
+const DIAG_TXT=[
+'{',
+'  "failure_category": "missing_dependency",',
+'  "exit_code": 1,',
+'  "signal": null,',
+'  "missing_modules": ["pysindy"],',
+'  "evidence": {',
+'    "stderr_hash": "9f2c1a0e",',
+'    "first_frame": "check.py:6",',
+'    "package_manager": "pip",',
+'    "declared_in": null',
+'  },',
+'  "candidate_fixes": [',
+'    { "action": "install_requirement", "arg": "pysindy==2.1.0", "risk": "needs network window" },',
+'    { "action": "replace_exact", "arg": "check.py", "risk": "must match exactly once" }',
+'  ],',
+'  "note": "duplicate candidates were rejected by ACI (see interception log)"',
+'}'
+].join('\n');
+const ENV_TXT=[
+'{',
+'  "python": "3.13.7",',
+'  "packages": {',
+'    "numpy": "2.0.2",',
+'    "scipy": "1.14.1",',
+'    "scikit-learn": "1.5.2",',
+'    "pysindy": "2.1.0"',
+'  },',
+'  "network": "disabled",',
+'  "user": "1000:1000 (non-root)",',
+'  "capabilities": "ALL dropped",',
+'  "rootfs": "read-only (workspace rw)",',
+'  "pid_limit": 256,',
+'  "memory_limit": "2g"',
+'}'
+].join('\n');
+const PLAN_TXT=[
+'{',
+'  "target_id": "paper-pysindy",',
+'  "entry_command": "python -I check.py",',
+'  "python_version": "3.13",',
+'  "expected_artifact": "out.txt",',
+'  "verify": "coefficient x\' = -2.0 +/- 1e-2 and y\' = 1.0 +/- 1e-2",',
+'  "editable_after_freeze": false,',
+'  "frozen_at": "00:11.5",',
+'  "source": "model + README/check.py inspection, confirmed by human"',
+'}'
+].join('\n');
+const EV_TXT=[
+'{"seq":1,"t":"00:00.0","type":"run_created","data":{"target":"paper-pysindy"}}',
+'{"seq":2,"t":"00:02.1","type":"sandbox_ready","data":{"net":"none","user":"1000"}}',
+'{"seq":3,"t":"00:11.5","type":"plan_frozen","data":{"cmd":"python -I check.py"}}',
+'{"seq":4,"t":"00:31.0","type":"action_rejected","data":{"action":"read_file","summary":"path_escape:../../etc/passwd"}}',
+'{"seq":5,"t":"00:33.4","type":"action_rejected","data":{"action":"install_requirement","summary":"invalid_requirement:numpy; rm -rf /"}}',
+'{"seq":6,"t":"00:41.2","type":"verify_failed","data":{"category":"missing_dependency","exit":1}}',
+'{"seq":7,"t":"00:52.3","type":"patch_applied","data":{"file":"check.py","add":2,"del":1}}',
+'{"seq":8,"t":"01:12.8","type":"verify_passed","data":{"artifact":"out.txt","exit":0}}',
+'{"seq":9,"t":"01:17.8","type":"run_succeeded","data":{"report":"report.md","image":"export.tar"}}'
+].join('\n');
+const DIFF_TXT=[
+'--- a/check.py',
+'+++ b/check.py',
+'@@ -1,7 +1,8 @@',
+' import numpy as np',
+' from scipy.integrate import solve_ivp',
+'-from pysindy import SINDy',
+'+import pysindy as ps',
+'+from pysindy import SINDy',
+' ',
+' t = np.linspace(0, 1, 200)',
+' x = 3.0 * np.exp(-2.0 * t)',
+' y = 0.5 * np.exp(1.0 * t)'
+].join('\n');
+const TAR_TXT=[
+'$ docker save paperharness/target-pysindy:run_a3f29c | tar -tv',
+'-rw-r--r--  0 0 0   3.2K  manifest.json',
+'drwxr-xr-x  0 0 0     0   blobs/sha256/',
+'-rw-------  0 0 0  78.4M  blobs/sha256/8f3c...   base layer (python:3.13-slim)',
+'-rw-------  0 0 0  12.1M  blobs/sha256/2a91...   pip install pysindy==2.1.0 numpy==2.0.2 scipy scikit-learn',
+'-rw-------  0 0 0   1.8M  blobs/sha256/c07e...   workspace snapshot (patch applied)',
+'-rw-------  0 0 0   1.1K  blobs/sha256/5dd0...   config: non-root, network=none, cap-drop ALL',
+'',
+'total 92.3 MB · 5 entries · reproducible by digest'
+].join('\n');
+
+function reportHTML(){
+  return `<div class="av-report"><div class="rp">
+    <h1>复现报告 · PySINDy</h1>
+    <div class="rp-sub">run_a3f29c · arXiv:2004.08424 · 生成于 2026-11-17 17:03:12 +08:00</div>
+    <h2>结论</h2>
+    <table>
+      <tr><th>项</th><th>结果</th></tr>
+      <tr><td>最终状态</td><td class="ok"><b>succeeded</b></td></tr>
+      <tr><td>退出码</td><td>0</td></tr>
+      <tr><td>自愈轮次</td><td>1（缺依赖 → 补装 → 重跑）</td></tr>
+      <tr><td>系数核验</td><td class="ok">x&#39; = -2.000 (期望 -2.0 ± 1e-2) · y&#39; = 1.000 (期望 1.0 ± 1e-2)</td></tr>
+      <tr><td>产物核验</td><td class="ok">out.txt 存在 · 内容与论文一致</td></tr>
+    </table>
+    <h2>环境</h2>
+    <table>
+      <tr><th>项</th><th>值</th></tr>
+      <tr><td>镜像</td><td>paperharness/target-pysindy:run_a3f29c</td></tr>
+      <tr><td>Python</td><td>3.13.7</td></tr>
+      <tr><td>关键依赖</td><td>numpy 2.0.2 · scipy 1.14.1 · scikit-learn 1.5.2 · pysindy 2.1.0</td></tr>
+      <tr><td>隔离</td><td>非 root(1000) · network=none · cap-drop ALL · rootfs 只读</td></tr>
+    </table>
+    <h2>自愈过程</h2>
+    <table>
+      <tr><th>时间</th><th>事件</th><th>结果</th></tr>
+      <tr><td>00:31.0</td><td>read_file ../../etc/passwd</td><td class="bad">拒绝 · path_escape · 零副作用</td></tr>
+      <tr><td>00:33.4</td><td>install_requirement "numpy; rm -rf /"</td><td class="bad">拒绝 · 含命令分隔符 · 未开网</td></tr>
+      <tr><td>00:41.2</td><td>首次运行 python -I check.py</td><td class="bad">exit 1 · missing_dependency</td></tr>
+      <tr><td>00:52.3</td><td>patch check.py（import pysindy）</td><td class="ok">唯一匹配 · 已应用</td></tr>
+      <tr><td>00:53.9</td><td>install_requirement pysindy==2.1.0</td><td class="ok">临时开网 10.6s · 已恢复断网</td></tr>
+      <tr><td>01:12.8</td><td>重跑冻结命令</td><td class="ok">exit 0 · 产物核验通过</td></tr>
+    </table>
+    <h2>产物</h2>
+    <table>
+      <tr><th>名称</th><th>说明</th></tr>
+      <tr><td>out.txt</td><td>方程系数与核验结果（可机读断言）</td></tr>
+      <tr><td>patch.diff</td><td>本次自愈的全部改动（1 文件 +2 −1）</td></tr>
+      <tr><td>events.jsonl</td><td>9 条事件，可从任意 seq 回放</td></tr>
+      <tr><td>environment.json</td><td>锁定的依赖版本与隔离参数</td></tr>
+      <tr><td>export.tar</td><td>可直接 docker load 的镜像快照，92.3 MB</td></tr>
+    </table>
+  </div></div>`;
+}
+const ART_DOCS={
+  'out.txt':{kind:'TEXT / 已核验',size:'1.6 KB',html:'<div class="av-code">'+codeRows(OUT_TXT)+'</div>'},
+  'report.md':{kind:'MARKDOWN',size:'4.2 KB',html:reportHTML()},
+  'export tar':{kind:'TAR.ARCHIVE',size:'92.3 MB',html:'<div class="av-code">'+codeRows(TAR_TXT)+'</div>'},
+  'patch.diff':{kind:'UNIFIED DIFF',size:'0.6 KB',html:'<div class="av-code">'+codeRows(DIFF_TXT)+'</div>'},
+  'events.jsonl':{kind:'NDJSON',size:'18.4 KB',html:'<div class="av-code">'+codeRows(EV_TXT)+'</div>'},
+  'stderr tail':{kind:'STDERR / 证据',size:'0.9 KB',html:'<div class="av-code">'+codeRows(STDERR_TXT)+'</div>'},
+  '诊断结论':{kind:'JSON / DIAGNOSIS',size:'1.2 KB',html:'<div class="av-code">'+codeRows(DIAG_TXT)+'</div>'},
+  '执行计划':{kind:'JSON / FROZEN PLAN',size:'0.8 KB',html:'<div class="av-code">'+codeRows(PLAN_TXT)+'</div>'},
+  'environment.json':{kind:'JSON / LOCKFILE',size:'1.1 KB',html:'<div class="av-code">'+codeRows(ENV_TXT)+'</div>'}
+};
+function genericArtifact(a,s){
+  return `<div class="av-report"><div class="rp">
+    <h1>${esc(a[1])}</h1>
+    <div class="rp-sub">${esc(a[0])} · 由「${esc(s.name)}」阶段产生</div>
+    <h2>说明</h2>
+    <p style="color:var(--ink-mid);font-size:13px;line-height:1.9;margin:0">
+      该产物在后端由 ACI / SandboxSession 直接落盘，演示原型里只保留名称与归属阶段。
+      <b style="color:var(--warn)">这里不编造内容</b>——接上真实 API 后，本页会用
+      <code style="color:var(--accent)">GET /api/runs/{id}/artifacts/{name}</code> 拉原始字节原样展示。
+    </p>
+    <h2>接入约定</h2>
+    <table>
+      <tr><th>项</th><th>值</th></tr>
+      <tr><td>artifact</td><td><b>${esc(a[1])}</b></td></tr>
+      <tr><td>来源阶段</td><td>${esc(s.name)}</td></tr>
+      <tr><td>存放位置</td><td>run_dir/workspace/${esc(a[1])}</td></tr>
+      <tr><td>获取方式</td><td>GET /api/runs/{run_id}/artifacts/${esc(a[1])}</td></tr>
+      <tr><td>前端约束</td><td>只读展示 · 不落宿主路径 · 不执行</td></tr>
+    </table>
+  </div></div>`;
+}
+function openArtifact(stageId,idx){
+  curStage=stageId||curStage; curArt=Number(idx)||0;
+  renderArtifact(); showView('artifact');
+}
+function renderArtifact(){
+  const s=STAGES.find(x=>x.id===curStage); if(!s)return;
+  const a=s.artifact[curArt]||s.artifact[0]; if(!a)return;
+  const doc=ART_DOCS[a[1]]||{kind:'ARTIFACT',size:'—',html:genericArtifact(a,s)};
+  $('#view-artifact').innerHTML=`
+   <div class="av">
+     <div class="av-head">
+       <button class="av-back" id="av-back"><span class="arr">←</span> 返回阶段</button>
+       <div class="av-file">${esc(a[1])}</div>
+       <span class="av-kind">${doc.kind}</span>
+       <div class="av-meta">
+         <span>来源 <b>${esc(s.name)}</b></span>
+         <span>大小 <b>${doc.size}</b></span>
+         <span>校验 <b style="color:var(--pass)">已核验</b></span>
+       </div>
+     </div>
+     <div class="av-body">${doc.html}</div>
+   </div>`;
+  $('#av-back').addEventListener('click',()=>{
+    if(history.state&&history.state.view==='artifact'&&history.length>1)history.back();
+    else showView('stage',{replace:true});
+  });
 }
 
 /* ═══════════════ 最近动作 ═══════════════ */
@@ -1076,7 +1451,8 @@ function updateProgress(){
   $('#eta-pct').textContent=pct+'%';
   $('#eta-left').textContent=fmt(remain);
   $('#eta-elapsed').textContent=`已运行 ${fmt(elapsed)} / 预估 ${fmt(total)}`;
-  $('#ring-fg').style.strokeDashoffset=CIRC*(1-elapsed/total);
+  const g=$('#g3d'); if(g) g.style.setProperty('--p',pct);
+  const bar=$('#eta-bar'); if(bar) bar.style.width=pct+'%';
   const cost=$('#tele-cost'); if(cost) cost.textContent=`${fmt(Math.round(53+elapsed-53))} / 05:00`;
 }
 
@@ -1195,12 +1571,17 @@ function bootRun(){
 /* hash 直达（调试 / 演示深链用） */
 (function(){
   const h=location.hash;
-  if(h==='#run'||h.startsWith('#stage/')||h==='#sandbox'){
+  if(h==='#run'||h.startsWith('#stage/')||h.startsWith('#artifact/')||h==='#sandbox'){
     ['select','welcome'].forEach(k=>{SC[k].classList.remove('on');SC[k].style.display='none'});
     SC.shell.classList.add('on');curScene='shell';booted=true;bootRun();
+    history.replaceState({view:'dash',stage:null,art:0},'','#run');
     requestAnimationFrame(()=>requestAnimationFrame(()=>{
       if(h.startsWith('#stage/'))openStage(h.slice(7));
-      if(h==='#sandbox')showView('sandbox');
+      else if(h.startsWith('#artifact/')){
+        const [,sid,idx]=h.split('/');
+        openArtifact(sid,Number(idx)||0);
+      }
+      else if(h==='#sandbox')showView('sandbox');
     }));
   }
 })();
