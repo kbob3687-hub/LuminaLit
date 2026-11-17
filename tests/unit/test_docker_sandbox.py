@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from paperharness.sandbox import docker_sandbox as ds
+from paperharness.sandbox.base import SandboxUnavailableError
 from paperharness.sandbox.docker_sandbox import DockerSandboxSession, _tail
 
 
@@ -55,6 +56,150 @@ class FakeClient:
 
 class FakeContainer:
     id = "fake-container-id"
+
+
+class FakeDockerErrors:
+    class DockerException(Exception):
+        pass
+
+    class NotFound(DockerException):
+        pass
+
+
+class FakeDockerModule:
+    """`_load_docker_module()` 的替身：只需要 `errors`。"""
+
+    errors = FakeDockerErrors
+
+
+class FakeNetwork:
+    def __init__(self, name, fail_on_remove=False):
+        self.name = name
+        self.removed = False
+        self._fail_on_remove = fail_on_remove
+
+    def remove(self):
+        if self._fail_on_remove:
+            raise FakeDockerErrors.DockerException("network busy")
+        self.removed = True
+
+
+class FakeRuntimeContainer:
+    def __init__(self, status="running"):
+        self.id = "fake-runtime-container"
+        self.status = status
+        self.removed = 0
+
+    def reload(self):
+        pass
+
+    def remove(self, force=False):
+        self.removed += 1
+
+
+class FakeContainersAPI:
+    def __init__(self, status="running"):
+        self.status = status
+        self.run_calls = 0
+        self.created: list[FakeRuntimeContainer] = []
+
+    def list(self, all=True, filters=None):
+        return []
+
+    def run(self, *args, **kwargs):
+        self.run_calls += 1
+        container = FakeRuntimeContainer(status=self.status)
+        self.created.append(container)
+        return container
+
+
+class FakeNetworksAPI:
+    def __init__(self, fail_on_remove=False):
+        self.created: list[FakeNetwork] = []
+        self._fail_on_remove = fail_on_remove
+
+    def get(self, name):
+        raise FakeDockerErrors.NotFound("no such network")
+
+    def create(self, name, driver=None, labels=None):
+        network = FakeNetwork(name, fail_on_remove=self._fail_on_remove)
+        self.created.append(network)
+        return network
+
+    def list(self, filters=None):
+        return []
+
+
+class FakeImagesAPI:
+    def __init__(self, exists=True):
+        self.exists = exists
+
+    def get(self, name):
+        if not self.exists:
+            raise FakeDockerErrors.NotFound("no such image")
+        return object()
+
+
+class FakeSetupClient:
+    """构造期用的 docker client 替身，不连接任何真实引擎。"""
+
+    def __init__(self, image_exists=True, status="running", network_remove_fails=False):
+        self.images = FakeImagesAPI(exists=image_exists)
+        self.containers = FakeContainersAPI(status=status)
+        self.networks = FakeNetworksAPI(fail_on_remove=network_remove_fails)
+
+
+def build_session(tmp_path: Path, client, monkeypatch, name="run-setup"):
+    monkeypatch.setattr(ds, "_load_docker_module", lambda: FakeDockerModule)
+    return DockerSandboxSession(
+        run_dir=tmp_path / name, python_version="3.10", client=client
+    )
+
+
+def test_constructor_failure_removes_created_network(tmp_path, monkeypatch):
+    """镜像不存在 → 容器没建成，但已建的网络必须回收（异常路径清理）。"""
+    client = FakeSetupClient(image_exists=False)
+
+    with pytest.raises(SandboxUnavailableError, match="not found"):
+        build_session(tmp_path, client, monkeypatch)
+
+    assert client.containers.run_calls == 0
+    assert [network.removed for network in client.networks.created] == [True]
+
+
+def test_constructor_failure_removes_half_created_container(tmp_path, monkeypatch):
+    """容器起来了但没跑住 → 容器和网络都要回收，不留同 label 的残留。"""
+    client = FakeSetupClient(image_exists=True, status="exited")
+
+    with pytest.raises(SandboxUnavailableError, match="did not stay running"):
+        build_session(tmp_path, client, monkeypatch)
+
+    assert [container.removed for container in client.containers.created] == [1]
+    assert client.networks.created[0].removed is True
+
+
+def test_constructor_network_setup_failure_has_nothing_to_clean(tmp_path, monkeypatch):
+    """网络都没建成时，回收逻辑不能自己再抛一次。"""
+    client = FakeSetupClient(image_exists=True)
+    monkeypatch.setattr(
+        client.networks,
+        "create",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            FakeDockerErrors.DockerException("bridge driver missing")
+        ),
+    )
+
+    with pytest.raises(SandboxUnavailableError, match="network setup failed"):
+        build_session(tmp_path, client, monkeypatch)
+
+
+def test_constructor_cleanup_failure_does_not_mask_original_error(tmp_path, monkeypatch):
+    """回收失败不能让原始错误变成清理错误。"""
+    client = FakeSetupClient(image_exists=False, network_remove_fails=True)
+
+    with pytest.raises(SandboxUnavailableError, match="not found"):
+        build_session(tmp_path, client, monkeypatch)
+
 
 
 def test_set_environment_stores_and_overrides():

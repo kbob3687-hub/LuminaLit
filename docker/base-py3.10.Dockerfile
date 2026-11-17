@@ -10,6 +10,13 @@ RUN useradd --create-home --uid 1000 runner \
     && mkdir /workspace \
     && chown runner:runner /workspace
 
+# 专用 venv 归非 root 用户：pip 装的包和 bin 脚本都落在 venv 内。
+# 原因：python -I（靶场防 shadow import）忽略 user site，包必须落在
+# -I 可见的 venv site-packages，而不是 ~/.local 或 root 的系统目录。
+RUN python -m venv /opt/venv \
+    && chown -R runner:runner /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 USER runner
 WORKDIR /workspace
 

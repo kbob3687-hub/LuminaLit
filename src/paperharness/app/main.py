@@ -55,13 +55,16 @@ def build_app(runs_root: str | Path | None = None, backend: str | None = None):
         raise ValueError(f"unknown sandbox backend: {backend}")
 
     targets_root = Path(os.environ.get("PAPERHARNESS_TARGETS", "targets"))
-    targets = (
-        public_view(load_targets(targets_root)) if targets_root.is_dir() else None
-    )
+    manifests = load_targets(targets_root) if targets_root.is_dir() else []
+    targets = public_view(manifests) if manifests else None
 
     store = RunStore(runs_root)
     runner = HarnessRunner(
-        store=store, llm=_build_llm(), sandbox_factory=factory, aci_factory=PaperACI
+        store=store,
+        llm=_build_llm(),
+        sandbox_factory=factory,
+        aci_factory=PaperACI,
+        targets=manifests,
     )
     return create_app(store=store, runner=runner, targets=targets)
 

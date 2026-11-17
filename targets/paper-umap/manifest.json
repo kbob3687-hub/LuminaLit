@@ -1,0 +1,13 @@
+{
+  "id": "paper-umap",
+  "repo_url": "https://github.com/lmcinnes/umap",
+  "revision": "27f4b2a096a0341371e0707a7261b2e61f3c9151",
+  "python_version": "3.10",
+  "command": ["python", "-I", "check.py"],
+  "expected_artifact": "out.txt",
+  "failure_class": "none",
+  "repairable": true,
+  "allowed_actions": [],
+  "expected_final": "succeeded",
+  "notes": "真实论文靶场：arXiv:1802.03426 UMAP，合成数据（200x10 -> 2 维）降维后重新聚类 ARI=1.000，不用下 MNIST。2026-11-17 真机验证：一次通过，ARI=1.000；0.6.0 的 compatibility_layout FutureWarning 是版本漂移的活演示素材。"
+}

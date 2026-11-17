@@ -88,14 +88,14 @@ $env:PAPERHARNESS_LLM_MODEL='deepseek-flash'
 .venv/Scripts/python scripts/e2e_docker.py        # 端到端冒烟（本地仓库）
 .venv/Scripts/python scripts/spike_sandbox.py     # 沙箱九项安全验收
 .venv/Scripts/python scripts/smoke_llm.py         # LLM 三调用点冒烟
-.venv/Scripts/python runs-test/run_target.py clean-example   # 跑指定靶场
+.venv/Scripts/python scripts/run_target.py paper-pysindy      # 跑指定靶场（真 clone + 真容器）
 ```
 
 ---
 
 ## 内置靶场
 
-8 个固定 commit 的靶场，托管在 [kbob3687-hub/paperharness-targets](https://github.com/kbob3687-hub/paperharness-targets)，每分支一个失败类型：
+**8 个固定 commit 的自造靶场**，托管在 [kbob3687-hub/paperharness-targets](https://github.com/kbob3687-hub/paperharness-targets)，每分支一个失败类型：
 
 | 靶场 | 失败类型 | 预期 |
 |---|---|---|
@@ -109,6 +109,15 @@ $env:PAPERHARNESS_LLM_MODEL='deepseek-flash'
 | `requires-gpu` | 确需 GPU | 判不可修复 |
 
 最后两个是**反向测试**，考察系统会不会诚实地说“修不了”。靶场答案字段不对外暴露，`/api/targets` 只返回 `id / repo_url / command / expected_artifact`。
+
+**2 个真实论文靶场**（依赖与断言随靶场注入，仓库一个字不动）：
+
+| 靶场 | 论文 | 验证断言 |
+|---|---|---|
+| `paper-pysindy` | [arXiv:2004.08424](https://arxiv.org/abs/2004.08424) PySINDy | SINDy 识别线性系统，系数误差 < 1e-4（实测 3.67e-06） |
+| `paper-umap` | [arXiv:1802.03426](https://arxiv.org/abs/1802.03426) UMAP | 合成数据 200×10→2 维，重新聚类 ARI=1.000 |
+
+命中靶场时运行计划来自 manifest（不问模型）；论文靶场用 `python -I` 隔离模式跑注入的 `check.py`——防止仓库源码 shadow import，依赖 pin 在靶场注入清单里。UMAP 0.6.0 的 `compatibility_layout` FutureWarning 是版本漂移的活演示素材。
 
 ---
 
@@ -162,5 +171,6 @@ docs/         接口契约、队员开工指南、设计与计划
 - ✅ 自愈循环状态机 + 真 DeepSeek 客户端（三调用点实测通过）
 - ✅ 真 Docker + 真 DeepSeek 端到端跑通
 - ✅ 运行中取消（终止容器、阶段边界收敛 `cancelled`）、服务重启恢复（非终态标 `service_interrupted`）、worker 异常兜底（`internal_error`，工作线程不死）
+- ✅ 内置靶场命中与注入物（check.py + requirements），2 个真实论文靶场真机一次通过（PySINDy / UMAP）
 - ⏳ 队员：ACI 校验层、沙箱安全测试、前端
-- ⏳ 待补：环境清单依赖版本采集、2 个真实论文靶场替换
+- ⏳ 待补：环境清单依赖版本采集
