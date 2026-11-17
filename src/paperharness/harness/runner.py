@@ -1,4 +1,6 @@
 import json
+import re
+import shutil
 import subprocess
 import threading
 import time
@@ -15,9 +17,12 @@ from paperharness.contracts.run import (
 )
 from paperharness.harness.store import RunStore
 from paperharness.sandbox.base import SandboxClosedError, SandboxSession, SandboxUnavailableError
+from paperharness.targets.manifest import TargetManifest
 
 INSTALL_COMMAND = ["python", "-m", "pip", "install", "-r", "requirements.txt"]
 MAX_ACTIONS_PER_REPAIR = 20
+CLONE_TIMEOUT_SECONDS = 240
+_FULL_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 # 总墙钟预算 = 单步限时 × 3 + 60 秒，防止每步都不超时但整体卡死工作线程
 TOTAL_BUDGET_FACTOR = 3
 TOTAL_BUDGET_GRACE_SECONDS = 60
@@ -42,21 +47,41 @@ def git_clone(request: RunRequest, run_dir: Path) -> str:
     except ValueError as exc:
         raise ValueError(f"invalid repo_url: {exc}") from exc
     workspace = run_dir / "workspace"
-    subprocess.run(
-        ["git", "clone", request.repo_url, str(workspace)],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if request.revision:
+    if request.revision and _FULL_COMMIT.match(request.revision):
+        # 固定完整 commit：只拉该快照（depth 1），下载量≈checkout 本身，
+        # 避免全历史 clone 把大仓库拖超时（设计 12：下载量上限 200 MiB）
         subprocess.run(
-            ["git", "-C", str(workspace), "checkout", request.revision],
+            ["git", "init", "-q", str(workspace)],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        subprocess.run(
+            ["git", "-C", str(workspace), "remote", "add", "origin", request.repo_url],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        subprocess.run(
+            ["git", "-C", str(workspace), "fetch", "--depth", "1", "origin", request.revision],
+            check=True, capture_output=True, text=True, timeout=CLONE_TIMEOUT_SECONDS,
+        )
+        subprocess.run(
+            ["git", "-C", str(workspace), "checkout", "FETCH_HEAD"],
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+    else:
+        subprocess.run(
+            ["git", "clone", request.repo_url, str(workspace)],
             check=True,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=CLONE_TIMEOUT_SECONDS,
         )
+        if request.revision:
+            subprocess.run(
+                ["git", "-C", str(workspace), "checkout", request.revision],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
     head = subprocess.run(
         ["git", "-C", str(workspace), "rev-parse", "HEAD"],
         check=True,
@@ -75,12 +100,14 @@ class HarnessRunner:
         sandbox_factory: Callable[[RunRequest, Path], SandboxSession],
         cloner: Callable[[RunRequest, Path], str] = git_clone,
         aci_factory: Callable[[SandboxSession, Path, RunPlan, int], object] | None = None,
+        targets: list[TargetManifest] | None = None,
     ):
         self.store = store
         self.llm = llm
         self.sandbox_factory = sandbox_factory
         self.cloner = cloner
         self.aci_factory = aci_factory
+        self.targets = list(targets or [])
         # run_id -> (取消事件, 当前 session)；abort() 由 API 线程跨线程调用。
         self._active: dict[str, tuple[threading.Event, SandboxSession | None]] = {}
         self._active_lock = threading.RLock()
@@ -153,10 +180,54 @@ class HarnessRunner:
         self.store.write_result(run_id, result)
         return result
 
+    # ------------------------------------------------------------ 内置靶场
+
+    def _match_target(self, request: RunRequest) -> TargetManifest | None:
+        """按 repo_url 匹配内置靶场；用户提交任意公开仓库则返回 None。"""
+        for target in self.targets:
+            if target.repo_url == request.repo_url:
+                return target
+        return None
+
+    def _inject_target_files(self, run_id: str, workspace: Path, target: TargetManifest) -> None:
+        """靶场注入物：check.py 与 requirements.txt 拷进 workspace，仓库本身一个字不动。
+
+        仓库自带 requirements.txt 时追加（pip 重复行无害）。check.py 是我们
+        写死的确定性断言，模型无权创建或修改——验证不能让考生自己判卷。
+        """
+        if target.source_dir is None:
+            return
+        injected: list[str] = []
+        check_src = target.source_dir / "check.py"
+        if check_src.is_file():
+            shutil.copy2(check_src, workspace / "check.py")
+            injected.append("check.py")
+        req_src = target.source_dir / "requirements.txt"
+        if req_src.is_file():
+            extra = req_src.read_text(encoding="utf-8")
+            workspace_req = workspace / "requirements.txt"
+            existing = (
+                workspace_req.read_text(encoding="utf-8") if workspace_req.exists() else ""
+            )
+            workspace_req.write_text(existing + extra, encoding="utf-8")
+            injected.append("requirements.txt")
+        if injected:
+            self.store.append_event(
+                run_id,
+                RunState.PREPARING,
+                "target",
+                f"matched target {target.id}: injected {', '.join(injected)}",
+                {"target_id": target.id, "injected": injected},
+            )
+
     def run(self, run_id: str, request: RunRequest) -> RunResult:
         run_dir = self.store.run_dir(run_id)
         workspace = run_dir / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
+        # 内置靶场命中（设计 4.2 第 1 步）：python_version 需在沙箱创建前确定
+        target = self._match_target(request)
+        if target is not None and request.python_version is None:
+            request = request.model_copy(update={"python_version": target.python_version})
         deadline = (
             time.monotonic()
             + request.timeout_seconds * TOTAL_BUDGET_FACTOR
@@ -185,14 +256,27 @@ class HarnessRunner:
                 "preparing",
                 f"cloned at {resolved_revision}",
             )
+            if target is not None:
+                self._inject_target_files(run_id, workspace, target)
 
             self.store.write_status(run_id, RunState.PLANNING, {})
-            try:
-                plan = self.llm.propose_run_plan(request)
-            except Exception as exc:  # noqa: BLE001 - LLM 网关故障不杀死 worker（设计 18.4）
-                return self._fail(
-                    run_id, LLM_UNAVAILABLE, f"plan generation failed: {exc}", session=session
+            if target is not None and request.command is None:
+                # 内置靶场：运行计划来自人工验证过的 manifest（设计 4.2 第 1 步），
+                # 不问模型、不猜命令
+                plan = RunPlan(
+                    resolved_revision=resolved_revision,
+                    python_version=request.python_version or target.python_version,
+                    command=target.command,
+                    expected_artifact=request.expected_artifact or target.expected_artifact,
+                    source="target_manifest",
                 )
+            else:
+                try:
+                    plan = self.llm.propose_run_plan(request)
+                except Exception as exc:  # noqa: BLE001 - LLM 网关故障不杀死 worker（设计 18.4）
+                    return self._fail(
+                        run_id, LLM_UNAVAILABLE, f"plan generation failed: {exc}", session=session
+                    )
             plan = plan.model_copy(update={"resolved_revision": resolved_revision})
             self._check_cancel(run_id)
             self.store.write_text(run_id, "run_plan.json", plan.model_dump_json(indent=2))

@@ -53,6 +53,9 @@ class TargetManifest(BaseModel):
     allowed_actions: list[str]
     expected_final: Literal["succeeded", "failed"]
     notes: str | None = None
+    # 运行时注记：manifest 所在目录，由 load_targets 填充，供 Harness 定位注入物
+    # （check.py / requirements.txt），不出现在 JSON 契约里。
+    source_dir: Path | None = None
 
     @model_validator(mode="after")
     def _check_rules(self) -> Self:
@@ -76,6 +79,7 @@ def load_targets(root: Path) -> list[TargetManifest]:
             raise ValueError(
                 f"manifest id {manifest.id!r} 与目录名 {manifest_path.parent.name!r} 不一致"
             )
+        manifest.source_dir = manifest_path.parent
         manifests.append(manifest)
     return manifests
 

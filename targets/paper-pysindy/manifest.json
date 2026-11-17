@@ -1,0 +1,13 @@
+{
+  "id": "paper-pysindy",
+  "repo_url": "https://github.com/dynamicslab/pysindy",
+  "revision": "c4421fcec275c8f4cc5c1e93bebb961b212067ae",
+  "python_version": "3.10",
+  "command": ["python", "-I", "check.py"],
+  "expected_artifact": "out.txt",
+  "failure_class": "none",
+  "repairable": true,
+  "allowed_actions": [],
+  "expected_final": "succeeded",
+  "notes": "真实论文靶场：arXiv:2004.08424 PySINDy，README 最小例子（线性系统 x'=-2x, y'=y 的 SINDy 识别）。2026-11-17 真机验证：一次通过，系数误差 3.67e-06/1.65e-07。"
+}

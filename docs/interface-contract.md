@@ -230,6 +230,15 @@ Agent 只能拿到 `Observation`，永远拿不到 `SandboxSession`。动作 sch
 - `allowed_actions` 是评测时判定“修复方式是否越界”的依据。
 - `GET /api/targets` 只暴露 `id`、`repo_url`、`command`、`expected_artifact`，不暴露答案字段。
 
+### 5.1 靶场注入物（2026-11-17 新增，队长维护）
+
+`targets/<id>/` 目录除 `manifest.json` 外可放两个 Harness 注入物，PREPARING 阶段（clone 之后）由 Harness 拷进 workspace，**仓库本身一个字不动**：
+
+- `check.py`：确定性断言脚本（我们写死，模型无权创建或修改——验证不能让考生自己判卷）。PASS 写 `expected_artifact` 声明的产物文件，任何断言失败非 0 退出。
+- `requirements.txt`：靶场依赖清单，pin 死验证过的版本。仓库自带 `requirements.txt` 时追加合并（pip 重复行无害）。
+
+配套约定：`POST /api/runs` 的 `repo_url` 命中某靶场且用户未显式给 `command` 时，运行计划来自该靶场 manifest（`RunPlan.source="target_manifest"`，设计 4.2 第 1 步），不问模型；用户显式指定的 `command`/`expected_artifact`/`python_version` 优先。论文类靶场的 command 用 `python -I check.py`（隔离模式）：既防止仓库源码目录 shadow import，也强制依赖走注入清单。
+
 ## 6. 归属与 review 规则
 
 - 沙箱实现、Harness、Agent、部署：队长。
