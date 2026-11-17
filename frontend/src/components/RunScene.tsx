@@ -38,13 +38,15 @@ type Panel =
 const STILL = new URLSearchParams(window.location.search).get("still") === "1";
 
 interface Props {
+  /** live=接后端轮询；replay=离线回放（没起后端时的默认，界面必须写明白）。 */
+  mode: "live" | "replay";
   status: RunStatus | null;
   events: RunEvent[];
   onCancel?: () => void;
   cancelling?: boolean;
 }
 
-export function RunScene({ status, events, onCancel, cancelling }: Props) {
+export function RunScene({ mode, status, events, onCancel, cancelling }: Props) {
   const [panel, setPanel] = useState<Panel>(() => {
     // 演示/截图直链：?panel=aci&seq=7 / ?panel=loop（只读，不影响业务逻辑）
     const q = new URLSearchParams(window.location.search);
@@ -55,7 +57,9 @@ export function RunScene({ status, events, onCancel, cancelling }: Props) {
     return null;
   });
   const state: RunState = status?.state ?? "queued";
-  const connected = status !== null;
+  const replay = mode === "replay";
+  /** 有没有"听到"后端说话。回放模式下本地时间轴就是数据源，恒为真。 */
+  const connected = replay || status !== null;
 
   const stages = useMemo(() => buildStages(events, status?.state), [events, status?.state]);
   const loop = useMemo(() => buildLoop(events, status?.state), [events, status?.state]);
@@ -114,28 +118,38 @@ export function RunScene({ status, events, onCancel, cancelling }: Props) {
           {status?.run_id ? `run_${status.run_id.slice(0, 8)}` : "run_—"}
         </div>
 
-        {/* 后端状态徽标：这是"状态栏"，值全部来自 GET /api/runs/{id} */}
+        {/* 后端状态徽标：live 时是 GET /api/runs/{id} 的 state 原值；replay 时写明是回放 */}
         <div
           className={clsx(
             "flex items-center gap-2 rounded-[6px] border px-2.5 py-1 font-mono text-[10.5px]",
-            !connected && "border-rule-hi text-ink-muted",
-            connected &&
+            replay && "border-warn/40 bg-warn/[.07] text-warn",
+            !replay && !connected && "border-rule-hi text-ink-muted",
+            !replay &&
+              connected &&
               !isFailed &&
               state !== "succeeded" &&
               "border-accent/45 bg-accent/[.08] text-[#9db4ff]",
-            state === "succeeded" && "border-pass/45 bg-pass/[.08] text-pass",
-            isFailed && "border-reject/45 bg-reject/[.10] text-reject",
+            !replay && state === "succeeded" && "border-pass/45 bg-pass/[.08] text-pass",
+            !replay && isFailed && "border-reject/45 bg-reject/[.10] text-reject",
           )}
-          title="来自 GET /api/runs/{run_id} 的 state 字段，前端不改写"
+          title={
+            replay
+              ? "离线回放：本地按事件时间轴播放，不代表任何真实运行"
+              : "来自 GET /api/runs/{run_id} 的 state 字段，前端不改写"
+          }
         >
-          <span className="opacity-70">state</span>
-          <span className="tracking-[.02em]">{connected ? state : "connecting"}</span>
+          <span className="opacity-70">{replay ? "mode" : "state"}</span>
+          <span className="tracking-[.02em]">{replay ? "replay" : connected ? state : "connecting"}</span>
         </div>
 
         <div className="flex-1" />
 
         <div className="font-mono text-[10px] text-ink-muted">
-          {connected ? `${events.length} 事件 · 1s 轮询` : "等待首个响应"}
+          {replay
+            ? `${events.length} 事件 · 离线回放（未连后端）`
+            : connected
+              ? `${events.length} 事件 · 1s 轮询`
+              : "等待首个响应"}
         </div>
         <button
           onClick={() => setPanel({ type: "plan" })}
@@ -145,7 +159,7 @@ export function RunScene({ status, events, onCancel, cancelling }: Props) {
         </button>
         <button
           onClick={onCancel}
-          disabled={cancelling || ["succeeded", "failed", "cancelled"].includes(state)}
+          disabled={replay || cancelling || ["succeeded", "failed", "cancelled"].includes(state)}
           className="cursor-pointer rounded-[7px] border border-reject/45 bg-white/[.03] px-4 py-2 text-xs text-reject transition-colors hover:bg-reject/10 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {cancelling ? "取消中…" : "取消"}
@@ -188,7 +202,8 @@ export function RunScene({ status, events, onCancel, cancelling }: Props) {
             </h2>
           </div>
           <p className="font-mono text-[11.5px] tracking-[.04em] text-ink-muted">
-            容器已隔离 · 网络默认断开 ·{" "}
+            {replay ? "离线回放 · 逐条事件时间轴" : "真实运行 · 状态与事件来自后端"}
+            {" · "}
             <b className="font-medium text-warn">{blockedCount} 次拦截</b>
             {activeStage && (
               <>
@@ -246,7 +261,9 @@ export function RunScene({ status, events, onCancel, cancelling }: Props) {
 
           {rows.length === 0 && (
             <div className="mt-10 text-center font-mono text-[11.5px] text-ink-muted">
-              等待后端事件…（日志与动作由 1000ms 轮询增量拉取）
+              {replay
+                ? "回放即将开始…（本地时间轴，逐条事件推进）"
+                : "等待后端事件…（日志与动作由 1000ms 轮询增量拉取）"}
             </div>
           )}
 
@@ -271,6 +288,10 @@ export function RunScene({ status, events, onCancel, cancelling }: Props) {
             沙箱遥测
           </div>
           <Telemetry status={status} state={state} />
+
+          <div className="mt-3 rounded-[7px] border border-rule bg-white/[.015] px-3 py-2 font-mono text-[10px] leading-relaxed text-ink-muted">
+            镜像名 / 挂载点在事件里没有，宁可不显示也不编。
+          </div>
 
           <div className="mt-6 mb-3 flex items-center justify-between">
             <div className="text-[10px] tracking-[.18em] text-ink-muted uppercase">ACI 审查</div>
@@ -444,10 +465,14 @@ function ActionLine({ row }: { row: ActionRow }) {
 function Telemetry({ status, state }: { status: RunStatus | null; state: RunState }) {
   const online = state === "installing";
   const shot = status?.result;
+  /**
+   * 只写有观测依据的值。镜像名和挂载点是 docker 层的，事件契约里没有，
+   * 之前这里硬编码 "base-py3.11" / "/workspace rw"，等于凭空造事实。
+   */
   const items: { k: string; v: string; tone?: "on" | "off" | "warn" }[] = [
     { k: "容器", v: status?.run_id ? `harness-${status.run_id.slice(0, 6)}` : "—" },
-    { k: "镜像", v: "base-py3.11" },
-    { k: "挂载", v: "/workspace rw" },
+    { k: "镜像", v: "—" },
+    { k: "挂载", v: "—" },
     { k: "网络", v: online ? "已连接（装依赖）" : "已断开", tone: online ? "on" : "off" },
     { k: "尝试次数", v: shot ? String(shot.attempts) : "—" },
     { k: "结果", v: shot ? `${shot.outcome}${shot.verified ? " · verified" : ""}` : "—" },

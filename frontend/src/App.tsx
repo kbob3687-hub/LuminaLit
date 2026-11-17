@@ -32,13 +32,24 @@ export default function App() {
   }, [initialScene]);
 
   /**
-   * 演示模式：**默认关闭**，只在 `?demo=1` 或 `VITE_DEMO=1` 时回放脚本。
-   * 之前默认开着，界面上所有"进度"都是假数据——状态条跟后端毫无关系，
-   * 一进场就把阶段全点亮。真实后端是唯一事实来源。
+   * 数据来源只有两种，且界面上必须能看出来是哪种：
+   *
+   *   live   —— 接了后端（VITE_API_BASE_URL 非空，或显式 ?live=1），
+   *             状态和事件全部来自 GET /api/runs/{id}，前端不改写。
+   *   replay —— 离线回放：没有后端地址时**默认走这条**，否则本地起前端
+   *             点进去只会看到"连接中 等待后端"的空壳（fetch /api/runs
+   *             被 vite 兜成 index.html，报错还看不懂）。
+   *             回放的时间轴本身是逐条事件，进场只有 queued 亮，不预置绿灯。
+   *
+   * ?demo=0 可以强制关掉回放（配合 ?live=1 做真联调）。
    */
-  const demo = q.get("demo") === "1" || import.meta.env.VITE_DEMO === "1";
+  const apiBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
+  const canLive = Boolean(apiBase) || q.get("live") === "1";
+  const wantReplay = q.get("demo") === "1" || import.meta.env.VITE_DEMO === "1";
+  const mode: "live" | "replay" = wantReplay || !canLive ? "replay" : "live";
+  const demo = mode === "replay";
 
-  const live = useRunPolling(demo ? null : runId);
+  const live = useRunPolling(mode === "live" ? runId : null);
   const replay = useDemoRun(demo, Number(q.get("t") ?? 0));
   const status = demo ? replay.status : live.status;
   const events = demo ? replay.events : live.events;
@@ -124,6 +135,7 @@ export default function App() {
         {scene === "run" && (
           <SceneShell key="run">
             <RunScene
+              mode={mode}
               status={status}
               events={events}
               cancelling={cancelling}
