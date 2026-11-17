@@ -67,8 +67,17 @@ class DockerSandboxSession:
 
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
-        self._network = self._create_network()
-        self._container = self._create_container()
+        # 构造是两步（先建网络、再建容器）。第二步失败时对象还没构造完，
+        # close() 永远不会被调用，已经建好的资源必须在这里就地回收
+        # （契约 §1.2：异常路径也要清理）。
+        self._network: Any | None = None
+        self._container: Any | None = None
+        try:
+            self._network = self._create_network()
+            self._container = self._create_container()
+        except BaseException:
+            self._cleanup_partial_setup()
+            raise
 
     # ------------------------------------------------------------------ setup
 
@@ -104,6 +113,7 @@ class DockerSandboxSession:
             ) from exc
         except self._docker.errors.DockerException as exc:
             raise SandboxUnavailableError(f"docker engine unavailable: {exc}") from exc
+        container: Any | None = None
         try:
             container = self._client.containers.run(
                 self._image,
@@ -134,9 +144,35 @@ class DockerSandboxSession:
                 )
             return container
         except SandboxUnavailableError:
+            # 容器已建但没跑住（状态不是 running）：不回收就会留下同 label 的残留。
+            self._remove_container_quietly(container)
             raise
         except self._docker.errors.DockerException as exc:
+            self._remove_container_quietly(container)
             raise SandboxUnavailableError(f"container creation failed: {exc}") from exc
+
+    def _remove_container_quietly(self, container: Any | None) -> None:
+        """构造期回收：尽力而为，失败只记录，绝不盖掉原始异常。"""
+        if container is None:
+            return
+        try:
+            container.remove(force=True)
+        except self._docker.errors.NotFound:
+            pass
+        except self._docker.errors.DockerException as exc:
+            self._record_cleanup_failure(f"container remove failed during setup: {exc}")
+
+    def _cleanup_partial_setup(self) -> None:
+        """构造期失败时的回收顺序：先容器、后网络（网络还挂着容器时删不掉）。"""
+        self._remove_container_quietly(self._container)
+        if self._network is None:
+            return
+        try:
+            self._network.remove()
+        except self._docker.errors.NotFound:
+            pass
+        except self._docker.errors.DockerException as exc:
+            self._record_cleanup_failure(f"network remove failed during setup: {exc}")
 
     # --------------------------------------------------------------- protocol
 
