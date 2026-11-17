@@ -5,6 +5,7 @@ import { WelcomeScene } from "./components/WelcomeScene";
 import { RunScene, type ActionRow } from "./components/RunScene";
 import { PARTICLE_COLORS, ParticleField, type ParticleBurst } from "./components/ParticleField";
 import { useRunPolling } from "./hooks/useRunPolling";
+import { createRun, ApiError } from "./api";
 import type { RunEvent, RunStatus } from "./types";
 
 type Scene = "select" | "welcome" | "run";
@@ -51,7 +52,9 @@ export default function App() {
   const [scene, setScene] = useState<Scene>("select");
   const [paper, setPaper] = useState({ name: "PySINDy", id: "paper-pysindy" });
   const [bursts, setBursts] = useState<ParticleBurst[]>([]);
-  const [runId] = useState<string | null>(null);
+  const [runId, setRunId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [pickError, setPickError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const timer = useRef<number | null>(null);
 
@@ -92,9 +95,32 @@ export default function App() {
     };
   }, [scene, fire]);
 
-  // 欢迎 → 运行
-  const pick = (p: { name: string; id: string }) => {
-    setPaper(p);
+  // 选论文 / 仓库 → 真接口创建 run → 欢迎页 → 运行页
+  const pick = async (p: { name: string; id: string; repo: string }) => {
+    setPaper({ name: p.name, id: p.id });
+    setPickError(null);
+
+    if (!demo) {
+      // 契约 §4.1：POST /api/runs 只接受 repo_url，202 返回 run_id
+      setCreating(true);
+      try {
+        const res = await createRun({ repo_url: p.repo });
+        setRunId(res.run_id);
+      } catch (err) {
+        const e = err as ApiError;
+        setPickError(
+          e?.status === 429
+            ? "队列已满（queue_full），稍后重试。"
+            : e?.status === 422
+              ? `输入不合法：${e.message}`
+              : `创建任务失败：${e?.message ?? String(err)}`,
+        );
+        setCreating(false);
+        return;
+      }
+      setCreating(false);
+    }
+
     setScene("welcome");
     if (timer.current) window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => {
@@ -137,7 +163,7 @@ export default function App() {
       <AnimatePresence mode="wait">
         {scene === "select" && (
           <SceneShell key="select">
-            <SelectScene onPick={pick} />
+            <SelectScene onPick={pick} disabled={creating} error={pickError} />
           </SceneShell>
         )}
 

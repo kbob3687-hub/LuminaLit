@@ -1,4 +1,14 @@
 <!DOCTYPE html>
+<!--
+  ⚠️ 这是「纯前端 mock 演示文件」，不连后端、不发任何请求。
+     用途：视觉与交互定调，供 review / 离线演示。
+     真实前端在 frontend/src（React + TS），接口链路：
+       POST /api/runs {repo_url}  →  202 {run_id}
+       GET  /api/runs/{id}        →  1000ms 轮询
+       GET  /api/runs/{id}/events?after=<seq>
+     本文件里的 arXiv 解析与两套剧本只是演示层，不代表后端能力：
+     契约 RunRequest 只有 repo_url，arXiv 链接提交给真接口会 clone_failed。
+-->
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -83,6 +93,13 @@ body{background:var(--void);color:var(--ink);font-family:var(--sans);overflow:hi
 .sel-input input::placeholder{color:var(--ink-muted)}
 .sel-name{display:flex;align-items:center;gap:10px;margin-top:26px}
 .sel-name label{font-size:11px;letter-spacing:.16em;color:var(--ink-muted);text-transform:uppercase;white-space:nowrap}
+.sel-hint{margin-top:12px;font-size:11.5px;line-height:1.7;color:var(--ink-muted);font-family:var(--mono)}
+.sel-hint b{color:var(--ink-mid);font-weight:600}
+.sel-error{margin-top:12px;padding:11px 14px;border-radius:7px;font-size:12px;line-height:1.7;
+  font-family:var(--mono);color:#ffd9d5;background:rgba(255,96,80,.09);
+  border:1px solid rgba(255,96,80,.42);border-left:3px solid var(--reject)}
+.sel-error b{color:#fff}
+.sel-input.bad{border-color:rgba(255,96,80,.6)}
 .sel-name input{width:180px;background:rgba(255,255,255,.03);border:1px solid var(--rule);border-radius:7px;
   outline:0;color:var(--ink);font-family:var(--sans);font-size:13px;padding:10px 14px;transition:border-color .3s,box-shadow .3s}
 .sel-name input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(108,143,255,.14)}
@@ -381,6 +398,10 @@ body{background:var(--void);color:var(--ink);font-family:var(--sans);overflow:hi
 .diff .add{color:var(--pass);background:rgba(46,230,168,.07)}
 .diff .del{color:var(--reject);background:rgba(255,92,71,.07)}
 .diff .ctx{color:var(--ink-muted)}
+.diff.diff-empty{padding:20px 18px;color:var(--ink-mid);font-size:12px;line-height:1.9;
+  border-left:2px solid var(--warn);background:rgba(255,196,84,.05)}
+.diff.diff-empty b{color:var(--ink)}
+.diff.diff-empty code{font-family:var(--mono);color:var(--accent);font-size:11.5px}
 
 /* ═══════════════ 产物查看器（全屏自适应） ═══════════════ */
 #view-artifact{overflow:hidden}
@@ -583,11 +604,16 @@ body{background:var(--void);color:var(--ink);font-family:var(--sans);overflow:hi
       </div>
     </div>
 
-    <div class="sel-label">或直接输入</div>
-    <div class="sel-input">
-      <input id="repo-input" placeholder="https://github.com/owner/repo" spellcheck="false">
+    <div class="sel-label">或直接输入论文 / 仓库地址</div>
+    <div class="sel-input" id="sel-wrap">
+      <input id="repo-input" spellcheck="false"
+             placeholder="https://arxiv.org/abs/2004.08424  或  https://github.com/dynamicslab/pysindy">
       <button class="btn btn-primary" id="go-btn">开始复现</button>
     </div>
+    <div class="sel-hint" id="sel-hint">
+      已收录 <b>arXiv:2004.08424</b>（PySINDy）· <b>arXiv:1802.03426</b>（UMAP），arXiv 链接、arXiv ID、GitHub 仓库地址都能认
+    </div>
+    <div class="sel-error" id="sel-error" hidden></div>
 
     <div class="sel-name">
       <label for="user-input">观测者</label>
@@ -615,7 +641,7 @@ body{background:var(--void);color:var(--ink);font-family:var(--sans);overflow:hi
   <button class="back-pill" id="back-pill"><span class="arr">←</span> 返回 <kbd>Esc</kbd></button>
   <div class="topbar">
     <div class="tb-brand" id="tb-brand"><i></i>PaperHarness</div>
-    <div class="tb-run" id="tb-run">run_a3f29c · PySINDy</div>
+    <div class="tb-run" id="tb-run">run_— · —</div>
     <div class="tb-sp"></div>
     <div class="tb-progress" id="tb-progress" title="点击回到主控台">
       <div class="g3d" id="g3d">
@@ -664,7 +690,7 @@ body{background:var(--void);color:var(--ink);font-family:var(--sans);overflow:hi
 
       <div class="now-card" id="now-card" title="点击进入沙箱实时">
         <div class="nc-top"><span class="live"></span>正在进行</div>
-        <div class="nc-main"><span class="nc-act" id="nc-act">install_requirement</span><span class="nc-tg" id="nc-tg">numpy==2.0.0</span></div>
+        <div class="nc-main"><span class="nc-act" id="nc-act">install_requirement</span><span class="nc-tg" id="nc-tg">—</span></div>
         <div class="nc-sub" id="nc-sub">自愈第 1 轮 · 模型提出的修复动作正在 ACI 审查后执行，装完立即恢复断网。</div>
         <div class="nc-go">进入沙箱实时 →</div>
       </div>
@@ -829,7 +855,7 @@ ambient(110);
 /* ═══════════════ 数据 ═══════════════ */
 let USER = localStorage.getItem('ph-user') || '嘉豪';
 
-const STAGES=[
+const S_SINDY_STAGES=[
  {id:'queued',name:'排队',est:2,elapsed:2,st:'done',
   what:'任务进入执行队列。系统校验输入合法性、分配 <b>run_a3f29c</b>，随后由空闲 worker 领取。',
   how:[
@@ -911,19 +937,8 @@ const STAGES=[
   artifact:[['产物','out.txt'],['复现报告','report.md'],['环境镜像','export tar']]},
 ];
 
-const REPAIR_ACTIONS=[
- {ts:'00:50.1',sym:'⟩',nm:'read_file',tg:'src/model.py',rs:'ok',cl:'ok',stage:'repairing'},
- {ts:'00:50.9',sym:'⟩',nm:'search_text',tg:'"import" · src/',rs:'7 matches',cl:'dim',stage:'repairing'},
- {ts:'00:51.4',sym:'⟩',nm:'read_file',tg:'requirements.txt',rs:'文件不存在',cl:'dim',stage:'repairing'},
- {ts:'00:52.3',sym:'✕',nm:'read_file',tg:'../../etc/passwd',rs:'path_escape',cl:'err',stage:'repairing',
-  blocked:1,why:'路径越出 workspace 边界，已拒绝且未产生任何副作用'},
- {ts:'00:52.8',sym:'⟩',nm:'replace_exact',tg:'src/model.py:42',rs:'1 occurrence',cl:'dim',stage:'repairing'},
- {ts:'00:53.1',sym:'✕',nm:'install_requirement',tg:'numpy; rm -rf /',rs:'requirement_not_allowed',cl:'err',stage:'repairing',
-  blocked:1,why:'依赖字符串含命令分隔符，拒绝后未打开网络'},
-];
-let LIVE_ACTIONS=[...REPAIR_ACTIONS];
 
-const DIFF=[
+const S_SINDY_DIFF=[
  ['ctx','--- a/src/model.py'],
  ['ctx','+++ b/src/model.py'],
  ['ctx','@@ -40,7 +40,9 @@'],
@@ -1028,7 +1043,7 @@ $('#cancel-yes').addEventListener('click',()=>{
   $('#hero-dot').className='dot bad';
   $('#hero-title').innerHTML='已取消';
   $('#hero-note').innerHTML='容器已终止 · 收敛状态 <b>cancelled</b> · 记录已保留';
-  $('#nc-act').textContent='—'; $('#nc-tg').textContent='run_a3f29c';
+  $('#nc-act').textContent='—'; $('#nc-tg').textContent=CUR.runId;
   $('#nc-sub').textContent='这次复现被观测者手动取消。动作流、拦截记录与补丁 diff 已归档，可回看。';
   pushTerm('warn','HARNESS','收到取消信号，终止容器，阶段边界收敛 cancelled');
   simStop();
@@ -1043,16 +1058,47 @@ userInput.addEventListener('input',()=>{
   localStorage.setItem('ph-user',USER);
 });
 $$('.paper').forEach(p=>p.addEventListener('click',()=>{
-  chosen={name:p.dataset.name,id:p.dataset.id};
+  if(p.dataset.id==='custom'){
+    // 「自定义仓库」不是一个能直接跑的靶场：聚焦输入框，让用户给真实地址
+    $('#repo-input').focus();
+    showSelError('自定义源需要具体地址：请粘贴 arXiv 链接或 GitHub 仓库地址。演示原型只内置了 2 个靶场，未收录的源会被明确拒绝，不会拿别的论文顶替。');
+    return;
+  }
+  const id=loadTarget(p.dataset.id).id;
   const r=p.getBoundingClientRect();
   burst(r.left+r.width/2,r.top+r.height/2,COL.accent,30,{speed:2.6,life:56,grav:.01,a:.9});
   setTimeout(()=>go('welcome'),160);
 }));
+
+function showSelError(msg){
+  const box=$('#sel-error');
+  box.innerHTML=msg; box.hidden=false;
+  $('#sel-wrap').classList.add('bad');
+}
+function clearSelError(){
+  const box=$('#sel-error');
+  box.hidden=true; box.textContent='';
+  $('#sel-wrap').classList.remove('bad');
+}
+
 $('#go-btn').addEventListener('click',()=>{
-  const v=$('#repo-input').value.trim();
-  chosen=v?{name:v.split('/').slice(-2).join('/'),id:'custom'}:{name:'PySINDy',id:'paper-pysindy'};
+  const raw=$('#repo-input').value.trim();
+  const id=resolveTarget(raw);
+  if(!id){
+    const avail=Object.values(TARGETS)
+      .map(t=>`${t.name}（arXiv:${t.arxiv}）`).join(' · ');
+    showSelError(
+      `<b>未收录这个源：</b>${raw?esc(raw):'（空）'}<br>`+
+      `演示原型只内置 2 个真实靶场：${avail}。<br>`+
+      `这不是"识别失败然后随便给一篇"——未命中的输入会被拒绝，避免把别的论文结果冒充成你的。`
+    );
+    return;
+  }
+  clearSelError();
+  loadTarget(id);
   go('welcome');
 });
+$('#repo-input').addEventListener('input',clearSelError);
 $('#repo-input').addEventListener('keydown',e=>{if(e.key==='Enter')$('#go-btn').click()});
 addEventListener('keydown',e=>{
   if(e.key==='Escape')$$('.overlay').forEach(o=>o.classList.remove('on'));
@@ -1130,7 +1176,10 @@ function renderStage(){
        ${isRepair?`
        <div class="panel" style="margin-top:16px">
          <div class="panel-t">补丁 diff<span class="p-extra">1 文件 · +2 −1</span></div>
-         <div class="panel-b"><div class="diff">${DIFF.map(d=>`<span class="ln ${d[0]}">${d[0]==='add'?'+':d[0]==='del'?'-':' '}${esc(d[1].replace(/^[+-] /,''))}</span>`).join('')}</div></div>
+         <div class="panel-b">${DIFF.length
+           ? `<div class="diff">${DIFF.map(d=>`<span class="ln ${d[0]}">${d[0]==='add'?'+':d[0]==='del'?'-':' '}${esc(d[1].replace(/^[+-] /,''))}</span>`).join('')}</div>`
+           : `<div class="diff diff-empty">本轮<b>没有修改任何仓库代码</b>：合法动作只有 install_requirement。<br>
+               按契约 §4.1，<code>GET /api/runs/{id}/patch</code> 此时返回空字符串（不是 404）。</div>`}</div>
        </div>`:''}
      </div>
      <div>
@@ -1171,7 +1220,7 @@ function codeRows(txt){
   return txt.split('\n').map((l,i)=>
     `<div class="row"><span class="no">${i+1}</span><span class="ln">${esc(l)||' '}</span></div>`).join('');
 }
-const OUT_TXT=[
+const S_SINDY_OUT=[
 'PaperHarness reproduce artifact',
 '--------------------------------------------',
 'run_id      run_a3f29c',
@@ -1194,7 +1243,7 @@ const OUT_TXT=[
 '[note]',
 'derivatives estimated by finite difference; deviation near 1e-4 is expected.'
 ].join('\n');
-const STDERR_TXT=[
+const S_SINDY_STDERR=[
 '[stderr] python -I check.py',
 'Traceback (most recent call last):',
 '  File "/workspace/check.py", line 6, in <module>',
@@ -1205,7 +1254,7 @@ const STDERR_TXT=[
 '[harness] captured 1 exception · classified as missing_dependency',
 '[sandbox] network still disabled (no outbound connection attempted)'
 ].join('\n');
-const DIAG_TXT=[
+const S_SINDY_DIAG=[
 '{',
 '  "failure_category": "missing_dependency",',
 '  "exit_code": 1,',
@@ -1224,7 +1273,7 @@ const DIAG_TXT=[
 '  "note": "duplicate candidates were rejected by ACI (see interception log)"',
 '}'
 ].join('\n');
-const ENV_TXT=[
+const S_SINDY_ENV=[
 '{',
 '  "python": "3.13.7",',
 '  "packages": {',
@@ -1241,7 +1290,7 @@ const ENV_TXT=[
 '  "memory_limit": "2g"',
 '}'
 ].join('\n');
-const PLAN_TXT=[
+const S_SINDY_PLAN=[
 '{',
 '  "target_id": "paper-pysindy",',
 '  "entry_command": "python -I check.py",',
@@ -1253,7 +1302,7 @@ const PLAN_TXT=[
 '  "source": "model + README/check.py inspection, confirmed by human"',
 '}'
 ].join('\n');
-const EV_TXT=[
+const S_SINDY_EV=[
 '{"seq":1,"t":"00:00.0","type":"run_created","data":{"target":"paper-pysindy"}}',
 '{"seq":2,"t":"00:02.1","type":"sandbox_ready","data":{"net":"none","user":"1000"}}',
 '{"seq":3,"t":"00:11.5","type":"plan_frozen","data":{"cmd":"python -I check.py"}}',
@@ -1264,7 +1313,7 @@ const EV_TXT=[
 '{"seq":8,"t":"01:12.8","type":"verify_passed","data":{"artifact":"out.txt","exit":0}}',
 '{"seq":9,"t":"01:17.8","type":"run_succeeded","data":{"report":"report.md","image":"export.tar"}}'
 ].join('\n');
-const DIFF_TXT=[
+const S_SINDY_DIFFTXT=[
 '--- a/check.py',
 '+++ b/check.py',
 '@@ -1,7 +1,8 @@',
@@ -1278,7 +1327,7 @@ const DIFF_TXT=[
 ' x = 3.0 * np.exp(-2.0 * t)',
 ' y = 0.5 * np.exp(1.0 * t)'
 ].join('\n');
-const TAR_TXT=[
+const S_SINDY_TAR=[
 '$ docker save paperharness/target-pysindy:run_a3f29c | tar -tv',
 '-rw-r--r--  0 0 0   3.2K  manifest.json',
 'drwxr-xr-x  0 0 0     0   blobs/sha256/',
@@ -1290,7 +1339,7 @@ const TAR_TXT=[
 'total 92.3 MB · 5 entries · reproducible by digest'
 ].join('\n');
 
-function reportHTML(){
+function sSindyReport(){
   return `<div class="av-report"><div class="rp">
     <h1>复现报告 · PySINDy</h1>
     <div class="rp-sub">run_a3f29c · arXiv:2004.08424 · 生成于 2026-11-17 17:03:12 +08:00</div>
@@ -1332,17 +1381,391 @@ function reportHTML(){
     </table>
   </div></div>`;
 }
-const ART_DOCS={
-  'out.txt':{kind:'TEXT / 已核验',size:'1.6 KB',html:'<div class="av-code">'+codeRows(OUT_TXT)+'</div>'},
-  'report.md':{kind:'MARKDOWN',size:'4.2 KB',html:reportHTML()},
-  'export tar':{kind:'TAR.ARCHIVE',size:'92.3 MB',html:'<div class="av-code">'+codeRows(TAR_TXT)+'</div>'},
-  'patch.diff':{kind:'UNIFIED DIFF',size:'0.6 KB',html:'<div class="av-code">'+codeRows(DIFF_TXT)+'</div>'},
-  'events.jsonl':{kind:'NDJSON',size:'18.4 KB',html:'<div class="av-code">'+codeRows(EV_TXT)+'</div>'},
-  'stderr tail':{kind:'STDERR / 证据',size:'0.9 KB',html:'<div class="av-code">'+codeRows(STDERR_TXT)+'</div>'},
-  '诊断结论':{kind:'JSON / DIAGNOSIS',size:'1.2 KB',html:'<div class="av-code">'+codeRows(DIAG_TXT)+'</div>'},
-  '执行计划':{kind:'JSON / FROZEN PLAN',size:'0.8 KB',html:'<div class="av-code">'+codeRows(PLAN_TXT)+'</div>'},
-  'environment.json':{kind:'JSON / LOCKFILE',size:'1.1 KB',html:'<div class="av-code">'+codeRows(ENV_TXT)+'</div>'}
+const S_SINDY_DOCS={
+  'out.txt':{kind:'TEXT / 已核验',size:'1.6 KB',html:'<div class="av-code">'+codeRows(S_SINDY_OUT)+'</div>'},
+  'report.md':{kind:'MARKDOWN',size:'4.2 KB',html:sSindyReport()},
+  'export tar':{kind:'TAR.ARCHIVE',size:'92.3 MB',html:'<div class="av-code">'+codeRows(S_SINDY_TAR)+'</div>'},
+  'patch.diff':{kind:'UNIFIED DIFF',size:'0.6 KB',html:'<div class="av-code">'+codeRows(S_SINDY_DIFFTXT)+'</div>'},
+  'events.jsonl':{kind:'NDJSON',size:'18.4 KB',html:'<div class="av-code">'+codeRows(S_SINDY_EV)+'</div>'},
+  'stderr tail':{kind:'STDERR / 证据',size:'0.9 KB',html:'<div class="av-code">'+codeRows(S_SINDY_STDERR)+'</div>'},
+  '诊断结论':{kind:'JSON / DIAGNOSIS',size:'1.2 KB',html:'<div class="av-code">'+codeRows(S_SINDY_DIAG)+'</div>'},
+  '执行计划':{kind:'JSON / FROZEN PLAN',size:'0.8 KB',html:'<div class="av-code">'+codeRows(S_SINDY_PLAN)+'</div>'},
+  'environment.json':{kind:'JSON / LOCKFILE',size:'1.1 KB',html:'<div class="av-code">'+codeRows(S_SINDY_ENV)+'</div>'}
 };
+
+/* ═══════════════ 论文目标：两套完整剧本 ═══════════════
+   原型以前只有 PySINDy 一套写死的数据：输入任何链接，跑的都是它。
+   这里把「论文 → 剧本」显式建模：输入先解析成 target id，再由 id 装载整套数据
+   （阶段文本、日志、补丁、产物、报告）。未收录的链接会被明确拒绝，不再静默回落。
+   两套剧本都对齐仓库里真实存在的靶场：targets/paper-pysindy、targets/paper-umap。 */
+
+const U_STAGES=[
+ {id:'queued',name:'排队',est:2,elapsed:2,st:'done',
+  what:'任务进入执行队列。系统校验输入合法性、分配 <b>run_b7c41e</b>，随后由空闲 worker 领取。',
+  how:[
+   {t:'00:00.2',s:'⟩',tx:'接收 <b>POST /api/runs</b> · repo_url=https://github.com/lmcinnes/umap'},
+   {t:'00:00.4',s:'✓',tx:'输入校验通过：https 公开源 · 无内嵌凭据 · 无 query/fragment',ok:1},
+   {t:'00:00.9',s:'✓',tx:'分配 run_id=<b>run_b7c41e</b>，写入运行存储',ok:1},
+   {t:'00:01.6',s:'⟩',tx:'worker 领取任务，状态 queued → preparing'},
+  ],
+  artifact:[['运行记录','runs/b7c41e/'],['事件时间线','events.jsonl']]},
+
+ {id:'preparing',name:'创建容器',est:6,elapsed:6,st:'done',
+  what:'拉起一次性容器：<b>非 root 用户、默认断网、pids/内存/cap 全部受限</b>。workspace 以读写方式挂进 /workspace，用完即焚。',
+  how:[
+   {t:'00:02.0',s:'⟩',tx:'docker create · image=base-py3.11 · user=<b>1000:1000</b>'},
+   {t:'00:02.2',s:'✓',tx:'安全约束生效：--network none · --pids-limit 128 · --memory 2g · --cap-drop ALL',ok:1},
+   {t:'00:02.9',s:'⟩',tx:'挂载 workspace → /workspace（rw）'},
+   {t:'00:05.2',s:'✓',tx:'容器健康检查通过，状态 preparing → planning',ok:1},
+  ],
+  artifact:[['容器','harness-b7c41e'],['Dockerfile','base-py3.11']]},
+
+ {id:'planning',name:'生成计划',est:8,elapsed:8,st:'done',
+  what:'读仓库结构与注入的 <b>check.py</b>，产出执行计划：入口命令、Python 版本、预期产物。<b>计划一旦确定，模型不能再改命令</b>。',
+  how:[
+   {t:'00:05.8',s:'⟩',tx:'扫描仓库：umap/ · setup.py · README.md · 注入 check.py'},
+   {t:'00:08.0',s:'⟩',tx:'识别真实靶场命中：targets/paper-umap（source=target_manifest）'},
+   {t:'00:11.2',s:'✓',tx:'计划落定：python -I check.py · py3.11 · 产物 out.txt',ok:1},
+   {t:'00:13.3',s:'✓',tx:'计划冻结，写入 RunPlan（模型不可再改）',ok:1},
+  ],
+  artifact:[['执行计划','RunPlan'],['仓库快照','commit 27f4b2a']]},
+
+ {id:'installing',name:'安装依赖',est:15,elapsed:15,st:'done',
+  what:'按注入的 requirements.txt 安装依赖。<b>install_requirement 会临时开网，装完立即恢复断网</b>——开窗时间有记录、有上限。',
+  how:[
+   {t:'00:14.0',s:'⟩',tx:'set_network(true) · 记录开网前状态'},
+   {t:'00:14.3',s:'⟩',tx:'pip install umap-learn==0.6.0（含 numba · pynndescent）'},
+   {t:'00:28.5',s:'✓',tx:'装完 9 个包，set_network(false) · <b>开窗 14.2s</b>',ok:1},
+   {t:'00:31.0',s:'✓',tx:'环境清单已采集：9 包 · numba 0.61.2 · numpy 2.2.1',ok:1},
+  ],
+  artifact:[['环境清单','environment.json'],['开网记录','net_window:14.2s']]},
+
+ {id:'testing',name:'运行测试',est:12,elapsed:12,st:'bad',
+  what:'执行冻结的计划命令。<b>第 1 次运行失败</b>：check.py 第一行 import umap 就炸——注入清单没声明 umap-learn。',
+  how:[
+   {t:'00:31.4',s:'⟩',tx:'set_network(false) · 执行 python -I check.py（不可换命令）'},
+   {t:'00:34.2',s:'✕',tx:'Traceback: <b>ModuleNotFoundError: No module named &apos;umap&apos;</b>',err:1},
+   {t:'00:34.4',s:'✕',tx:'exit_code=1 · stderr 已截断存档（50MB 上限打标）',err:1},
+   {t:'00:41.6',s:'⟩',tx:'验证失败 → 进入诊断，失败证据已固化'},
+  ],
+  artifact:[['失败日志','stderr tail'],['退出码','exit 1']]},
+
+ {id:'diagnosing',name:'诊断失败',est:4,elapsed:4,st:'done',
+  what:'失败分类器给出结论：<b>missing_dependency</b>，可修复。分配自愈预算：最多 3 轮、每轮动作数受限。',
+  how:[
+   {t:'00:42.2',s:'⟩',tx:'读取失败证据：traceback + 环境清单'},
+   {t:'00:43.8',s:'✓',tx:'分类 → <b>missing_dependency</b>（repairable）',ok:1},
+   {t:'00:45.3',s:'✓',tx:'进入 REPAIRING · 预算 3 轮 × 12 动作',ok:1},
+  ],
+  artifact:[['诊断结论','failure_category=missing_dependency']]},
+
+ {id:'repairing',name:'修复中',est:20,elapsed:6,st:'active',
+  what:'模型提出修复动作，<b>每一个都要过 ACI 校验门</b>。本轮已拦下 2 次越界请求：一次路径穿越、一次恶意依赖串——都被拒绝且零副作用。<b>合法动作只有一条：装依赖</b>，没动仓库一行代码。',
+  how:[
+   {t:'00:50.4',s:'⟩',tx:'read_file check.py · ok'},
+   {t:'00:52.6',s:'✕',tx:'read_file <b>../../etc/passwd</b> → path_escape · <b>拒绝且零副作用</b>',err:1},
+   {t:'00:53.2',s:'✕',tx:'install_requirement <b>umap; rm -rf /</b> → 含命令分隔符 · <b>拒绝且未开网</b>',err:1},
+   {t:'00:53.8',s:'⟳',tx:'install_requirement umap-learn==0.6.0 · 临时开网执行中…'},
+  ],
+  artifact:[['补丁','无代码改动'],['拦截记录','2 次'],['ACI 审查','7/7 通过判定']]},
+
+ {id:'succeeded',name:'成功',est:6,elapsed:0,st:'todo',
+  what:'重跑冻结命令，exit 0；产物 out.txt 存在且内容与论文预期一致（<b>embedding (200,2) · ARI = 1.000</b>）。<b>成功必须由真实产物验证，不采信模型自述</b>。',
+  how:[
+   {t:'01:10.5',s:'⟳',tx:'重跑 python -I check.py（仍是冻结命令，不可换）'},
+   {t:'01:15.2',s:'✓',tx:'exit 0 · out.txt 已生成',ok:1},
+   {t:'01:15.9',s:'✓',tx:'产物核验：shape (200, 2) · ARI = 1.000 · 簇结构完整保留',ok:1},
+   {t:'01:16.6',s:'✓',tx:'收敛 succeeded · 导出补丁 / 环境 / 报告 / 镜像',ok:1},
+  ],
+  artifact:[['产物','out.txt'],['复现报告','report.md'],['环境镜像','export tar']]},
+];
+
+/* UMAP 这一轮没有代码改动：合法动作只有 install_requirement。
+   diff 显式留空，阶段详情会渲染「本轮无代码改动」而不是假装有补丁。 */
+const U_DIFF=[];
+
+const U_OUT=[
+'PaperHarness reproduce artifact',
+'--------------------------------------------',
+'run_id      run_b7c41e',
+'target      UMAP  arXiv:1802.03426',
+'image       paperharness/target-umap:run_b7c41e',
+'command     python -I check.py         (frozen by plan, not editable)',
+'exit_code   0',
+'elapsed     01:16.6',
+'',
+'[check.py stdout]',
+'UMAP synthetic reduction PASS',
+'embedding shape: (200, 2)',
+'ARI after re-clustering: 1.000',
+'',
+'[verification]',
+'field        expected     actual      result',
+'shape        (200, 2)     (200, 2)    PASS',
+'ARI          >= 0.999     1.000       PASS',
+'artifact     out.txt      present     PASS',
+'',
+'[note]',
+'random_state=42 pinned; no dataset download (synthetic make_blobs).',
+'umap-learn 0.6.0 emits a compatibility_layout FutureWarning:',
+'the default neighbor/init/layout pipeline changes in the next release.'
+].join('\n');
+
+const U_STDERR=[
+'[stderr] python -I check.py',
+'Traceback (most recent call last):',
+'  File "/workspace/check.py", line 9, in <module>',
+'    import umap',
+"ModuleNotFoundError: No module named 'umap'",
+'',
+'[harness] exit code = 1 · duration 2.8s · cwd /workspace',
+'[harness] captured 1 exception · classified as missing_dependency',
+'[sandbox] network still disabled (no outbound connection attempted)'
+].join('\n');
+
+const U_DIAG=[
+'{',
+'  "failure_category": "missing_dependency",',
+'  "exit_code": 1,',
+'  "signal": null,',
+'  "missing_modules": ["umap"],',
+'  "evidence": {',
+'    "stderr_hash": "4b81c7d2",',
+'    "first_frame": "check.py:9",',
+'    "package_manager": "pip",',
+'    "declared_in": null',
+'  },',
+'  "candidate_fixes": [',
+'    { "action": "install_requirement", "arg": "umap-learn==0.6.0", "risk": "needs network window" }',
+'  ],',
+'  "note": "no source patch needed; duplicate candidates were rejected by ACI"',
+'}'
+].join('\n');
+
+const U_ENV=[
+'{',
+'  "python": "3.13.7",',
+'  "packages": {',
+'    "numpy": "2.2.1",',
+'    "scipy": "1.15.1",',
+'    "scikit-learn": "1.6.1",',
+'    "numba": "0.61.2",',
+'    "umap-learn": "0.6.0"',
+'  },',
+'  "network": "disabled",',
+'  "user": "1000:1000 (non-root)",',
+'  "capabilities": "ALL dropped",',
+'  "rootfs": "read-only (workspace rw)",',
+'  "pid_limit": 256,',
+'  "memory_limit": "2g"',
+'}'
+].join('\n');
+
+const U_PLAN=[
+'{',
+'  "target_id": "paper-umap",',
+'  "entry_command": "python -I check.py",',
+'  "python_version": "3.13",',
+'  "expected_artifact": "out.txt",',
+'  "verify": "embedding.shape == (200, 2) and ARI >= 0.999",',
+'  "editable_after_freeze": false,',
+'  "frozen_at": "00:11.2",',
+'  "source": "target_manifest (targets/paper-umap)"',
+'}'
+].join('\n');
+
+const U_EV=[
+'{"seq":1,"t":"00:00.0","type":"run_created","data":{"target":"paper-umap"}}',
+'{"seq":2,"t":"00:02.0","type":"sandbox_ready","data":{"net":"none","user":"1000"}}',
+'{"seq":3,"t":"00:11.2","type":"plan_frozen","data":{"cmd":"python -I check.py"}}',
+'{"seq":4,"t":"00:31.4","type":"action_rejected","data":{"action":"read_file","summary":"path_escape:../../etc/passwd"}}',
+'{"seq":5,"t":"00:33.2","type":"action_rejected","data":{"action":"install_requirement","summary":"invalid_requirement:umap; rm -rf /"}}',
+'{"seq":6,"t":"00:42.0","type":"verify_failed","data":{"category":"missing_dependency","exit":1}}',
+'{"seq":7,"t":"00:54.1","type":"requirement_installed","data":{"arg":"umap-learn==0.6.0","net_window":"14.2s"}}',
+'{"seq":8,"t":"01:15.2","type":"verify_passed","data":{"artifact":"out.txt","exit":0}}',
+'{"seq":9,"t":"01:16.6","type":"run_succeeded","data":{"report":"report.md","image":"export.tar"}}'
+].join('\n');
+
+const U_DIFFTXT=[
+'[no source changes]',
+'',
+'This run required no code patch: the only legal action was',
+'install_requirement (umap-learn==0.6.0). The repository was left',
+'byte-identical to its pinned revision 27f4b2a.',
+'',
+'Per contract §4.1, GET /api/runs/{id}/patch returns an empty string',
+'when nothing changed — it is not a 404.'
+].join('\n');
+
+const U_TAR=[
+'$ docker save paperharness/target-umap:run_b7c41e | tar -tv',
+'-rw-r--r--  0 0 0   3.2K  manifest.json',
+'drwxr-xr-x  0 0 0     0   blobs/sha256/',
+'-rw-------  0 0 0  78.4M  blobs/sha256/8f3c...   base layer (python:3.13-slim)',
+'-rw-------  0 0 0  16.8M  blobs/sha256/d41b...   pip install umap-learn==0.6.0 numba',
+'-rw-------  0 0 0   0.0B  blobs/sha256/c07e...   workspace snapshot (unmodified)',
+'-rw-------  0 0 0   1.1K  blobs/sha256/5dd0...   config: non-root, network=none, cap-drop ALL',
+'',
+'total 97.0 MB · 5 entries · reproducible by digest'
+].join('\n');
+
+function uMapReport(){
+  return `<div class="av-report"><div class="rp">
+    <h1>复现报告 · UMAP</h1>
+    <div class="rp-sub">run_b7c41e · arXiv:1802.03426 · 生成于 2026-11-17 17:03:12 +08:00</div>
+    <h2>结论</h2>
+    <table>
+      <tr><th>项</th><th>结果</th></tr>
+      <tr><td>最终状态</td><td class="ok"><b>succeeded</b></td></tr>
+      <tr><td>退出码</td><td>0</td></tr>
+      <tr><td>自愈轮次</td><td>1（缺依赖 → 补装 → 重跑）</td></tr>
+      <tr><td>形状核验</td><td class="ok">embedding (200, 2)（期望 (200, 2)）</td></tr>
+      <tr><td>结构核验</td><td class="ok">ARI = 1.000（阈值 ≥ 0.999）· 3 个簇在 2 维完整保住</td></tr>
+      <tr><td>代码改动</td><td class="ok">无 · 仓库保持 commit 27f4b2a 原样</td></tr>
+    </table>
+    <h2>环境</h2>
+    <table>
+      <tr><th>项</th><th>值</th></tr>
+      <tr><td>镜像</td><td>paperharness/target-umap:run_b7c41e</td></tr>
+      <tr><td>Python</td><td>3.13.7</td></tr>
+      <tr><td>关键依赖</td><td>numpy 2.2.1 · scipy 1.15.1 · scikit-learn 1.6.1 · numba 0.61.2 · umap-learn 0.6.0</td></tr>
+      <tr><td>隔离</td><td>非 root(1000) · network=none · cap-drop ALL · rootfs 只读</td></tr>
+    </table>
+    <h2>自愈过程</h2>
+    <table>
+      <tr><th>时间</th><th>事件</th><th>结果</th></tr>
+      <tr><td>00:31.4</td><td>read_file ../../etc/passwd</td><td class="bad">拒绝 · path_escape · 零副作用</td></tr>
+      <tr><td>00:33.2</td><td>install_requirement "umap; rm -rf /"</td><td class="bad">拒绝 · 含命令分隔符 · 未开网</td></tr>
+      <tr><td>00:42.0</td><td>首次运行 python -I check.py</td><td class="bad">exit 1 · missing_dependency</td></tr>
+      <tr><td>00:54.1</td><td>install_requirement umap-learn==0.6.0</td><td class="ok">临时开网 14.2s · 已恢复断网</td></tr>
+      <tr><td>01:15.2</td><td>重跑冻结命令</td><td class="ok">exit 0 · 产物核验通过</td></tr>
+    </table>
+    <h2>产物</h2>
+    <table>
+      <tr><th>名称</th><th>说明</th></tr>
+      <tr><td>out.txt</td><td>形状与 ARI 核验结果（可机读断言）</td></tr>
+      <tr><td>patch.diff</td><td>空 —— 本轮无代码改动（契约 §4.1：空字符串不是 404）</td></tr>
+      <tr><td>events.jsonl</td><td>9 条事件，可从任意 seq 回放</td></tr>
+      <tr><td>environment.json</td><td>锁定的依赖版本与隔离参数</td></tr>
+      <tr><td>export.tar</td><td>可直接 docker load 的镜像快照，97.0 MB</td></tr>
+    </table>
+    <h2>版本漂移风险</h2>
+    <table>
+      <tr><th>项</th><th>值</th></tr>
+      <tr><td>告警</td><td>umap-learn 0.6.0 · <code>compatibility_layout</code> FutureWarning</td></tr>
+      <tr><td>含义</td><td>当前默认的近邻/初始化/layout 流程将在下个版本变更</td></tr>
+      <tr><td>影响</td><td>同一份代码换版本后 embedding 可能不同 → 必须 pin 死版本并写进报告</td></tr>
+    </table>
+  </div></div>`;
+}
+
+const U_DOCS={
+  'out.txt':{kind:'TEXT / 已核验',size:'1.4 KB',html:'<div class="av-code">'+codeRows(U_OUT)+'</div>'},
+  'report.md':{kind:'MARKDOWN',size:'4.6 KB',html:uMapReport()},
+  'export tar':{kind:'TAR.ARCHIVE',size:'97.0 MB',html:'<div class="av-code">'+codeRows(U_TAR)+'</div>'},
+  'patch.diff':{kind:'UNIFIED DIFF / 空',size:'0 B',html:'<div class="av-code">'+codeRows(U_DIFFTXT)+'</div>'},
+  'events.jsonl':{kind:'NDJSON',size:'18.9 KB',html:'<div class="av-code">'+codeRows(U_EV)+'</div>'},
+  'stderr tail':{kind:'STDERR / 证据',size:'0.8 KB',html:'<div class="av-code">'+codeRows(U_STDERR)+'</div>'},
+  '诊断结论':{kind:'JSON / DIAGNOSIS',size:'1.1 KB',html:'<div class="av-code">'+codeRows(U_DIAG)+'</div>'},
+  '执行计划':{kind:'JSON / FROZEN PLAN',size:'0.8 KB',html:'<div class="av-code">'+codeRows(U_PLAN)+'</div>'},
+  'environment.json':{kind:'JSON / LOCKFILE',size:'1.2 KB',html:'<div class="av-code">'+codeRows(U_ENV)+'</div>'}
+};
+
+/* ═══════════════ 目标注册表 + 输入解析 ═══════════════
+   解析规则：arXiv 链接 / arXiv ID / GitHub 仓库地址 都接受。
+   命中返回 target id；未命中返回 null —— 由调用方提示，绝不悄悄回落到默认值。 */
+const TARGETS={
+  'paper-pysindy':{
+    id:'paper-pysindy', name:'PySINDy', field:'稀疏动力学识别',
+    arxiv:'2004.08424',
+    repo:'https://github.com/dynamicslab/pysindy', repoShort:'dynamicslab/pysindy',
+    image:'paperharness/target-pysindy', entry:'python -I check.py', artifact:'out.txt',
+    runId:'run_a3f29c', failModule:'pysindy', failLine:'import pysindy as ps', failLineNo:6,
+    pin:'pysindy==2.1.0', fixDesc:'补上 pysindy 依赖',
+    failLabel:'No module named &apos;pysindy&apos;',
+    verifyShort:'x&#39; = -2.000 x / y&#39; = 1.000 y',
+    verifyNote:'x&#39; = -2.000 x / y&#39; = 1.000 y · 与论文一致',
+    toast:'复现成功 · 全程 1 轮自愈 · 拦截 2 次越界',
+    procsRun:[{pid:'1',cmd:'python -I check.py',cpu:'31%',mem:'187 MB',st:'running'}],
+    procsDone:[{pid:'1',cmd:'python -I check.py',cpu:'0%',mem:'—',st:'done'}],
+    stages:S_SINDY_STAGES, diff:S_SINDY_DIFF, docs:S_SINDY_DOCS,
+    repairActions:[
+     {ts:'00:50.1',sym:'⟩',nm:'read_file',tg:'check.py',rs:'ok',cl:'ok',stage:'repairing'},
+     {ts:'00:50.9',sym:'⟩',nm:'search_text',tg:'"import" · .',rs:'7 matches',cl:'dim',stage:'repairing'},
+     {ts:'00:51.4',sym:'⟩',nm:'read_file',tg:'requirements.txt',rs:'文件不存在',cl:'dim',stage:'repairing'},
+     {ts:'00:52.3',sym:'✕',nm:'read_file',tg:'../../etc/passwd',rs:'path_escape',cl:'err',stage:'repairing',
+      blocked:1,why:'路径越出 workspace 边界，已拒绝且未产生任何副作用'},
+     {ts:'00:52.8',sym:'⟩',nm:'replace_exact',tg:'check.py:6',rs:'1 occurrence',cl:'dim',stage:'repairing'},
+     {ts:'00:53.1',sym:'✕',nm:'install_requirement',tg:'numpy; rm -rf /',rs:'requirement_not_allowed',cl:'err',stage:'repairing',
+      blocked:1,why:'依赖字符串含命令分隔符，拒绝后未打开网络'},
+    ],
+  },
+  'paper-umap':{
+    id:'paper-umap', name:'UMAP', field:'流形降维',
+    arxiv:'1802.03426',
+    repo:'https://github.com/lmcinnes/umap', repoShort:'lmcinnes/umap',
+    image:'paperharness/target-umap', entry:'python -I check.py', artifact:'out.txt',
+    runId:'run_b7c41e', failModule:'umap', failLine:'import umap', failLineNo:9,
+    pin:'umap-learn==0.6.0', fixDesc:'补上 umap-learn 依赖',
+    failLabel:'No module named &apos;umap&apos;',
+    verifyShort:'embedding (200, 2) · ARI = 1.000',
+    verifyNote:'embedding (200, 2) · ARI = 1.000 · 簇结构完整保留',
+    toast:'复现成功 · 全程 1 轮自愈 · 拦截 2 次越界 · 无代码改动',
+    procsRun:[{pid:'1',cmd:'python -I check.py',cpu:'38%',mem:'241 MB',st:'running'}],
+    procsDone:[{pid:'1',cmd:'python -I check.py',cpu:'0%',mem:'—',st:'done'}],
+    stages:U_STAGES, diff:U_DIFF, docs:U_DOCS,
+    repairActions:[
+     {ts:'00:50.4',sym:'⟩',nm:'read_file',tg:'check.py',rs:'ok',cl:'ok',stage:'repairing'},
+     {ts:'00:51.2',sym:'⟩',nm:'search_text',tg:'"import umap" · .',rs:'5 matches',cl:'dim',stage:'repairing'},
+     {ts:'00:51.8',sym:'⟩',nm:'read_file',tg:'requirements.txt',rs:'仅注入清单',cl:'dim',stage:'repairing'},
+     {ts:'00:52.6',sym:'✕',nm:'read_file',tg:'../../etc/passwd',rs:'path_escape',cl:'err',stage:'repairing',
+      blocked:1,why:'路径越出 workspace 边界，已拒绝且未产生任何副作用'},
+     {ts:'00:53.2',sym:'✕',nm:'install_requirement',tg:'umap; rm -rf /',rs:'requirement_not_allowed',cl:'err',stage:'repairing',
+      blocked:1,why:'依赖字符串含命令分隔符，拒绝后未打开网络'},
+     {ts:'00:53.8',sym:'⟩',nm:'install_requirement',tg:'umap-learn==0.6.0',rs:'needs network window',cl:'dim',stage:'repairing'},
+    ],
+  },
+};
+
+let CUR=TARGETS['paper-pysindy'];
+let STAGES=CUR.stages, DIFF=CUR.diff, ART_DOCS=CUR.docs;
+let REPAIR_ACTIONS=CUR.repairActions, LIVE_ACTIONS=[...CUR.repairActions];
+
+/* 解析顺序很重要：先认 arXiv，再认 GitHub；两者都认不出就返回 null。 */
+const ARXIV_RE=/(\d{4}\.\d{4,5})(v\d+)?/;
+function resolveTarget(raw){
+  const v=(raw||'').trim();
+  if(!v) return 'paper-pysindy';                       // 空输入 = 用第一篇做默认演示
+  const lower=v.toLowerCase();
+
+  if(lower.includes('arxiv.org')||ARXIV_RE.test(v)){
+    const m=v.match(ARXIV_RE);
+    const id=m?m[1]:null;
+    if(!id) return null;
+    const hit=Object.values(TARGETS).find(t=>t.arxiv===id);
+    return hit?hit.id:null;
+  }
+  if(lower.includes('github.com')){
+    const slug=lower.replace(/^https?:\/\//,'').replace(/^www\./,'')
+      .replace(/^github\.com\//,'').replace(/\.git$/,'').replace(/\/+$/,'');
+    const hit=Object.values(TARGETS).find(t=>t.repoShort.toLowerCase()===slug);
+    return hit?hit.id:null;
+  }
+  // 直接粘 ID（2004.08424）
+  const byId=Object.values(TARGETS).find(t=>t.arxiv===v);
+  return byId?byId.id:null;
+}
+function loadTarget(id){
+  CUR=TARGETS[id]||TARGETS['paper-pysindy'];
+  STAGES=CUR.stages;
+  DIFF=CUR.diff;
+  ART_DOCS=CUR.docs;
+  REPAIR_ACTIONS=CUR.repairActions;
+  LIVE_ACTIONS=[...CUR.repairActions];
+  chosen={name:CUR.name,id:CUR.id};
+  return CUR;
+}
+
 function genericArtifact(a,s){
   return `<div class="av-report"><div class="rp">
     <h1>${esc(a[1])}</h1>
@@ -1469,11 +1892,9 @@ function simAt(ms,fn){simTimers.push(setTimeout(fn,ms))}
 function simStop(){simTimers.forEach(clearTimeout);simTimers=[]}
 
 function bootRun(){
-  $('#tb-run').textContent='run_a3f29c · '+chosen.name;
-  renderTrack(); renderRecent(); renderProcs([
-    {pid:'1',cmd:'python main.py',cpu:'2%',mem:'96 MB',st:'done'},
-    {pid:'7',cmd:'pip install numpy==2.0.0',cpu:'14%',mem:'212 MB',st:'running'},
-  ]);
+  const T=CUR, cid='harness-'+T.runId.replace(/^run_/,'');
+  $('#tb-run').textContent=T.runId+' · '+T.name;
+  renderTrack(); renderRecent(); renderProcs(T.procsRun.map((p,i)=>i===0?{...p,st:'done'}:{...p,cmd:'pip install '+T.pin}));
   updateProgress(); showView('dash');
 
   // 阶段入场
@@ -1483,43 +1904,51 @@ function bootRun(){
   });
 
   // 终端开场
-  pushTerm('info','SANDBOX','container harness-a3f29c attached · user 1000:1000 (non-root)');
+  pushTerm('info','SANDBOX','container '+cid+' attached · user 1000:1000 (non-root)');
   pushTerm('info','SANDBOX','network: OFF · pids-limit 128 · mem 2G · cap-drop ALL');
   pushTerm('warn','HARNESS','第 1 轮自愈开始 · 预算 3 轮 × 12 动作');
 
   // 修复阶段推进
-  simAt(1000,()=>pushTerm('aci','ACI','read_file src/model.py → ok'));
+  simAt(1000,()=>pushTerm('aci','ACI','read_file check.py → ok'));
   simAt(1900,()=>pushTerm('err','ACI','read_file ../../etc/passwd → path_escape · 拒绝，未产生任何副作用'));
   simAt(2000,()=>{const el=$$('#track .stage')[6];const r=el.getBoundingClientRect();
     burst(r.left+r.width/2,r.top+6,COL.reject,26,{speed:2.2,life:70,grav:.03,size:1.2})});
-  simAt(2900,()=>pushTerm('aci','ACI','install_requirement "numpy; rm -rf /" → 含命令分隔符 · 拒绝，未开网'));
+  simAt(2900,()=>pushTerm('aci','ACI','install_requirement "'+T.failModule+'; rm -rf /" → 含命令分隔符 · 拒绝，未开网'));
   simAt(3000,()=>{const el=$$('#track .stage')[6];const r=el.getBoundingClientRect();
     burst(r.left+r.width/2,r.top+6,COL.reject,26,{speed:2.2,life:70,grav:.03,size:1.2})});
-  simAt(3800,()=>pushTerm('aci','ACI','install_requirement numpy==2.0.0 → set_network(true) 临时开窗'));
+  simAt(3800,()=>pushTerm('aci','ACI','install_requirement '+T.pin+' → set_network(true) 临时开窗'));
 
   // 修复完成 → 重跑
   simAt(9000,()=>{
-    pushTerm('ok','ACI','install_requirement numpy==2.0.0 → exit 0 · set_network(false) 恢复断网');
-    LIVE_ACTIONS.push({ts:'00:53.9',sym:'⟩',nm:'install_requirement',tg:'numpy==2.0.0',rs:'exit 0',cl:'ok',stage:'repairing'});
-    LIVE_ACTIONS.push({ts:'00:54.6',sym:'⊘',nm:'finish_repair',tg:'"补上 numpy 依赖"',rs:'—',cl:'dim',stage:'repairing'});
+    pushTerm('ok','ACI','install_requirement '+T.pin+' → exit 0 · set_network(false) 恢复断网');
+    LIVE_ACTIONS.push({ts:'00:53.9',sym:'⟩',nm:'install_requirement',tg:T.pin,rs:'exit 0',cl:'ok',stage:'repairing'});
+    LIVE_ACTIONS.push({ts:'00:54.6',sym:'⊘',nm:'finish_repair',tg:'"'+T.fixDesc+'"',rs:'—',cl:'dim',stage:'repairing'});
     STAGES[6].st='done'; STAGES[6].elapsed=20; renderTrack(); renderRecent(); updateProgress();
     $('#tele-net').textContent='已断开'; $('#tele-net').className='v off';
     $('#loop-badge').style.display='none';
-    setNow('run_smoke_test','python main.py','修复已提交。重跑冻结命令验证——命令仍是计划里的那条，模型换不了。');
+    setNow('run_smoke_test',T.entry,'修复已提交。重跑冻结命令验证——命令仍是计划里的那条，模型换不了。');
     $('#hero-title').innerHTML='重跑验证';
-    $('#hero-note').innerHTML='补丁已应用 · 网络已恢复断开 · <b>等待真实产物</b>';
-    renderProcs([{pid:'1',cmd:'python main.py',cpu:'31%',mem:'187 MB',st:'running'}]);
-    pushTerm('info','HARNESS','重跑 python main.py（冻结命令）· set_network(false)');
+    $('#hero-note').innerHTML='依赖已补齐 · 网络已恢复断开 · <b>等待真实产物</b>';
+    renderProcs(T.procsRun);
+    pushTerm('info','HARNESS','重跑 '+T.entry+'（冻结命令）· set_network(false)');
   });
 
-  // 重跑日志
-  const RUNLOG=[
-    [10200,'info','PYTHON','python main.py · cwd=/workspace'],
-    [10600,'info','PYTHON','loading config…'],
-    [11000,'ok','PYTHON','import numpy 2.0.0 · OK'],
-    [11800,'info','PYTHON','t = linspace(0,1,100) · x=3exp(-2t) · y=0.5exp(t)'],
+  // 重跑日志（两篇论文的观测内容不同，这里按 target 分派）
+  const RUNLOG = T.id==='paper-umap' ? [
+    [10200,'info','PYTHON',T.entry+' · cwd=/workspace'],
+    [10600,'info','PYTHON','loading check.py…'],
+    [11000,'ok','PYTHON','import umap · umap-learn 0.6.0 · OK'],
+    [11800,'info','PYTHON','make_blobs(200, 10, centers=3) · 合成数据，无下载'],
+    [12600,'warn','PYTHON','FutureWarning: compatibility_layout（版本漂移，已记录进报告）'],
+    [13300,'info','PYTHON','UMAP(n_components=2, random_state=42).fit_transform'],
+    [14200,'info','PYTHON','KMeans(3) 重新聚类 · adjusted_rand_score'],
+  ] : [
+    [10200,'info','PYTHON',T.entry+' · cwd=/workspace'],
+    [10600,'info','PYTHON','loading check.py…'],
+    [11000,'ok','PYTHON','import pysindy · pysindy 2.1.0 · OK'],
+    [11800,'info','PYTHON','t = linspace(0,1,1001) · x=exp(-2t) · y=exp(t)'],
     [12800,'info','PYTHON','SINDy.fit() · STLSQ threshold=0.1'],
-    [14000,'info','PYTHON','candidates: 1, x, y, x², xy, y²'],
+    [14000,'info','PYTHON','candidates: 1, x0, x1, x0², x0x1, x1²'],
   ];
   RUNLOG.forEach(([at,l,tag,tx])=>simAt(at,()=>pushTerm(l,tag,tx)));
 
@@ -1530,16 +1959,16 @@ function bootRun(){
     renderTrack(); renderRecent(); updateProgress();
     $('#hero-dot').className='dot good';
     $('#hero-title').innerHTML='复现成功';
-    $('#hero-note').innerHTML='exit 0 · out.txt 核验通过 · <b>x&#39; = -2.000 x</b> 与论文一致';
-    setNow('finish','run_a3f29c','产物核验通过。补丁、环境清单、事件时间线与复现报告已导出。');
+    $('#hero-note').innerHTML='exit 0 · '+T.artifact+' 核验通过 · <b>'+T.verifyShort+'</b>';
+    setNow('finish',T.runId,'产物核验通过。补丁、环境清单、事件时间线与复现报告已导出。');
     $('#nc-act').style.color='var(--pass)';
-    pushTerm('ok','VERIFY','out.txt 已生成 · x&#39; = -2.000 x / y&#39; = 1.000 y · 与论文预期一致');
+    pushTerm('ok','VERIFY',T.artifact+' 已生成 · '+T.verifyNote);
     pushTerm('ok','HARNESS','收敛 succeeded · 导出 patch / environment / report / image');
-    renderProcs([{pid:'1',cmd:'python main.py',cpu:'0%',mem:'—',st:'done'}]);
+    renderProcs(T.procsDone);
     const r=$('.hero').getBoundingClientRect();
     burst(r.left+r.width*.3,r.top+60,COL.pass,50,{speed:3.2,life:80,grav:.02,size:1.2});
     burst(r.left+r.width*.7,r.top+60,COL.accent,40,{speed:2.8,life:80,grav:.02,size:1.1});
-    toast('复现成功 · 全程 1 轮自愈 · 拦截 2 次越界');
+    toast(T.toast);
   });
 
   // 周期效果：当前阶段冒粒子 + 遥测微动
@@ -1568,9 +1997,12 @@ function bootRun(){
   },1000));
 }
 
-/* hash 直达（调试 / 演示深链用） */
+/* hash 直达（调试 / 演示深链用）
+   支持 ?t=paper-umap 指定剧本，例：prototype.html?t=paper-umap#run */
 (function(){
   const h=location.hash;
+  const t=new URLSearchParams(location.search).get('t');
+  if(t) loadTarget(t);
   if(h==='#run'||h.startsWith('#stage/')||h.startsWith('#artifact/')||h==='#sandbox'){
     ['select','welcome'].forEach(k=>{SC[k].classList.remove('on');SC[k].style.display='none'});
     SC.shell.classList.add('on');curScene='shell';booted=true;bootRun();

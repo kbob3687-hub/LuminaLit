@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { motion } from "motion/react";
 
 /** 截图模式：关闭入场动画，避免无头渲染抓到半透明中间帧。 */
@@ -17,6 +18,8 @@ export interface PaperOption {
   arxiv: string;
   desc: string;
   tech: string;
+  /** 提交给 POST /api/runs 的 repo_url（契约 §4.1 唯一必填字段）。 */
+  repo: string;
 }
 
 const PAPERS: PaperOption[] = [
@@ -26,6 +29,7 @@ const PAPERS: PaperOption[] = [
     arxiv: "arXiv:2004.08424",
     desc: "稀疏识别动力学方程",
     tech: "x' = -2.000x",
+    repo: "https://github.com/dynamicslab/pysindy",
   },
   {
     id: "paper-umap",
@@ -33,6 +37,7 @@ const PAPERS: PaperOption[] = [
     arxiv: "arXiv:1802.03426",
     desc: "200×10 降维至 2 维",
     tech: "ARI ≥ 0.999",
+    repo: "https://github.com/lmcinnes/umap",
   },
   {
     id: "custom",
@@ -40,15 +45,43 @@ const PAPERS: PaperOption[] = [
     arxiv: "任意公开源",
     desc: "输入 GitHub 地址",
     tech: "自动生成计划",
+    repo: "",
   },
 ];
 
 interface Props {
-  onPick: (paper: { name: string; id: string }) => void;
+  onPick: (paper: { name: string; id: string; repo: string }) => void;
   disabled?: boolean;
+  /** 后端返回的错误（422 的 detail[0].msg / 429 queue_full 等），原样展示。 */
+  error?: string | null;
 }
 
-export function SelectScene({ onPick, disabled }: Props) {
+export function SelectScene({ onPick, disabled, error }: Props) {
+  const [localError, setLocalError] = useState<string | null>(null);
+  const shown = localError ?? error ?? null;
+
+  /** 把输入框内容当作 repo_url 提交（契约 §4.1 的唯一必填字段）。 */
+  const submit = () => {
+    const el = document.getElementById("repo-input") as HTMLInputElement | null;
+    const v = el?.value.trim() ?? "";
+    if (!v) {
+      setLocalError("先填一个 GitHub 仓库地址，或直接点上面的靶场卡片。");
+      return;
+    }
+    if (/arxiv\.org/i.test(v)) {
+      setLocalError(
+        "arXiv 链接不是 Git 仓库：POST /api/runs 只接受 repo_url，把 arXiv 地址发过去会以 clone_failed 失败（已实测）。请填论文对应的 GitHub 仓库地址，例如 https://github.com/dynamicslab/pysindy。",
+      );
+      return;
+    }
+    if (!/^https:\/\/[^/]+\/.+/.test(v)) {
+      setLocalError("需要完整的 https 仓库地址，例如 https://github.com/owner/repo。");
+      return;
+    }
+    setLocalError(null);
+    onPick({ name: v.replace(/^https?:\/\//, "").replace(/\/+$/, ""), id: "custom", repo: v });
+  };
+
   return (
     <div className="flex h-full items-center justify-center px-6">
       <div
@@ -101,24 +134,31 @@ export function SelectScene({ onPick, disabled }: Props) {
             placeholder="https://github.com/owner/repo"
             spellCheck={false}
             disabled={disabled}
+            onInput={() => setLocalError(null)}
             className="flex-1 border-0 bg-transparent py-[15px] font-mono text-[13px] text-ink outline-none placeholder:text-ink-muted disabled:opacity-50"
           />
           <button
             disabled={disabled}
-            onClick={() => {
-              const el = document.getElementById("repo-input") as HTMLInputElement | null;
-              const v = el?.value.trim() ?? "";
-              onPick(
-                v
-                  ? { name: v.split("/").slice(-2).join("/"), id: "custom" }
-                  : { name: "PySINDy", id: "paper-pysindy" },
-              );
-            }}
+            onClick={submit}
             className="my-2 shrink-0 cursor-pointer rounded-[7px] border border-transparent bg-gradient-to-br from-[#7c9bff] to-[#5a7cf0] px-6 py-[11px] text-[13.5px] font-semibold text-void shadow-[0_8px_26px_-8px_rgb(108_143_255_/_0.8)] transition-transform hover:-translate-y-0.5 disabled:opacity-50"
           >
             开始复现
           </button>
         </motion.div>
+
+        <motion.div {...FADE_IN(0.48)} className="mt-3 font-mono text-[11px] leading-[1.7] text-ink-muted">
+          提交的是 <code className="text-ink-mid">repo_url</code>：后端只认 Git 仓库地址，论文用对应仓库代替。
+        </motion.div>
+
+        {shown && (
+          <motion.div
+            {...FADE_IN(0.5)}
+            role="alert"
+            className="mt-3.5 rounded-[7px] border border-[rgb(255_96_80_/_0.42)] border-l-[3px] border-l-[rgb(255_92_71)] bg-[rgb(255_96_80_/_0.09)] px-3.5 py-3 font-mono text-[11.5px] leading-[1.8] text-[#ffd9d5]"
+          >
+            {shown}
+          </motion.div>
+        )}
       </div>
     </div>
   );
@@ -142,7 +182,14 @@ function PaperCard({
       {...FADE_IN(0.26 + index * 0.07)}
       whileHover={{ y: -5, scale: 1.018 }}
       whileTap={{ scale: 0.985 }}
-      onClick={() => onPick({ name: paper.name, id: paper.id })}
+      onClick={() => {
+        // 「自定义仓库」没有固定 repo_url：聚焦输入框，由用户给具体地址
+        if (!paper.repo) {
+          document.getElementById("repo-input")?.focus();
+          return;
+        }
+        onPick({ name: paper.name, id: paper.id, repo: paper.repo });
+      }}
       onMouseMove={(e) => {
         const r = e.currentTarget.getBoundingClientRect();
         e.currentTarget.style.setProperty("--px", `${((e.clientX - r.left) / r.width) * 100}%`);
