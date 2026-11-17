@@ -37,19 +37,54 @@ export default function App() {
   /**
    * 数据来源只有两种，且界面上必须能看出来是哪种：
    *
-   *   live   —— 接了后端（VITE_API_BASE_URL 非空，或显式 ?live=1），
-   *             状态和事件全部来自 GET /api/runs/{id}，前端不改写。
-   *   replay —— 离线回放：没有后端地址时**默认走这条**，否则本地起前端
-   *             点进去只会看到"连接中 等待后端"的空壳（fetch /api/runs
-   *             被 vite 兜成 index.html，报错还看不懂）。
-   *             回放的时间轴本身是逐条事件，进场只有 queued 亮，不预置绿灯。
+   *   live   —— 后端活着：状态和事件全部来自 GET /api/runs/{id}，前端不改写。
+   *   replay —— 离线回放：后端没起来时走这条，否则本地起前端点进去只会
+   *             看到"连接中 等待后端"的空壳。回放本身也是逐条事件推进，
+   *             进场只有 queued 亮，不预置绿灯。
    *
-   * ?demo=0 可以强制关掉回放（配合 ?live=1 做真联调）。
+   * 探测优先于配置：启动时打一次 /api/health（1.5s 超时），
+   * 通了就是 live，不通就回放。这样不用逼用户记 ?live=1 这种参数。
+   * `?demo=1` / `?live=1` 仍然可以强行覆盖。
+   *
+   * 注意不要用 VITE_API_BASE_URL 直连 8000：那会绕过 vite proxy 变成跨域，
+   * 而后端没有 CORS 中间件，浏览器会直接拦掉。留空走相对路径才对。
    */
   const apiBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
-  const canLive = Boolean(apiBase) || q.get("live") === "1" || Boolean(q.get("run"));
   const wantReplay = q.get("demo") === "1" || import.meta.env.VITE_DEMO === "1";
-  const mode: "live" | "replay" = wantReplay || !canLive ? "replay" : "live";
+  const wantLive = q.get("live") === "1" || Boolean(q.get("run"));
+
+  /** null = 还在探测 */
+  const [healthy, setHealthy] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const ctrl = new AbortController();
+    const t = window.setTimeout(() => ctrl.abort(), 1500);
+    fetch(`${apiBase ?? ""}/api/health`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((b: { status?: string }) => {
+        if (alive) setHealthy(b?.status === "ok");
+      })
+      .catch(() => {
+        // 探测失败不是错误，只是"后端没起来"，回落到回放即可
+        if (alive) setHealthy(false);
+      })
+      .finally(() => window.clearTimeout(t));
+    return () => {
+      alive = false;
+      window.clearTimeout(t);
+      ctrl.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const mode: "live" | "replay" = wantReplay
+    ? "replay"
+    : wantLive
+      ? "live"
+      : healthy === true
+        ? "live"
+        : "replay";
   const demo = mode === "replay";
 
   const live = useRunPolling(mode === "live" ? runId : null);
