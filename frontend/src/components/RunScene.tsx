@@ -8,6 +8,7 @@ import {
   buildProgress,
   buildRows,
   buildStages,
+  explainFailure,
   isActionEvent,
   isBlockedEvent,
   type ActionRow,
@@ -128,14 +129,15 @@ export function RunScene({
   const isFailed = state === "failed";
 
   /**
-   * 失败原因的人话版。后端只回 failure_category（`_fail` 里也只存了
-   * "clone failed: <异常>"），前端不做诊断，只把已知类别的常见成因写清，
-   * 免得界面上只有 `clone_failed` 三个字，看的人以为是界面坏了。
+   * 失败原因的人话版。后端只为失败留了 failure_category 与一句
+   * `clone failed: <异常>`，stderr 不落盘，所以这里**只陈述能核实的事实**，
+   * 不替用户判定成因（见 runModel.explainFailure 的注释）。
    */
   const failureCategory = labelOf(status?.result?.failure_category ?? "");
-  const failureNote =
-    FAILURE_HINTS[failureCategory] ??
-    (failureCategory ? FAILURE_HINT_FALLBACK : "后端没给出 failure_category，无法判断失败环节。");
+  const failExplain = useMemo(
+    () => explainFailure(failureCategory, events),
+    [failureCategory, events],
+  );
 
   const headline = useMemo(() => {
     if (state === "succeeded") return { text: "复现成功", accent: "已验证通过" };
@@ -345,7 +347,41 @@ export function RunScene({
               <div className="font-mono text-[10px] tracking-[.16em] text-reject/85 uppercase">
                 失败原因 · {failureCategory || "未分类"}
               </div>
-              <p className="mt-1 text-[12.5px] leading-relaxed text-ink-mid">{failureNote}</p>
+              <p className="mt-1 text-[12.5px] leading-relaxed text-ink">{failExplain.verdict}</p>
+              <p className="mt-1.5 text-[11.5px] leading-relaxed text-ink-muted">
+                {failExplain.detail}
+              </p>
+              {failExplain.note && (
+                <p className="mt-1.5 border-l-2 border-warn/40 pl-2.5 text-[11.5px] leading-relaxed text-warn/85">
+                  {failExplain.note}
+                </p>
+              )}
+              {failExplain.stderr && (
+                <div className="mt-2">
+                  <div className="font-mono text-[10px] tracking-[.1em] text-reject/70">
+                    stderr 尾段 · {failExplain.stderrFrom}
+                  </div>
+                  <pre className="mt-1 max-h-36 overflow-auto rounded-md bg-black/35 p-2 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap break-all text-[rgb(255_180_170_/_0.9)]">
+                    {failExplain.stderr}
+                  </pre>
+                </div>
+              )}
+              {failExplain.repoUrl && (
+                <div className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-1 font-mono text-[11px]">
+                  <span className="text-ink-muted">提交地址</span>
+                  <code className="break-all text-ink-mid">{failExplain.repoUrl}</code>
+                </div>
+              )}
+              {failExplain.raw && (
+                <details className="mt-2">
+                  <summary className="cursor-pointer font-mono text-[10.5px] text-ink-muted transition-colors hover:text-ink-mid">
+                    后端原始 message
+                  </summary>
+                  <pre className="mt-1.5 max-h-36 overflow-auto rounded-md bg-black/35 p-2 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap break-all text-ink-muted">
+                    {failExplain.raw}
+                  </pre>
+                </details>
+              )}
             </div>
           )}
 
@@ -437,7 +473,10 @@ export function RunScene({
                     已收到 <b>{events.length}</b> 条事件，但都不是动作
                   </div>
                   <div className="mt-2 text-[11px] text-ink-muted">
-                    该阶段（{state}）只写状态迁移，模型还没动手。动作会在这之后逐条追加。
+                    {terminal
+                      ? `本次运行在「${stageLabelOf(state)}」结束，除状态迁移外没有产生任何动作事件——` +
+                        "所以这里没有能展开的 ACI 记录，不是界面漏了。要看失败原因，用上面的红色区块与结果报告。"
+                      : `当前阶段（${stageLabelOf(state)}）只写状态迁移，模型还没动手。动作会在这之后逐条追加。`}
                   </div>
                 </>
               ) : (
@@ -711,30 +750,6 @@ function fmtSec(ms: number): string {
   const m = Math.floor(s / 60);
   return `${m}m${String(s % 60).padStart(2, "0")}s`;
 }
-
-/**
- * 已知失败类别 → 人话解释。写成常量而不是散落在 JSX 里，方便和
- * `aci/errors.py` 的标签逐条对照；类别名与后端逐字相同，不做映射。
- */
-const FAILURE_HINTS: Record<string, string> = {
-  clone_failed:
-    "克隆没完成：后端最多等 240 秒，而 git clone 不支持断点续传。若报错是 " +
-    "fetch-pack: invalid index-pack output，说明 pack 数据在传输中被截断——" +
-    "不是连不上，是没下完。可直接改用镜像前缀重试（例：https://ghfast.top/ + 原仓库地址）。",
-  smoke_test_failed:
-    "测试命令跑完了但退出码非零。若当前是 fake 沙箱，通常是它并不真正产出 " +
-    "expected_artifact，属于沙箱行为差异，不是代码问题。",
-  install_failed: "依赖没装上：requirements 里的包在沙箱内装不下来，或不在允许的依赖清单里。",
-  requirement_rejected: "依赖字符串被校验层拦下（含命令分隔符等），这一步没有产生副作用。",
-  missing_dependency: "缺依赖导致 import 失败，进入自愈回环后仍未补齐。",
-  llm_unavailable: "生成运行计划时模型不可用（网关或配额），没进入执行阶段。",
-  service_interrupted: "沙箱不可用或后端服务中断，本次运行被打断，可重试。",
-  time_budget_exceeded: "整体墙钟预算耗尽，被强制结束——通常是某一步一直没返回。",
-};
-
-const FAILURE_HINT_FALLBACK =
-  "后端只回了失败类别，没带更细的 stderr 摘要。要把 git / pip 的原始报错带到界面上，" +
-  "需要后端在失败事件里补上 stderr 的头几行（属于 harness 的改动，前端无法自行补齐）。";
 
 function stageLabelOf(state: RunState): string {
   const map: Record<string, string> = {

@@ -563,3 +563,171 @@ export function aciTrace(e: RunEvent): AciTrace {
     ],
   };
 }
+
+// ─────────────────────────────────────────────── 失败原因：先说证据，再说结论
+
+/**
+ * 失败原因的解释。
+ *
+ * 后端 `_fail` 只为失败留了两样东西：`failure_category` 和一句
+ * `clone failed: <CalledProcessError>`。**stderr 不落盘**——实测
+ * `runs/<id>/logs/` 是空目录，git 的原始报错只出现在后端自己的 stdout 里。
+ *
+ * 所以前端能核实的只有三件事：失败类别、命令行里带的地址、退出码。
+ * 这里因此不给"成因"下断言：把能核实的写进 verdict，把无法区分的情况
+ * 并列写进 detail，并给出用户自己能跑的验证命令。
+ *
+ * 反例（这次修的）：旧代码对任何 clone_failed 都写"pack 数据在传输中被截断，
+ * 不是连不上，是没下完"。但真实失败是地址填成了论文页面（USENIX
+ * presentation 页），git clone 立刻 exit 128——和"没下完"完全无关。
+ */
+export interface FailureExplain {
+  /** 能核实的第一句，不含推断 */
+  verdict: string;
+  /** 为什么只能说到这里 + 怎么自己验 */
+  detail: string;
+  /** 旁证（地址形态等），措辞上不当作结论 */
+  note?: string;
+  /** 从命令行里抓出的仓库地址 */
+  repoUrl?: string;
+  /** 后端原始 message，折叠展示 */
+  raw?: string;
+  /** 失败动作的 stderr 尾段（install / test 事件里带 stderr_tail） */
+  stderr?: string;
+  /** 这段 stderr 出自哪条事件、什么动作 */
+  stderrFrom?: string;
+}
+
+/** 已知失败类别 → 一句话结论。类别名与后端逐字相同，不做映射。 */
+const FAILURE_VERDICTS: Record<string, string> = {
+  clone_failed: "克隆失败：git clone 直接返回非零退出码，没有进入安装与测试阶段。",
+  smoke_test_failed: "测试命令跑完了，但退出码非零，产物校验没过。",
+  install_failed: "依赖没装上：requirements 里的包在沙箱内装不下来，或不在允许的依赖清单里。",
+  requirement_rejected: "依赖字符串被校验层拦下（含命令分隔符等），这一步没有产生副作用。",
+  missing_dependency: "缺依赖导致 import 失败，进入自愈回环后仍没补齐。",
+  llm_unavailable: "生成运行计划时模型不可用（网关或配额），没进入执行阶段。",
+  service_interrupted: "沙箱不可用或后端服务中断，本次运行被打断，可重试。",
+  time_budget_exceeded: "整体墙钟预算耗尽被强制结束——通常是某一步一直没有返回。",
+};
+
+const FAILURE_DETAILS: Record<string, string> = {
+  smoke_test_failed:
+    "若当前是 fake 沙箱，通常是它并不真正产出 expected_artifact，属于沙箱行为差异，不是代码问题。",
+  install_failed: "先看 pip 那一步的 stderr 尾段（动作流里点开该行），再看包名是否在允许清单内。",
+};
+
+/** 常见代码托管站点：只有这些 host 才敢按"仓库地址"来判断路径形态。 */
+const FORGE_HOSTS = new Set([
+  "github.com",
+  "gitee.com",
+  "gitlab.com",
+  "bitbucket.org",
+  "codeberg.org",
+  "gitcode.com",
+  "gitea.com",
+  "git.sr.ht",
+]);
+
+/** 从"最后一条带 message 的失败事件"里取原始文本。 */
+function rawFailureMessage(events: RunEvent[], needle: string): string | undefined {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const m = events[i].data?.message;
+    if (typeof m === "string" && m.includes(needle)) return m;
+  }
+  return undefined;
+}
+
+/** 命令行里的第一个 http(s) 地址；去掉尾部的引号与括号。 */
+function firstUrl(text: string): string | undefined {
+  const m = text.match(/https?:\/\/[^\s'",\])}]+/);
+  return m ? m[0].replace(/[.,;:]+$/, "") : undefined;
+}
+
+/** 只做形态判断，返回 null 表示"看不出来"，不硬给结论。 */
+function urlShape(url: string): "forge-repo" | "not-forge" | null {
+  const m = /^https?:\/\/([^/]+)\/(.*)$/.exec(url);
+  if (!m) return null;
+  const host = m[1].toLowerCase().replace(/:\d+$/, "");
+  const path = m[2].replace(/\/+$/, "");
+  if (path.endsWith(".git")) return "forge-repo";
+  if (FORGE_HOSTS.has(host)) return path.split("/").filter(Boolean).length >= 2 ? "forge-repo" : "not-forge";
+  return null;
+}
+
+/**
+ * 最后一条"非零退出 + 带 stderr_tail"的事件。
+ *
+ * install / test 事件里后端是带 `stderr_tail` 的（见 runner.py 的
+ * `{"exit_code": ..., "stderr_tail": ...}`），所以这两类失败**有原始报错可看**，
+ * 不该再说"后端没带 stderr"。clone 失败没有这条，因为克隆不是 action。
+ */
+function lastStderr(events: RunEvent[]): { text: string; from: string } | undefined {
+  const pick = (onlyFailed: boolean) => {
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const d = events[i].data ?? {};
+      const text = d.stderr_tail;
+      const code = typeof d.exit_code === "number" ? d.exit_code : null;
+      if (onlyFailed && code === 0) continue;
+      if (typeof text === "string" && text.trim()) {
+        return {
+          text: text.trim(),
+          from: `#${events[i].sequence} ${events[i].kind}${code === null ? "" : ` · exit ${code}`}`,
+        };
+      }
+    }
+    return undefined;
+  };
+  return pick(true) ?? pick(false);
+}
+
+export function explainFailure(category: string, events: RunEvent[]): FailureExplain {
+  if (!category) {
+    return {
+      verdict: "后端没有给出 failure_category，无法判断失败环节。",
+      detail: "只有 state=failed 这一个事实；具体是哪一步没过，要看后端日志。",
+    };
+  }
+
+  if (category === "clone_failed") {
+    const raw = rawFailureMessage(events, "clone failed");
+    const repoUrl = raw ? firstUrl(raw) : undefined;
+    const shape = repoUrl ? urlShape(repoUrl) : null;
+
+    const detail =
+      "后端在克隆失败时只写下了命令行与退出码，没有保存 git 的 stderr" +
+      "（这次运行的 runs/<id>/logs/ 是空目录），所以「地址不是仓库」「网络中断」「需要凭据」" +
+      "这三种情况在前端无法区分。用同一个地址手动验一下最快：git ls-remote <地址> —— " +
+      "立刻报 repository not found 是地址问题，卡住或中途断开才是网络问题。";
+
+    const note =
+      shape === "forge-repo"
+        ? undefined
+        : "旁证：该地址没有 .git 后缀，主机也不在常见托管站点（GitHub / Gitee / GitLab 等）名单内。" +
+          "如果它其实是论文页面或项目主页而不是仓库地址，git clone 必然失败——" +
+          "请换成仓库地址（例：https://github.com/<owner>/<repo>）。";
+
+    return { verdict: FAILURE_VERDICTS.clone_failed, detail, note, repoUrl, raw };
+  }
+
+  const last = lastStderr(events);
+  if (last) {
+    return {
+      verdict: FAILURE_VERDICTS[category] ?? "后端回了失败类别，但没有对应的解释文本。",
+      detail:
+        "下面是这次运行里最后一条非零退出动作的 stderr 尾段（后端在 install / test 事件里带 stderr_tail），" +
+        "判断依据就在这段原文里，界面不做二次解读。",
+      stderr: last.text,
+      stderrFrom: last.from,
+      raw: rawFailureMessage(events, category) ?? rawFailureMessage(events, "failed"),
+    };
+  }
+
+  return {
+    verdict: FAILURE_VERDICTS[category] ?? "后端回了失败类别，但没有对应的解释文本。",
+    detail:
+      FAILURE_DETAILS[category] ??
+      "这次失败的事件里没有带 stderr_tail（只有 install / test 动作会带），后端也只记了失败类别，" +
+        "所以具体报错要去看后端日志；前端不替它猜原因。",
+    raw: rawFailureMessage(events, category) ?? rawFailureMessage(events, "failed"),
+  };
+}
