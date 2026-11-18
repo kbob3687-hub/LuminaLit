@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from paperharness.app.main import _build_llm
+from paperharness.app.main import _build_aci_factory, _build_llm
 from paperharness.contracts.run import RunRequest
 from paperharness.harness.runner import HarnessRunner
 from paperharness.harness.store import RunStore
@@ -51,6 +51,7 @@ def main() -> None:
         store=store,
         llm=_build_llm(),
         sandbox_factory=factory,
+        aci_factory=_build_aci_factory(),
         targets=manifests,
     )
     request = RunRequest(

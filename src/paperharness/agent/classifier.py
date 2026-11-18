@@ -22,17 +22,37 @@ _RULES: list[tuple[re.Pattern[str], str]] = [
         "missing_dependency",
     ),
     (
-        re.compile(r"VersionConflict|conflicting versions|DependencyResolutionError"),
+        re.compile(
+            r"VersionConflict|conflicting versions|DependencyResolutionError"
+            r"|was removed in the [^\n]*release|incompatible version",
+            re.IGNORECASE,
+        ),
         "version_conflict",
     ),
     (
         re.compile(r"FileNotFoundError[^\n]*(dataset|corpus|private)|dataset not found"),
         "missing_private_data",
     ),
-    (re.compile(r"/(home|Users|data|mnt|root)/"), "hardcoded_path"),
+    (
+        re.compile(
+            r"(?:FileNotFoundError|No such file or directory|PermissionError"
+            r"|NotADirectoryError|OSError)[^\n]*/(?:home/(?!runner\b)|Users/|data/|mnt/|root/|tmp/)"
+            r"|/(?:Users|mnt|root)/"
+        ),
+        "hardcoded_path",
+    ),
+    (
+        re.compile(
+            r"requires GPU|nvidia-smi|No CUDA-capable device|Torch not compiled with CUDA",
+            re.IGNORECASE,
+        ),
+        "requires_gpu",
+    ),
     (re.compile(r"CUDA", re.IGNORECASE), "cuda_only"),
-    (re.compile(r"requires GPU|nvidia-smi|No CUDA-capable device"), "requires_gpu"),
-    (re.compile(r"DeprecationWarning|deprecated", re.IGNORECASE), "deprecated_api"),
+    (
+        re.compile(r"DeprecationWarning|deprecated|unexpected keyword argument", re.IGNORECASE),
+        "deprecated_api",
+    ),
 ]
 
 UNREPAIRABLE = frozenset({"missing_private_data", "requires_gpu"})

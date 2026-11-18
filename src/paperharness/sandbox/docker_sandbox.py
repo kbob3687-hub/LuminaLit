@@ -17,6 +17,8 @@ from paperharness.sandbox.base import SandboxClosedError, SandboxUnavailableErro
 TAIL_LIMIT = 2000
 TAIL_BYTES = 16384  # 尾部滚动窗口字节数，覆盖 2000 字符的最坏 UTF-8 编码
 MAX_LOG_BYTES = 50 * 1024 * 1024  # 单条流上限：超出截断并在日志文件里打标
+MAX_DIFF_BYTES = 2 * 1024 * 1024
+EXPORT_DIFF_TIMEOUT_SECONDS = 30
 CONTAINER_USER = "1000:1000"
 WORKSPACE_MOUNT = "/workspace"
 MEMORY_LIMIT = "2g"
@@ -51,6 +53,8 @@ class DockerSandboxSession:
         self._exec_seq = 0
         self._network_enabled = True
         self._closed = False
+        self._cleaned_up = False
+        self._owns_client = client is None
         # close() 清理失败不抛异常，但必须记录在这里，由 Harness 写事件和清单。
         self.cleanup_errors: list[str] = []
 
@@ -165,14 +169,14 @@ class DockerSandboxSession:
     def _cleanup_partial_setup(self) -> None:
         """构造期失败时的回收顺序：先容器、后网络（网络还挂着容器时删不掉）。"""
         self._remove_container_quietly(self._container)
-        if self._network is None:
-            return
-        try:
-            self._network.remove()
-        except self._docker.errors.NotFound:
-            pass
-        except self._docker.errors.DockerException as exc:
-            self._record_cleanup_failure(f"network remove failed during setup: {exc}")
+        if self._network is not None:
+            try:
+                self._network.remove()
+            except self._docker.errors.NotFound:
+                pass
+            except self._docker.errors.DockerException as exc:
+                self._record_cleanup_failure(f"network remove failed during setup: {exc}")
+        self._close_client_quietly()
 
     # --------------------------------------------------------------- protocol
 
@@ -204,13 +208,17 @@ class DockerSandboxSession:
 
         if thread.is_alive():
             self._kill_quietly()
+            thread.join(timeout=2.0)
             self._closed = True
+            raw_tails = holder.get("tails") or {}
             return ExecResult(
                 exit_code=None,
                 timed_out=True,
                 duration_ms=duration_ms,
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
+                stdout_tail=_tail(raw_tails.get("stdout", b"").decode(errors="replace")),
+                stderr_tail=_tail(raw_tails.get("stderr", b"").decode(errors="replace")),
             )
         if "error" in holder:
             raise SandboxUnavailableError(f"exec failed: {holder['error']}")
@@ -250,6 +258,7 @@ class DockerSandboxSession:
         written = {"stdout": 0, "stderr": 0}
         truncated = {"stdout": False, "stderr": False}
         tails = {"stdout": b"", "stderr": b""}
+        holder["tails"] = tails
         handles = {
             "stdout": out_path.open("ab"),
             "stderr": err_path.open("ab"),
@@ -300,32 +309,131 @@ class DockerSandboxSession:
             raise ValueError("environment name and value must not contain newlines")
         self._environment[name] = value
 
+    def get_environment(self) -> dict[str, str]:
+        return dict(self._environment)
+
+    def collect_packages(self, timeout_seconds: int = 15) -> list[str]:
+        if self._closed:
+            return []
+        try:
+            exit_code, out, _ = self._exec_bounded_capture(
+                ["python", "-m", "pip", "freeze"],
+                timeout_seconds=timeout_seconds,
+                max_bytes=262144,
+            )
+        except SandboxUnavailableError:
+            return []
+        if exit_code != 0:
+            return []
+        return [
+            line.strip()
+            for line in out.decode(errors="replace").splitlines()
+            if line.strip()
+        ]
+
+    def _exec_bounded_capture(
+        self, command: list[str], timeout_seconds: int, max_bytes: int
+    ) -> tuple[int | None, bytes, bool]:
+        holder: dict[str, Any] = {}
+
+        def _run() -> None:
+            try:
+                created = self._client.api.exec_create(
+                    container=self._container.id,
+                    cmd=list(command),
+                    stdout=True,
+                    stderr=True,
+                    user=CONTAINER_USER,
+                    workdir=WORKSPACE_MOUNT,
+                )
+                exec_id = created["Id"]
+                chunks: list[bytes] = []
+                total = 0
+                truncated = False
+                stream = self._client.api.exec_start(exec_id, stream=True, demux=True)
+                for chunk in stream:
+                    if not isinstance(chunk, tuple) or len(chunk) != 2:
+                        continue
+                    stdout_chunk, _stderr_chunk = chunk
+                    if not stdout_chunk:
+                        continue
+                    if total < max_bytes:
+                        remaining = max_bytes - total
+                        if len(stdout_chunk) > remaining:
+                            chunks.append(stdout_chunk[:remaining])
+                            total += remaining
+                            truncated = True
+                        else:
+                            chunks.append(stdout_chunk)
+                            total += len(stdout_chunk)
+                    else:
+                        truncated = True
+                inspect = self._client.api.exec_inspect(exec_id)
+                holder["exit_code"] = inspect.get("ExitCode")
+                holder["stdout"] = b"".join(chunks)
+                holder["truncated"] = truncated
+            except self._docker.errors.DockerException as exc:
+                holder["error"] = exc
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        thread.join(timeout_seconds)
+        if thread.is_alive():
+            raise SandboxUnavailableError(
+                f"command timed out after {timeout_seconds}s: {command[0]}"
+            )
+        if "error" in holder:
+            raise SandboxUnavailableError(f"exec failed: {holder['error']}")
+        return (
+            holder.get("exit_code"),
+            holder.get("stdout", b""),
+            bool(holder.get("truncated", False)),
+        )
+
     def export_diff(self) -> str:
         if self._closed:
             raise SandboxClosedError("session is closed")
-        try:
-            stage = self._container.exec_run(
-                ["git", "add", "-A"], workdir=WORKSPACE_MOUNT, user=CONTAINER_USER, demux=True
-            )
-            diff = self._container.exec_run(
-                ["git", "diff", "--cached"],
-                workdir=WORKSPACE_MOUNT,
-                user=CONTAINER_USER,
-                demux=True,
-            )
-        except self._docker.errors.DockerException as exc:
-            raise SandboxUnavailableError(f"export_diff failed: {exc}") from exc
-        if stage.exit_code != 0 or diff.exit_code != 0:
+        add_code, _add_out, _ = self._exec_bounded_capture(
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "add",
+                "-A",
+            ],
+            timeout_seconds=EXPORT_DIFF_TIMEOUT_SECONDS,
+            max_bytes=65536,
+        )
+        diff_code, diff_out, truncated = self._exec_bounded_capture(
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "diff",
+                "--cached",
+                "--no-ext-diff",
+            ],
+            timeout_seconds=EXPORT_DIFF_TIMEOUT_SECONDS,
+            max_bytes=MAX_DIFF_BYTES,
+        )
+        if add_code != 0 or diff_code != 0:
             raise SandboxUnavailableError(
-                f"git diff failed (add={stage.exit_code}, diff={diff.exit_code})"
+                f"git diff failed (add={add_code}, diff={diff_code})"
             )
-        stdout, _ = diff.output or (b"", b"")
-        return (stdout or b"").decode(errors="replace")
+        text = diff_out.decode(errors="replace")
+        if truncated:
+            text += f"\n# [paperharness] diff truncated at {MAX_DIFF_BYTES} bytes\n"
+        return text
 
     def close(self) -> None:
         """幂等清理；失败不抛异常（不能盖掉 run 的真实结果），但必须记入 cleanup_errors。"""
-        if self._closed:
+        if getattr(self, "_cleaned_up", False):
             return
+        self._cleaned_up = True
         self._closed = True
         try:
             self._container.reload()
@@ -348,6 +456,7 @@ class DockerSandboxSession:
         except self._docker.errors.DockerException as exc:
             self._record_cleanup_failure(f"network remove failed: {exc}")
         self._verify_no_residue()
+        self._close_client_quietly()
 
     # --------------------------------------------------------------- cleanup
 
@@ -380,6 +489,17 @@ class DockerSandboxSession:
 
     def _record_cleanup_failure(self, message: str) -> None:
         self.cleanup_errors.append(message)
+
+    def _close_client_quietly(self) -> None:
+        if not getattr(self, "_owns_client", False):
+            return
+        client = getattr(self, "_client", None)
+        if client is None:
+            return
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001, S110 - 关闭连接尽力而为
+            pass
 
     # ------------------------------------------------------------------ logs
 

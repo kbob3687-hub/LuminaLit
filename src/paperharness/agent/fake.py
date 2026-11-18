@@ -18,7 +18,7 @@ class FakeLLM:
         command = request.command or ["python", "main.py"]
         return RunPlan(
             resolved_revision=request.revision or "fake-commit",
-            python_version=request.python_version or "3.11",
+            python_version=request.python_version or "3.10",
             command=command,
             expected_artifact=request.expected_artifact,
             source="user" if request.command else "repository_analysis",
@@ -30,4 +30,4 @@ class FakeLLM:
     def propose_action(self, history: list[Observation]) -> ToolAction:
         if self._actions:
             return self._actions.pop(0)
-        return FinishRepairAction(summary="no scripted action left")
+        return FinishRepairAction(action="finish_repair", summary="no scripted action left")

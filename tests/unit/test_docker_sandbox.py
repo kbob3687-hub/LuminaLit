@@ -275,3 +275,74 @@ def test_tail_window_keeps_only_last_bytes(tmp_path):
     assert out_path.stat().st_size == 30000  # 文件是全量
     assert len(holder["stdout_tail"]) == 2000  # 内存只留尾部
     assert holder["stdout_tail"] == "x" * 2000
+
+
+def test_execute_timeout_preserves_partial_tails(tmp_path):
+    import threading
+
+    released = threading.Event()
+
+    class HangingStreamAPI:
+        def exec_create(self, **kwargs):
+            return {"Id": "hang-exec"}
+
+        def exec_start(self, exec_id, stream=True, demux=True):
+            yield (b"partial stdout\n", None)
+            yield (None, b"partial stderr\n")
+            released.wait(timeout=5)
+
+        def exec_inspect(self, exec_id):
+            return {"ExitCode": None}
+
+    class KillableContainer:
+        id = "killable-id"
+
+        def kill(self):
+            released.set()
+
+    session = make_session(tmp_path)
+    session._closed = False
+    session._docker = FakeDockerModule
+    session._container = KillableContainer()
+    session._client = FakeClient(HangingStreamAPI())
+
+    result = session.execute(["python", "slow.py"], timeout_seconds=0.1)
+
+    assert result.timed_out is True
+    assert result.exit_code is None
+    assert "partial stdout" in result.stdout_tail
+    assert "partial stderr" in result.stderr_tail
+    assert session._closed is True
+
+
+def test_export_diff_uses_safe_git_flags_and_truncates(tmp_path, monkeypatch):
+    monkeypatch.setattr(ds, "MAX_DIFF_BYTES", 10)
+    commands: list[list[str]] = []
+
+    class DiffAPI:
+        def exec_create(self, **kwargs):
+            commands.append(list(kwargs["cmd"]))
+            return {"Id": f"exec-{len(commands)}"}
+
+        def exec_start(self, exec_id, stream=True, demux=True):
+            if exec_id == "exec-1":
+                yield (b"", None)
+            else:
+                yield (b"diff --git a/x b/x\n+1234567890", None)
+
+        def exec_inspect(self, exec_id):
+            return {"ExitCode": 0}
+
+    session = make_session(tmp_path)
+    session._closed = False
+    session._docker = FakeDockerModule
+    session._client = FakeClient(DiffAPI())
+
+    diff = session.export_diff()
+
+    assert len(commands) == 2
+    assert "core.hooksPath=/dev/null" in commands[0]
+    assert "--no-ext-diff" in commands[1]
+    assert "core.hooksPath=/dev/null" in commands[1]
+    assert diff.startswith("diff --git")
+    assert "truncated at 10 bytes" in diff

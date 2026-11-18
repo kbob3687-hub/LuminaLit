@@ -1,14 +1,18 @@
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from paperharness.agent.classifier import UNREPAIRABLE, FailureContext, classify_by_rules
 from paperharness.contracts.run import (
+    Observation,
     RunPlan,
     RunRequest,
     RunResult,
@@ -26,6 +30,7 @@ from paperharness.targets.manifest import TargetManifest
 INSTALL_COMMAND = ["python", "-m", "pip", "install", "-r", "requirements.txt"]
 MAX_ACTIONS_PER_REPAIR = 20
 CLONE_TIMEOUT_SECONDS = 240
+MAX_WORKSPACE_BYTES = 200 * 1024 * 1024
 _FULL_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 # 总墙钟预算 = 单步限时 × 3 + 60 秒，防止每步都不超时但整体卡死工作线程
 TOTAL_BUDGET_FACTOR = 3
@@ -46,6 +51,218 @@ class _RequirementsRejected(RuntimeError):
     """仓库 requirements.txt 内容不合法：整体拒绝安装，run 判失败。"""
 
 
+class _CloneSizeExceeded(RuntimeError):
+    """仓库下载体积超过 200 MiB 上限，不重试。"""
+
+
+def _rmtree_force(path: Path) -> None:
+    """Windows 下 .git/objects/pack 常带只读属性，清目录前先去掉只读位。"""
+    if not path.exists():
+        return
+
+    def _on_error(func, target_path, _exc) -> None:
+        os.chmod(target_path, stat.S_IWRITE)
+        func(target_path)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_on_error)
+    else:
+        shutil.rmtree(path, onerror=_on_error)
+
+
+def _workspace_size_bytes(workspace: Path) -> int:
+    total = 0
+    for root, _dirs, filenames in os.walk(workspace, followlinks=False):
+        for fname in filenames:
+            fpath = Path(root) / fname
+            if fpath.is_symlink():
+                continue
+            try:
+                total += fpath.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def _scrub_host_paths(text: str, workspace: Path, run_dir: Path) -> str:
+    if not text:
+        return text
+    replacements = [
+        (str(workspace.resolve(strict=False)), "/workspace"),
+        (str(workspace), "/workspace"),
+        (workspace.resolve(strict=False).as_posix(), "/workspace"),
+        (workspace.as_posix(), "/workspace"),
+        (str(run_dir.resolve(strict=False)), "/run"),
+        (str(run_dir), "/run"),
+        (run_dir.resolve(strict=False).as_posix(), "/run"),
+        (run_dir.as_posix(), "/run"),
+    ]
+    for src, dst in replacements:
+        if src:
+            text = text.replace(src, dst)
+    return text
+
+
+def _resolve_artifact_path(workspace: Path, raw: str) -> Path | None:
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        return None
+    if PureWindowsPath(raw).is_absolute() or PurePosixPath(raw).is_absolute() or raw.startswith("~"):
+        return None
+    ws = workspace.resolve(strict=False)
+    candidate = (ws / raw).resolve(strict=False)
+    base = os.path.normcase(str(ws))
+    target = os.path.normcase(str(candidate))
+    if target == base or not target.startswith(base + os.sep):
+        return None
+    return candidate
+
+
+def _clone_once(
+    clone_url: str,
+    revision: str | None,
+    workspace: Path,
+    git_env: dict[str, str],
+) -> str:
+    if workspace.exists():
+        _rmtree_force(workspace)
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+
+    if revision and _FULL_COMMIT.match(revision):
+        # 固定完整 commit：只拉该快照（depth 1），避免全历史 clone 把大仓库拖超时
+        subprocess.run(
+            ["git", "init", "-q", str(workspace)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=git_env,
+        )
+        subprocess.run(
+            ["git", "-C", str(workspace), "remote", "add", "origin", clone_url],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=git_env,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(workspace),
+                "-c",
+                "http.version=HTTP/1.1",
+                "fetch",
+                "--depth",
+                "1",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "origin",
+                revision,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=CLONE_TIMEOUT_SECONDS,
+            env=git_env,
+        )
+        subprocess.run(
+            ["git", "-C", str(workspace), "checkout", "-q", "FETCH_HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=git_env,
+        )
+    elif revision:
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "http.version=HTTP/1.1",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--single-branch",
+                    "--no-tags",
+                    "--no-recurse-submodules",
+                    "--branch",
+                    revision,
+                    clone_url,
+                    str(workspace),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=CLONE_TIMEOUT_SECONDS,
+                env=git_env,
+            )
+        except subprocess.CalledProcessError:
+            if workspace.exists():
+                _rmtree_force(workspace)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "http.version=HTTP/1.1",
+                    "clone",
+                    "--no-tags",
+                    "--no-recurse-submodules",
+                    clone_url,
+                    str(workspace),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=CLONE_TIMEOUT_SECONDS,
+                env=git_env,
+            )
+            subprocess.run(
+                ["git", "-C", str(workspace), "checkout", "-q", revision],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=git_env,
+            )
+    else:
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "http.version=HTTP/1.1",
+                "clone",
+                "--depth",
+                "1",
+                "--single-branch",
+                "--no-tags",
+                "--no-recurse-submodules",
+                clone_url,
+                str(workspace),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=CLONE_TIMEOUT_SECONDS,
+            env=git_env,
+        )
+
+    if _workspace_size_bytes(workspace) > MAX_WORKSPACE_BYTES:
+        _rmtree_force(workspace)
+        raise _CloneSizeExceeded("repository size exceeds 200 MiB limit")
+
+    head = subprocess.run(
+        ["git", "-C", str(workspace), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=git_env,
+    )
+    return head.stdout.strip()
+
+
 def git_clone(request: RunRequest, run_dir: Path) -> str:
     """默认 cloner：宿主机 clone 仓库（契约 1.1：沙箱不做任何 git 网络操作）。"""
     # 防御纵深：即使绕过 API 的 schema 校验，也绝不允许本地路径/file:///
@@ -54,50 +271,39 @@ def git_clone(request: RunRequest, run_dir: Path) -> str:
         validate_repo_url(request.repo_url)
     except ValueError as exc:
         raise ValueError(f"invalid repo_url: {exc}") from exc
+
     workspace = run_dir / "workspace"
-    if request.revision and _FULL_COMMIT.match(request.revision):
-        # 固定完整 commit：只拉该快照（depth 1），下载量≈checkout 本身，
-        # 避免全历史 clone 把大仓库拖超时（设计 12：下载量上限 200 MiB）
-        subprocess.run(
-            ["git", "init", "-q", str(workspace)],
-            check=True, capture_output=True, text=True, timeout=30,
-        )
-        subprocess.run(
-            ["git", "-C", str(workspace), "remote", "add", "origin", request.repo_url],
-            check=True, capture_output=True, text=True, timeout=30,
-        )
-        subprocess.run(
-            ["git", "-C", str(workspace), "fetch", "--depth", "1", "origin", request.revision],
-            check=True, capture_output=True, text=True, timeout=CLONE_TIMEOUT_SECONDS,
-        )
-        subprocess.run(
-            ["git", "-C", str(workspace), "checkout", "FETCH_HEAD"],
-            check=True, capture_output=True, text=True, timeout=60,
-        )
-    else:
-        subprocess.run(
-            ["git", "clone", request.repo_url, str(workspace)],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=CLONE_TIMEOUT_SECONDS,
-        )
-        if request.revision:
-            subprocess.run(
-                ["git", "-C", str(workspace), "checkout", request.revision],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=60,
+    git_env = {
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_LFS_SKIP_SMUDGE": "1",
+    }
+    candidates = [request.repo_url, request.repo_url]
+    mirror = os.environ.get("PAPERHARNESS_GIT_MIRROR", "").strip()
+    if mirror and request.repo_url.startswith("https://github.com/"):
+        candidates.append(f"{mirror.rstrip('/')}/{request.repo_url}")
+
+    last_error: Exception | None = None
+    for clone_url in candidates:
+        try:
+            return _clone_once(clone_url, request.revision, workspace, git_env)
+        except _CloneSizeExceeded as exc:
+            raise RuntimeError(str(exc)) from exc
+        except subprocess.CalledProcessError as exc:
+            if workspace.exists():
+                _rmtree_force(workspace)
+            detail = _scrub_host_paths((exc.stderr or exc.stdout or "").strip(), workspace, run_dir)
+            if not detail:
+                detail = f"exit status {exc.returncode}"
+            last_error = RuntimeError(f"git exited with {exc.returncode}: {detail[:1000]}")
+        except subprocess.TimeoutExpired as exc:
+            if workspace.exists():
+                _rmtree_force(workspace)
+            last_error = RuntimeError(
+                f"git clone timed out after {int(exc.timeout)}s (network transfer incomplete)"
             )
-    head = subprocess.run(
-        ["git", "-C", str(workspace), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    return head.stdout.strip()
+    assert last_error is not None
+    raise last_error
 
 
 class HarnessRunner:
@@ -161,14 +367,24 @@ class HarnessRunner:
             entry = self._active.get(run_id)
         return entry is not None and entry[0].is_set()
 
-    def _cancelled(self, run_id: str, session, attempts: int) -> RunResult:
+    def _cancelled(
+        self,
+        run_id: str,
+        session: SandboxSession | None,
+        attempts: int,
+        request: RunRequest | None = None,
+        plan: RunPlan | None = None,
+        resolved_revision: str | None = None,
+    ) -> RunResult:
         """CANCELLED 终态：不 export 不到的 patch 就留空，不留僵尸状态。"""
         result = RunResult(
             run_id=run_id,
             outcome="cancelled",
             verified=False,
             attempts=attempts,
+            resolved_revision=resolved_revision,
             patch_url=f"/api/runs/{run_id}/patch",
+            environment_url=f"/api/runs/{run_id}/environment",
             report_url=f"/api/runs/{run_id}/report",
         )
         patch = ""
@@ -178,6 +394,15 @@ class HarnessRunner:
             except Exception:  # noqa: BLE001 - 会话可能已被 abort 关闭
                 patch = ""
         self.store.write_text(run_id, "patch.diff", patch)
+        self.store.write_text(
+            run_id,
+            "environment.json",
+            json.dumps(
+                self._build_environment_manifest(request, plan, resolved_revision, session),
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
         self.store.write_text(
             run_id, "report.md", "# Report\n\noutcome=cancelled\nverified=False\n"
         )
@@ -191,11 +416,19 @@ class HarnessRunner:
     # ------------------------------------------------------------ 内置靶场
 
     def _match_target(self, request: RunRequest) -> TargetManifest | None:
-        """按 repo_url 匹配内置靶场；用户提交任意公开仓库则返回 None。"""
-        for target in self.targets:
-            if target.repo_url == request.repo_url:
+        """按 (repo_url, revision) 匹配内置靶场；未指定 revision 时回退到无故障或首个候选。"""
+        candidates = [target for target in self.targets if target.repo_url == request.repo_url]
+        if not candidates:
+            return None
+        if request.revision is not None:
+            for target in candidates:
+                if target.revision == request.revision:
+                    return target
+            return None
+        for target in candidates:
+            if target.failure_class == "none":
                 return target
-        return None
+        return candidates[0]
 
     def _inject_target_files(self, run_id: str, workspace: Path, target: TargetManifest) -> None:
         """靶场注入物：check.py 与 requirements.txt 拷进 workspace，仓库本身一个字不动。
@@ -232,31 +465,39 @@ class HarnessRunner:
         run_dir = self.store.run_dir(run_id)
         workspace = run_dir / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
-        # 内置靶场命中（设计 4.2 第 1 步）：python_version 需在沙箱创建前确定
+        # 内置靶场命中（设计 4.2 第 1 步）：回填 python_version 和 revision，确保浅拉取精确提交
         target = self._match_target(request)
-        if target is not None and request.python_version is None:
-            request = request.model_copy(update={"python_version": target.python_version})
+        if target is not None:
+            updates: dict[str, object] = {}
+            if request.python_version is None:
+                updates["python_version"] = target.python_version
+            if request.revision is None:
+                updates["revision"] = target.revision
+            if updates:
+                request = request.model_copy(update=updates)
         deadline = (
             time.monotonic()
             + request.timeout_seconds * TOTAL_BUDGET_FACTOR
             + TOTAL_BUDGET_GRACE_SECONDS
         )
         cancel = threading.Event()
-        self._register_active(run_id, cancel)
-        attempts = 1
-        try:
-            session = self.sandbox_factory(request, run_dir)
-        except SandboxUnavailableError as exc:
-            self._unregister_active(run_id)
-            return self._fail(run_id, "service_interrupted", f"sandbox unavailable: {exc}")
-        self._register_active(run_id, cancel, session)
+        session: SandboxSession | None = None
+        resolved_revision: str | None = None
+        plan: RunPlan | None = None
+        attempts_tracker = [1]
+        self._register_active(run_id, cancel, None)
         try:
             self._check_cancel(run_id)
             self.store.write_status(run_id, RunState.PREPARING, {})
             try:
                 resolved_revision = self.cloner(request, run_dir)
             except Exception as exc:  # noqa: BLE001
-                return self._fail(run_id, "clone_failed", f"clone failed: {exc}")
+                return self._fail(
+                    run_id,
+                    "clone_failed",
+                    f"clone failed: {exc}",
+                    request=request,
+                )
             self._check_cancel(run_id)
             self.store.append_event(
                 run_id,
@@ -280,12 +521,51 @@ class HarnessRunner:
                 )
             else:
                 try:
-                    plan = self.llm.propose_run_plan(request)
+                    propose_with_ws = getattr(self.llm, "propose_run_plan_with_workspace", None)
+                    if callable(propose_with_ws):
+                        plan = propose_with_ws(request, workspace)
+                    else:
+                        plan = self.llm.propose_run_plan(request)
                 except Exception as exc:  # noqa: BLE001 - LLM 网关故障不杀死 worker（设计 18.4）
                     return self._fail(
-                        run_id, LLM_UNAVAILABLE, f"plan generation failed: {exc}", session=session
+                        run_id,
+                        LLM_UNAVAILABLE,
+                        f"plan generation failed: {exc}",
+                        request=request,
+                        resolved_revision=resolved_revision,
                     )
-            plan = plan.model_copy(update={"resolved_revision": resolved_revision})
+                plan_updates: dict[str, object] = {"resolved_revision": resolved_revision}
+                if request.command is not None:
+                    plan_updates["command"] = list(request.command)
+                    plan_updates["source"] = "user"
+                if request.expected_artifact is not None:
+                    plan_updates["expected_artifact"] = request.expected_artifact
+                if request.python_version is not None:
+                    plan_updates["python_version"] = request.python_version
+                plan = plan.model_copy(update=plan_updates)
+
+            if not plan.command or any(not str(part).strip() for part in plan.command):
+                return self._fail(
+                    run_id,
+                    "missing_run_command",
+                    "unable to determine a runnable command; please provide command explicitly",
+                    request=request,
+                    plan=plan,
+                    resolved_revision=resolved_revision,
+                )
+            if (
+                plan.expected_artifact is not None
+                and _resolve_artifact_path(workspace, plan.expected_artifact) is None
+            ):
+                return self._fail(
+                    run_id,
+                    "invalid_expected_artifact",
+                    f"expected_artifact must be a relative path inside workspace: {plan.expected_artifact}",
+                    request=request,
+                    plan=plan,
+                    resolved_revision=resolved_revision,
+                )
+
             self._check_cancel(run_id)
             self.store.write_text(run_id, "run_plan.json", plan.model_dump_json(indent=2))
             self.store.append_event(
@@ -296,15 +576,39 @@ class HarnessRunner:
                 plan.model_dump(mode="json"),
             )
 
+            sandbox_request = request.model_copy(update={"python_version": plan.python_version})
+            try:
+                session = self.sandbox_factory(sandbox_request, run_dir)
+            except SandboxUnavailableError as exc:
+                return self._fail(
+                    run_id,
+                    "service_interrupted",
+                    f"sandbox unavailable: {exc}",
+                    request=request,
+                    plan=plan,
+                    resolved_revision=resolved_revision,
+                )
+            self._register_active(run_id, cancel, session)
+            self._check_cancel(run_id)
+
             install = self._run_install(run_id, request, session, workspace, deadline)
-            attempts = 1
+            attempts_tracker[0] = 1
 
             if install is not None and install.exit_code != 0:
+                attempts_tracker[0] = 0
                 # 安装失败不再被忽略：算进自愈，或直接判失败
                 if self.aci_factory is not None and request.max_repairs > 0:
                     healed = self._self_heal(
-                        run_id, request, session, workspace, plan, install,
-                        phase="install", attempts=0, deadline=deadline,
+                        run_id,
+                        request,
+                        session,
+                        workspace,
+                        plan,
+                        install,
+                        phase="install",
+                        attempts_tracker=attempts_tracker,
+                        deadline=deadline,
+                        target=target,
                     )
                     verified = healed["verified"]
                     attempts = healed["attempts"]
@@ -317,17 +621,33 @@ class HarnessRunner:
                         category,
                         (install.stderr_tail or install.stdout_tail)[:2000],
                         session=session,
+                        request=request,
+                        plan=plan,
+                        resolved_revision=resolved_revision,
+                        attempts=1,
                     )
             else:
-                test = self._run_test(run_id, request, session, plan, deadline)
+                test = self._run_test(
+                    run_id, request, session, plan, deadline, target=target
+                )
                 verified = self._is_verified(test, plan, workspace)
+                attempts = 1
+                attempts_tracker[0] = 1
                 failure_category = None if verified else "smoke_test_failed"
                 outcome = "succeeded" if verified else "failed"
 
                 if not verified and self.aci_factory is not None and request.max_repairs > 0:
                     healed = self._self_heal(
-                        run_id, request, session, workspace, plan, test,
-                        phase="test", attempts=1, deadline=deadline,
+                        run_id,
+                        request,
+                        session,
+                        workspace,
+                        plan,
+                        test,
+                        phase="test",
+                        attempts_tracker=attempts_tracker,
+                        deadline=deadline,
+                        target=target,
                     )
                     verified = healed["verified"]
                     attempts = healed["attempts"]
@@ -347,11 +667,9 @@ class HarnessRunner:
                 run_id,
                 "environment.json",
                 json.dumps(
-                    {
-                        "resolved_revision": plan.resolved_revision,
-                        "python_version": plan.python_version,
-                        "command": plan.command,
-                    },
+                    self._build_environment_manifest(
+                        request, plan, resolved_revision, session
+                    ),
                     ensure_ascii=False,
                     indent=2,
                 ),
@@ -375,36 +693,90 @@ class HarnessRunner:
             self.store.write_result(run_id, result)
             return result
         except _RunCancelled:
-            return self._cancelled(run_id, session, attempts)
+            return self._cancelled(
+                run_id,
+                session,
+                attempts_tracker[0],
+                request=request,
+                plan=plan,
+                resolved_revision=resolved_revision,
+            )
         except TimeBudgetExceeded as exc:
             return self._fail(
-                run_id, TIME_BUDGET_EXHAUSTED, str(exc), outcome="budget_exceeded", session=session
+                run_id,
+                TIME_BUDGET_EXHAUSTED,
+                str(exc),
+                outcome="budget_exceeded",
+                session=session,
+                request=request,
+                plan=plan,
+                resolved_revision=resolved_revision,
+                attempts=attempts_tracker[0],
             )
         except _RequirementsRejected as exc:
             return self._fail(
-                run_id, "requirements_rejected", str(exc), session=session
+                run_id,
+                "requirements_rejected",
+                str(exc),
+                session=session,
+                request=request,
+                plan=plan,
+                resolved_revision=resolved_revision,
+                attempts=attempts_tracker[0],
             )
         except SandboxClosedError as exc:
             if self._cancel_requested(run_id):
-                return self._cancelled(run_id, session, attempts)
-            return self._fail(run_id, "timeout", f"sandbox closed: {exc}", session=session)
+                return self._cancelled(
+                    run_id,
+                    session,
+                    attempts_tracker[0],
+                    request=request,
+                    plan=plan,
+                    resolved_revision=resolved_revision,
+                )
+            return self._fail(
+                run_id,
+                "timeout",
+                f"sandbox closed: {exc}",
+                session=session,
+                request=request,
+                plan=plan,
+                resolved_revision=resolved_revision,
+                attempts=attempts_tracker[0],
+            )
         except SandboxUnavailableError as exc:
             if self._cancel_requested(run_id):
-                return self._cancelled(run_id, session, attempts)
+                return self._cancelled(
+                    run_id,
+                    session,
+                    attempts_tracker[0],
+                    request=request,
+                    plan=plan,
+                    resolved_revision=resolved_revision,
+                )
             return self._fail(
-                run_id, "service_interrupted", f"sandbox unavailable: {exc}", session=session
+                run_id,
+                "service_interrupted",
+                f"sandbox unavailable: {exc}",
+                session=session,
+                request=request,
+                plan=plan,
+                resolved_revision=resolved_revision,
+                attempts=attempts_tracker[0],
             )
         finally:
-            session.close()
-            # 清理失败不许吞掉：宁可报出来（事件 + 环境清单 + 报告），不能装没看见。
-            self._record_cleanup_failures(run_id, session)
+            if session is not None:
+                session.close()
+                # 清理失败不许吞掉：宁可报出来（事件 + 环境清单 + 报告），不能装没看见。
+                self._record_cleanup_failures(run_id, session)
             self._unregister_active(run_id)
 
     def _is_verified(self, test, plan: RunPlan, workspace: Path) -> bool:
         if test.exit_code != 0 or test.timed_out:
             return False
         if plan.expected_artifact:
-            return (workspace / plan.expected_artifact).exists()
+            artifact_path = _resolve_artifact_path(workspace, plan.expected_artifact)
+            return artifact_path is not None and artifact_path.is_file()
         return True
 
     def _self_heal(
@@ -416,8 +788,9 @@ class HarnessRunner:
         plan: RunPlan,
         first_failure,
         phase: str,
-        attempts: int,
+        attempts_tracker: list[int],
         deadline: float,
+        target: TargetManifest | None = None,
     ) -> dict:
         """DIAGNOSING → REPAIRING → 重跑当前阶段 的循环。
 
@@ -425,8 +798,9 @@ class HarnessRunner:
         install 阶段修好后再进入 test，test 通过才算成功。
         模型不拥有控制流：循环、重验、认输全在本方法。
         """
+        session.set_network(False)
         aci = self.aci_factory(session, workspace, plan, request.timeout_seconds)
-        history: list = []
+        history: list[Observation] = []
         category: str | None = None
         outcome = "budget_exceeded"
         failure = first_failure
@@ -446,23 +820,86 @@ class HarnessRunner:
                 outcome = "unrepairable"
                 break
 
+            history.append(
+                Observation(
+                    ok=False,
+                    action=f"{phase}_failed",
+                    summary=(
+                        f"round {round_no}/{request.max_repairs} ({phase}) "
+                        f"classified as {category}; command={plan.command} "
+                        f"exited with {failure.exit_code}"
+                    ),
+                    exit_code=failure.exit_code,
+                    timed_out=failure.timed_out,
+                    stdout_tail=failure.stdout_tail,
+                    stderr_tail=failure.stderr_tail,
+                    log_path=failure.stderr_path or failure.stdout_path,
+                )
+            )
+
             self.store.write_status(run_id, RunState.REPAIRING, {"attempt": round_no})
+            prev_action = None
+            consecutive_rejections = 0
             for _ in range(MAX_ACTIONS_PER_REPAIR):
+                self._check_cancel(run_id)
+                step_timeout = self._step_timeout(request, deadline)
+                if hasattr(aci, "timeout_seconds"):
+                    aci.timeout_seconds = step_timeout
                 action = self.llm.propose_action(history)
+                if prev_action is not None and action == prev_action:
+                    self.store.append_event(
+                        run_id,
+                        RunState.REPAIRING,
+                        "loop_stopped",
+                        f"repeated identical action {action.action}, ending repair round",
+                        {"action": action.action},
+                    )
+                    break
+                prev_action = action
                 observation = aci.execute(action)
                 self._check_cancel(run_id)
                 history.append(observation)
+                event_data: dict[str, object] = {
+                    "ok": observation.ok,
+                    "exit_code": observation.exit_code,
+                }
+                for field, key in (
+                    ("path", "path"),
+                    ("requirement", "requirement"),
+                    ("query", "query"),
+                    ("name", "env_name"),
+                ):
+                    val = getattr(action, field, None)
+                    if val is not None:
+                        event_data[key] = val
                 self.store.append_event(
                     run_id,
                     RunState.REPAIRING,
                     action.action,
                     observation.summary,
-                    {"ok": observation.ok, "exit_code": observation.exit_code},
+                    event_data,
                 )
                 if action.action == "finish_repair":
                     break
                 if action.action == "run_smoke_test" and observation.exit_code == 0:
                     break
+                if (
+                    not observation.ok
+                    and observation.exit_code is None
+                    and not observation.timed_out
+                ):
+                    consecutive_rejections += 1
+                    if consecutive_rejections >= 3:
+                        self.store.append_event(
+                            run_id,
+                            RunState.REPAIRING,
+                            "loop_stopped",
+                            "too many consecutive rejected actions, ending repair round",
+                            {"count": consecutive_rejections},
+                        )
+                        break
+                else:
+                    consecutive_rejections = 0
             self.store.append_event(
                 run_id,
                 RunState.REPAIRING,
@@ -477,19 +914,27 @@ class HarnessRunner:
                     continue
                 phase = "test"
 
-            test = self._run_test(run_id, request, session, plan, deadline, attempt=attempts + 1)
-            attempts += 1
+            attempts_tracker[0] += 1
+            test = self._run_test(
+                run_id,
+                request,
+                session,
+                plan,
+                deadline,
+                attempt=attempts_tracker[0],
+                target=target,
+            )
             if self._is_verified(test, plan, workspace):
                 return {
                     "verified": True,
-                    "attempts": attempts,
+                    "attempts": attempts_tracker[0],
                     "failure_category": category,
                     "outcome": "succeeded",
                 }
             failure = test
         return {
             "verified": False,
-            "attempts": attempts,
+            "attempts": attempts_tracker[0],
             "failure_category": category,
             "outcome": outcome,
         }
@@ -543,8 +988,26 @@ class HarnessRunner:
         )
         return install
 
-    def _run_test(self, run_id: str, request: RunRequest, session, plan: RunPlan, deadline: float, attempt: int | None = None):
+    def _run_test(
+        self,
+        run_id: str,
+        request: RunRequest,
+        session,
+        plan: RunPlan,
+        deadline: float,
+        attempt: int | None = None,
+        target: TargetManifest | None = None,
+    ):
         self.store.write_status(run_id, RunState.TESTING, {"attempt": attempt} if attempt else {})
+        workspace = self.store.run_dir(run_id) / "workspace"
+        if target is not None and target.source_dir is not None:
+            check_src = target.source_dir / "check.py"
+            if check_src.is_file():
+                shutil.copy2(check_src, workspace / "check.py")
+        if attempt is not None and attempt > 1 and plan.expected_artifact:
+            artifact_path = _resolve_artifact_path(workspace, plan.expected_artifact)
+            if artifact_path is not None and artifact_path.is_file():
+                artifact_path.unlink()
         session.set_network(False)
         test = session.execute(plan.command, timeout_seconds=self._step_timeout(request, deadline))
         self._check_cancel(run_id)
@@ -610,6 +1073,39 @@ class HarnessRunner:
         report = self.store.read_text(run_id, "report.md") or "# Report\n\n"
         self.store.write_text(run_id, "report.md", report + f"cleanup_failures={len(errors)}\n")
 
+    def _build_environment_manifest(
+        self,
+        request: RunRequest | None,
+        plan: RunPlan | None,
+        resolved_revision: str | None,
+        session: SandboxSession | None,
+    ) -> dict[str, object]:
+        py_ver = (
+            plan.python_version
+            if plan is not None
+            else (request.python_version if request and request.python_version else "3.10")
+        )
+        manifest: dict[str, object] = {
+            "resolved_revision": resolved_revision or (plan.resolved_revision if plan else None),
+            "python_version": py_ver,
+            "base_image": f"paperharness/base-py{py_ver}",
+            "command": (
+                plan.command
+                if plan is not None
+                else (request.command if request is not None else None)
+            ),
+        }
+        if session is not None:
+            get_env = getattr(session, "get_environment", None)
+            if callable(get_env):
+                manifest["environment"] = get_env()
+            elif hasattr(session, "environment"):
+                manifest["environment"] = dict(session.environment)
+            collect_pkgs = getattr(session, "collect_packages", None)
+            if callable(collect_pkgs):
+                manifest["packages"] = collect_pkgs()
+        return manifest
+
     def _fail(
         self,
         run_id: str,
@@ -617,14 +1113,20 @@ class HarnessRunner:
         message: str,
         outcome: str = "failed",
         session: SandboxSession | None = None,
+        request: RunRequest | None = None,
+        plan: RunPlan | None = None,
+        resolved_revision: str | None = None,
+        attempts: int = 1,
     ) -> RunResult:
         result = RunResult(
             run_id=run_id,
             outcome=outcome,
             verified=False,
-            attempts=1,
+            attempts=attempts,
             failure_category=category,
+            resolved_revision=resolved_revision,
             patch_url=f"/api/runs/{run_id}/patch",
+            environment_url=f"/api/runs/{run_id}/environment",
             report_url=f"/api/runs/{run_id}/report",
         )
         patch = ""
@@ -634,6 +1136,15 @@ class HarnessRunner:
             except Exception:  # noqa: BLE001 - 会话可能已死，尽力而为
                 patch = ""
         self.store.write_text(run_id, "patch.diff", patch)
+        self.store.write_text(
+            run_id,
+            "environment.json",
+            json.dumps(
+                self._build_environment_manifest(request, plan, resolved_revision, session),
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
         self.store.write_text(
             run_id,
             "report.md",
