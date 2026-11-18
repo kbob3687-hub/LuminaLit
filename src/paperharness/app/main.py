@@ -11,6 +11,7 @@
 import os
 from pathlib import Path
 
+from paperharness.aci import PaperACI
 from paperharness.agent.fake import FakeLLM
 from paperharness.agent.llm_agent import OpenAICompatibleLLM
 from paperharness.app.api import create_app
@@ -40,14 +41,6 @@ def _build_llm():
     raise ValueError(f"unknown agent backend: {backend}")
 
 
-def _build_aci_factory():
-    try:
-        from paperharness.aci import PaperACI
-    except ImportError:
-        return None
-    return PaperACI
-
-
 def build_app(runs_root: str | Path | None = None, backend: str | None = None):
     runs_root = Path(runs_root or os.environ.get("PAPERHARNESS_RUNS", "runs"))
     backend = (backend or os.environ.get("PAPERHARNESS_SANDBOX", "docker")).lower()
@@ -70,7 +63,7 @@ def build_app(runs_root: str | Path | None = None, backend: str | None = None):
         store=store,
         llm=_build_llm(),
         sandbox_factory=factory,
-        aci_factory=_build_aci_factory(),
+        aci_factory=PaperACI,
         targets=manifests,
     )
     return create_app(store=store, runner=runner, targets=targets)

@@ -327,7 +327,7 @@ def test_install_network_restored_off_when_execute_raises(tmp_path):
     # 原始异常不被 finally 盖掉：仍按超时口径收敛
     assert result.failure_category == "timeout"
     # install 抛异常后网络必须回到断网，不许留在开态
-    assert holder[0].network_enabled is False
+    assert holder[0].network_state is False
 
 
 def test_git_clone_uses_shallow_http11_env_and_mirror_fallback(tmp_path, monkeypatch):
