@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 import threading
 import uuid
@@ -8,14 +9,19 @@ from pathlib import Path
 
 from paperharness.contracts.run import RunEvent, RunRequest, RunResult, RunState
 
+_VALID_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
 
 class RunStore:
     def __init__(self, root: Path | str):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._sequences: dict[str, int] = {}
 
     def run_dir(self, run_id: str) -> Path:
+        if not isinstance(run_id, str) or not _VALID_RUN_ID.fullmatch(run_id) or ".." in run_id:
+            raise ValueError(f"invalid run_id: {run_id!r}")
         return self.root / run_id
 
     def create_run(self, request: RunRequest) -> str:
@@ -38,8 +44,11 @@ class RunStore:
         log_path: str | None = None,
     ) -> RunEvent:
         with self._lock:
-            events = self.read_events(run_id, after=0)
-            sequence = (events[-1].sequence if events else 0) + 1
+            last_seq = self._sequences.get(run_id)
+            if last_seq is None:
+                events = self.read_events(run_id, after=0)
+                last_seq = events[-1].sequence if events else 0
+            sequence = last_seq + 1
             event = RunEvent(
                 run_id=run_id,
                 sequence=sequence,
@@ -53,6 +62,7 @@ class RunStore:
             path = self.run_dir(run_id) / "events.jsonl"
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(event.model_dump_json() + "\n")
+            self._sequences[run_id] = sequence
             return event
 
     def read_events(self, run_id: str, after: int = 0) -> list[RunEvent]:

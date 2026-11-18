@@ -246,3 +246,221 @@ def test_classify_rules_hit_order():
 
     context = FailureContext(exit_code=1, timed_out=False, stderr_tail="完全看不懂的报错")
     assert classify_by_rules(context) is None
+
+
+def test_classify_rules_gpu_path_version_and_deprecated():
+    assert (
+        classify_by_rules(
+            FailureContext(exit_code=1, timed_out=False, stderr_tail="No CUDA-capable device is detected")
+        )
+        == "requires_gpu"
+    )
+    assert (
+        classify_by_rules(
+            FailureContext(exit_code=1, timed_out=False, stderr_tail="Traceback /home/runner/x.py line 3: ValueError")
+        )
+        is None
+    )
+    assert (
+        classify_by_rules(
+            FailureContext(
+                exit_code=1,
+                timed_out=False,
+                stderr_tail="FileNotFoundError: [Errno 2] No such file or directory: '/data/in.csv'",
+            )
+        )
+        == "hardcoded_path"
+    )
+    assert (
+        classify_by_rules(
+            FailureContext(
+                exit_code=1,
+                timed_out=False,
+                stderr_tail="AttributeError: `np.float_` was removed in the NumPy 2.0 release.",
+            )
+        )
+        == "version_conflict"
+    )
+    assert (
+        classify_by_rules(
+            FailureContext(
+                exit_code=1,
+                timed_out=False,
+                stderr_tail="TypeError: load() got an unexpected keyword argument 'verbose'",
+            )
+        )
+        == "deprecated_api"
+    )
+
+
+def test_heal_seeds_failure_context_into_propose_action_history(tmp_path):
+    """每轮 REPAIRING 必须把当轮失败的 stderr_tail、类别和命令喂进 propose_action(history)。"""
+    seen_histories: list[list[Observation]] = []
+
+    class InspectingLLM(FakeLLM):
+        def propose_action(self, history):
+            seen_histories.append(list(history))
+            return FinishRepairAction(action="finish_repair", summary="inspected")
+
+    store = RunStore(tmp_path)
+
+    def factory(request, run_dir):
+        (run_dir / "workspace").mkdir(parents=True, exist_ok=True)
+        (run_dir / "workspace" / "requirements.txt").write_text("", encoding="utf-8")
+        return FakeSandboxSession(
+            [
+                make_result(0),
+                make_result(1, "ERR_ROUND_1"),
+                make_result(1, "ERR_ROUND_2"),
+                make_result(0),
+            ],
+            workspace=run_dir / "workspace",
+        )
+
+    runner = HarnessRunner(
+        store=store,
+        llm=InspectingLLM(),
+        sandbox_factory=factory,
+        cloner=lambda req, run_dir: "fake-commit",
+        aci_factory=FakeACI,
+    )
+    request = RunRequest(
+        repo_url="https://github.com/a/b", command=["python", "main.py"], max_repairs=2
+    )
+    run_id = store.create_run(request)
+    result = runner.run(run_id, request)
+
+    assert result.verified is True
+    assert len(seen_histories) == 2
+    assert any("ERR_ROUND_1" in obs.stderr_tail for obs in seen_histories[0])
+    assert any("ERR_ROUND_2" in obs.stderr_tail for obs in seen_histories[1])
+
+
+def test_heal_breaks_early_on_repeated_identical_action(tmp_path):
+    from paperharness.contracts.run import ReadFileAction
+
+    calls = 0
+
+    class RepeatingLLM(FakeLLM):
+        def propose_action(self, history):
+            nonlocal calls
+            calls += 1
+            return ReadFileAction(action="read_file", path="main.py")
+
+    store = RunStore(tmp_path)
+
+    def factory(request, run_dir):
+        (run_dir / "workspace").mkdir(parents=True, exist_ok=True)
+        (run_dir / "workspace" / "requirements.txt").write_text("", encoding="utf-8")
+        return FakeSandboxSession(
+            [make_result(0), make_result(1, "boom"), make_result(1, "boom")],
+            workspace=run_dir / "workspace",
+        )
+
+    runner = HarnessRunner(
+        store=store,
+        llm=RepeatingLLM(),
+        sandbox_factory=factory,
+        cloner=lambda req, run_dir: "fake-commit",
+        aci_factory=FakeACI,
+    )
+    request = RunRequest(
+        repo_url="https://github.com/a/b", command=["python", "main.py"], max_repairs=1
+    )
+    run_id = store.create_run(request)
+    result = runner.run(run_id, request)
+
+    assert result.outcome == "budget_exceeded"
+    assert calls == 2  # 第二次给出完全相同动作即熔断，不会空转 20 次
+    loop_events = [e for e in store.read_events(run_id) if e.kind == "loop_stopped"]
+    assert len(loop_events) == 1
+
+
+def test_heal_inner_loop_respects_wall_clock_deadline(tmp_path):
+    """内层动作循环必须受总墙钟 deadline 约束，超时收敛 budget_exceeded。"""
+    from paperharness.harness import runner as runner_mod
+
+    store = RunStore(tmp_path)
+
+    def factory(request, run_dir):
+        (run_dir / "workspace").mkdir(parents=True, exist_ok=True)
+        (run_dir / "workspace" / "requirements.txt").write_text("", encoding="utf-8")
+        return FakeSandboxSession(
+            [make_result(0), make_result(1, "boom")],
+            workspace=run_dir / "workspace",
+        )
+
+    class SlowLLM(FakeLLM):
+        def classify_failure(self, context):
+            return "unknown"
+
+    runner = HarnessRunner(
+        store=store,
+        llm=SlowLLM(),
+        sandbox_factory=factory,
+        cloner=lambda req, run_dir: "fake-commit",
+        aci_factory=FakeACI,
+    )
+    request = RunRequest(
+        repo_url="https://github.com/a/b",
+        command=["python", "main.py"],
+        timeout_seconds=30,
+        max_repairs=2,
+    )
+    run_id = store.create_run(request)
+    # 强行让墙钟预算在首轮 REPAIRING 内耗尽
+    orig_factor = runner_mod.TOTAL_BUDGET_FACTOR
+    orig_grace = runner_mod.TOTAL_BUDGET_GRACE_SECONDS
+    runner_mod.TOTAL_BUDGET_FACTOR = 0
+    runner_mod.TOTAL_BUDGET_GRACE_SECONDS = 0
+    try:
+        result = runner.run(run_id, request)
+    finally:
+        runner_mod.TOTAL_BUDGET_FACTOR = orig_factor
+        runner_mod.TOTAL_BUDGET_GRACE_SECONDS = orig_grace
+
+    assert result.outcome == "budget_exceeded"
+    assert result.failure_category == "time_budget_exceeded"
+
+
+def test_llm_agent_includes_stderr_and_skips_llm_when_command_given(tmp_path, monkeypatch):
+    from paperharness.agent.llm_agent import OpenAICompatibleLLM
+
+    llm = OpenAICompatibleLLM(
+        base_url="https://example.invalid/v1",
+        api_key="sk-test",
+        model="test-model",
+    )
+    captured_users: list[str] = []
+
+    def fake_chat_json(system, user):
+        captured_users.append(user)
+        return {"action": "finish_repair", "summary": "ok"}
+
+    monkeypatch.setattr(llm, "_chat_json", fake_chat_json)
+    action = llm.propose_action(
+        [
+            Observation(
+                ok=False,
+                action="test_failed",
+                summary="failed",
+                exit_code=1,
+                stdout_tail="OUT_INFO",
+                stderr_tail="TRACEBACK_STDERR",
+            )
+        ]
+    )
+    assert action.action == "finish_repair"
+    assert "OUT_INFO" in captured_users[0]
+    assert "TRACEBACK_STDERR" in captured_users[0]
+
+    def should_not_call(*args, **kwargs):
+        raise AssertionError("LLM should not be called when command is already provided")
+
+    monkeypatch.setattr(llm, "_chat_json", should_not_call)
+    plan = llm.propose_run_plan_with_workspace(
+        RunRequest(repo_url="https://github.com/a/b", command=["python", "demo.py"]),
+        tmp_path,
+    )
+    assert plan.source == "user"
+    assert plan.command == ["python", "demo.py"]

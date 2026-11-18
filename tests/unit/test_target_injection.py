@@ -149,3 +149,164 @@ def test_runner_without_targets_behaves_as_before(tmp_path):
     run_id = store.create_run(request)
     result = runner.run(run_id, request)
     assert result.outcome == "succeeded"
+
+
+def test_same_repo_url_targets_disambiguated_by_revision(tmp_path):
+    """共享 repo_url 的多个靶场按 revision 精确命中，不能总是落到第一个。"""
+    targets_root = tmp_path / "targets"
+    shared_url = "https://github.com/kbob3687-hub/paperharness-targets"
+    specs = [
+        ("clean-example", "a" * 40, "none", True, "succeeded", "out.txt"),
+        ("missing-dependency", "b" * 40, "missing_dependency", True, "succeeded", "out.txt"),
+        ("requires-gpu", "c" * 40, "requires_gpu", False, "failed", None),
+    ]
+    for tid, rev, fclass, repairable, expected_final, artifact in specs:
+        tdir = targets_root / tid
+        tdir.mkdir(parents=True)
+        (tdir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "id": tid,
+                    "repo_url": shared_url,
+                    "revision": rev,
+                    "python_version": "3.10",
+                    "command": ["python", "main.py"],
+                    "expected_artifact": artifact,
+                    "failure_class": fclass,
+                    "repairable": repairable,
+                    "allowed_actions": [],
+                    "expected_final": expected_final,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tdir / "requirements.txt").write_text(f"{tid}-marker==1.0\n", encoding="utf-8")
+
+    manifests = load_targets(targets_root)
+    store = RunStore(tmp_path / "runs")
+
+    def factory(request, run_dir):
+        workspace = run_dir / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        return FakeSandboxSession(workspace=workspace)
+
+    runner = HarnessRunner(
+        store=store,
+        llm=FakeLLM(),
+        sandbox_factory=factory,
+        cloner=lambda req, run_dir: req.revision,
+        targets=manifests,
+    )
+
+    request = RunRequest(repo_url=shared_url, revision="c" * 40)
+    run_id = store.create_run(request)
+    runner.run(run_id, request)
+
+    target_events = [e for e in store.read_events(run_id) if e.kind == "target"]
+    assert len(target_events) == 1
+    assert target_events[0].data["target_id"] == "requires-gpu"
+    plan = json.loads(store.read_text(run_id, "run_plan.json"))
+    assert plan["expected_artifact"] is None
+    reqs = (store.run_dir(run_id) / "workspace" / "requirements.txt").read_text(encoding="utf-8")
+    assert "requires-gpu-marker==1.0" in reqs
+
+
+def test_matched_target_backfills_revision_for_cloner(tmp_path):
+    """未显式传 revision 命中靶场时，必须回填 target.revision 给 cloner 走浅拉取。"""
+    targets = make_targets(tmp_path)
+    seen_revisions: list[str | None] = []
+    store = RunStore(tmp_path / "runs")
+
+    def factory(request, run_dir):
+        workspace = run_dir / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        return FakeSandboxSession(artifact_path="out.txt", workspace=workspace)
+
+    def cloner(request, run_dir):
+        seen_revisions.append(request.revision)
+        return request.revision or "unexpected"
+
+    runner = HarnessRunner(
+        store=store,
+        llm=FakeLLM(),
+        sandbox_factory=factory,
+        cloner=cloner,
+        targets=targets,
+    )
+    request = RunRequest(repo_url=targets[0].repo_url)
+    run_id = store.create_run(request)
+    runner.run(run_id, request)
+
+    assert seen_revisions == ["a" * 40]
+
+
+def test_check_py_tampering_is_overwritten_before_verification(tmp_path):
+    """自愈循环里篡改 check.py 不能逃过最终验证：重测前 Harness 会重新覆盖权威 check.py。"""
+    from paperharness.contracts.run import ExecResult, Observation, ReplaceExactAction
+
+    targets = make_targets(tmp_path)
+    store = RunStore(tmp_path / "runs")
+    observed_check_contents: list[str] = []
+
+    class RecordingSandbox(FakeSandboxSession):
+        def execute(self, command, timeout_seconds):
+            if command == ["python", "check.py"]:
+                observed_check_contents.append(
+                    (self.workspace / "check.py").read_text(encoding="utf-8")
+                )
+            return super().execute(command, timeout_seconds)
+
+    class TamperingACI:
+        def __init__(self, session, workspace, plan, timeout_seconds):
+            self.workspace = workspace
+
+        def execute(self, action):
+            if action.action == "replace_exact":
+                (self.workspace / "check.py").write_text("print('tampered')\n", encoding="utf-8")
+            return Observation(ok=True, action=action.action, summary="tampered", exit_code=0)
+
+    def factory(request, run_dir):
+        workspace = run_dir / "workspace"
+        return RecordingSandbox(
+            results=[
+                ExecResult(
+                    exit_code=0, timed_out=False, duration_ms=1,
+                    stdout_path="logs/i.out", stderr_path="logs/i.err",
+                ),
+                ExecResult(
+                    exit_code=1, timed_out=False, duration_ms=1,
+                    stdout_path="logs/t1.out", stderr_path="logs/t1.err",
+                    stderr_tail="AssertionError: bad coeff",
+                ),
+                ExecResult(
+                    exit_code=0, timed_out=False, duration_ms=1,
+                    stdout_path="logs/t2.out", stderr_path="logs/t2.err",
+                ),
+            ],
+            artifact_path="out.txt",
+            workspace=workspace,
+        )
+
+    runner = HarnessRunner(
+        store=store,
+        llm=FakeLLM(
+            actions=[
+                ReplaceExactAction(
+                    action="replace_exact",
+                    path="check.py",
+                    old="print('pass')",
+                    new="print('tampered')",
+                )
+            ]
+        ),
+        sandbox_factory=factory,
+        cloner=lambda req, run_dir: "f" * 40,
+        aci_factory=TamperingACI,
+        targets=targets,
+    )
+    request = RunRequest(repo_url=targets[0].repo_url, max_repairs=1)
+    run_id = store.create_run(request)
+    runner.run(run_id, request)
+
+    assert len(observed_check_contents) == 2
+    assert observed_check_contents[-1] == "print('pass')\n"

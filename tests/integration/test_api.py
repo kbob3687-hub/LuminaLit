@@ -147,3 +147,57 @@ def test_cancel_running_run_converges_to_cancelled(tmp_path):
 
         result = client.get(f"/api/runs/{run_id}").json()["result"]
         assert result["outcome"] == "cancelled"
+
+
+def test_cors_preflight_allows_configured_origin(tmp_path):
+    client, worker = make_client(tmp_path)
+    try:
+        resp = client.options(
+            "/api/runs",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        assert resp.status_code in (200, 204)
+        assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"
+    finally:
+        worker.stop()
+
+
+def test_cancel_queued_run_writes_complete_artifacts(tmp_path):
+    store = RunStore(tmp_path)
+    runner = HarnessRunner(
+        store=store,
+        llm=FakeLLM(),
+        sandbox_factory=lambda req, run_dir: FakeSandboxSession(workspace=run_dir / "workspace"),
+        cloner=lambda req, run_dir: "fake-commit",
+    )
+    app, worker = create_app(store=store, runner=runner)
+    client = TestClient(app)
+    try:
+        run_id = client.post("/api/runs", json={"repo_url": "https://github.com/a/b"}).json()["run_id"]
+        cancelled = client.post(f"/api/runs/{run_id}/cancel")
+        assert cancelled.status_code == 200
+
+        run_info = client.get(f"/api/runs/{run_id}").json()
+        assert run_info["state"] == "cancelled"
+        assert run_info["result"]["outcome"] == "cancelled"
+        assert client.get(f"/api/runs/{run_id}/report").status_code == 200
+        assert client.get(f"/api/runs/{run_id}/environment").status_code == 200
+        assert client.get(f"/api/runs/{run_id}/patch").status_code == 200
+    finally:
+        worker.stop()
+
+
+def test_invalid_run_id_traversal_returns_404(tmp_path):
+    client, worker = make_client(tmp_path)
+    try:
+        assert client.get("/api/runs/..").status_code == 404
+        assert client.get("/api/runs/bad..id").status_code == 404
+        assert client.get("/api/runs/bad..id/events").status_code == 404
+        assert client.get("/api/runs/bad..id/report").status_code == 404
+        assert client.get("/api/runs/bad..id/patch").status_code == 404
+        assert client.get("/api/runs/bad..id/environment").status_code == 404
+    finally:
+        worker.stop()

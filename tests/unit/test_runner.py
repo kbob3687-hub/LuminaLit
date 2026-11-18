@@ -1,9 +1,12 @@
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 
 from paperharness.agent.fake import FakeLLM
 from paperharness.contracts.run import ExecResult, RunRequest, RunState
+from paperharness.harness import runner as runner_mod
 from paperharness.harness.runner import INSTALL_COMMAND, HarnessRunner, git_clone
 from paperharness.harness.store import RunStore
 from paperharness.sandbox.fake import FakeSandboxSession
@@ -326,3 +329,161 @@ def test_install_network_restored_off_when_execute_raises(tmp_path):
     assert result.failure_category == "timeout"
     # install 抛异常后网络必须回到断网，不许留在开态
     assert holder[0].network_state is False
+
+
+def test_git_clone_uses_shallow_http11_env_and_mirror_fallback(tmp_path, monkeypatch):
+    """git_clone 使用浅克隆 + HTTP/1.1 + 非交互环境变量，直连两次失败后切镜像并脱敏错误。"""
+    monkeypatch.setenv("PAPERHARNESS_GIT_MIRROR", "https://ghfast.top/")
+    calls: list[tuple[list[str], dict | None]] = []
+
+    def fake_run(cmd, check=False, capture_output=False, text=False, timeout=None, env=None):
+        calls.append((list(cmd), env))
+        if "clone" in cmd:
+            target_url = cmd[-2]
+            if not target_url.startswith("https://ghfast.top/"):
+                raise subprocess.CalledProcessError(
+                    128,
+                    cmd,
+                    stderr=f"fatal: fetch-pack invalid index-pack in {tmp_path / 'workspace'}",
+                )
+            ws = Path(cmd[-1])
+            ws.mkdir(parents=True, exist_ok=True)
+            (ws / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if "rev-parse" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="a" * 40 + "\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", fake_run)
+    sha = git_clone(RunRequest(repo_url="https://github.com/owner/repo"), tmp_path)
+
+    assert sha == "a" * 40
+    clone_cmds = [c for c, _ in calls if "clone" in c]
+    assert len(clone_cmds) == 3  # 直连两次 + 镜像兜底一次
+    for cmd in clone_cmds:
+        assert "--depth" in cmd
+        assert "http.version=HTTP/1.1" in cmd
+        assert "--no-recurse-submodules" in cmd
+    assert clone_cmds[2][-2] == "https://ghfast.top/https://github.com/owner/repo"
+    for _cmd, env in calls:
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["GIT_LFS_SKIP_SMUDGE"] == "1"
+
+
+def test_git_clone_sanitizes_stderr_and_rejects_oversized_repo(tmp_path, monkeypatch):
+    """失败时提取 stderr 并替换宿主机路径；超过 200 MiB 时清理并直接失败。"""
+    monkeypatch.delenv("PAPERHARNESS_GIT_MIRROR", raising=False)
+
+    def fail_run(cmd, check=False, capture_output=False, text=False, timeout=None, env=None):
+        raise subprocess.CalledProcessError(
+            128,
+            cmd,
+            stderr=f"fatal: cannot write {tmp_path / 'workspace' / 'obj'}",
+        )
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", fail_run)
+    with pytest.raises(RuntimeError) as excinfo:
+        git_clone(RunRequest(repo_url="https://github.com/owner/repo"), tmp_path)
+    msg = str(excinfo.value)
+    assert "git exited with 128" in msg
+    assert "/workspace" in msg
+    assert str(tmp_path) not in msg
+
+    monkeypatch.setattr(runner_mod, "MAX_WORKSPACE_BYTES", 10)
+    calls = 0
+
+    def git_only_big_run(cmd, check=False, capture_output=False, text=False, timeout=None, env=None):
+        if "clone" in cmd:
+            ws = Path(cmd[-1])
+            (ws / ".git").mkdir(parents=True, exist_ok=True)
+            (ws / ".git" / "pack.bin").write_bytes(b"0" * 50)
+            (ws / "main.py").write_bytes(b"ok")
+        return subprocess.CompletedProcess(cmd, 0, stdout="a" * 40, stderr="")
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", git_only_big_run)
+    assert git_clone(RunRequest(repo_url="https://github.com/owner/repo"), tmp_path) == "a" * 40
+
+    def big_run(cmd, check=False, capture_output=False, text=False, timeout=None, env=None):
+        nonlocal calls
+        if "clone" in cmd:
+            calls += 1
+            ws = Path(cmd[-1])
+            ws.mkdir(parents=True, exist_ok=True)
+            (ws / "big.bin").write_bytes(b"0" * 50)
+        return subprocess.CompletedProcess(cmd, 0, stdout="a" * 40, stderr="")
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", big_run)
+    with pytest.raises(RuntimeError, match="200 MiB"):
+        git_clone(RunRequest(repo_url="https://github.com/owner/repo"), tmp_path)
+    assert calls == 1  # 体积超限不重试
+
+
+@pytest.mark.parametrize("bad_artifact", ["../request.json", "/etc/passwd", "C:\\Windows\\win.ini"])
+def test_invalid_expected_artifact_path_is_rejected(tmp_path, bad_artifact):
+    runner, store = make_runner(tmp_path, artifact_path=None)
+    request = RunRequest(
+        repo_url="https://github.com/a/b",
+        command=["python", "main.py"],
+        expected_artifact=bad_artifact,
+    )
+    run_id = store.create_run(request)
+    result = runner.run(run_id, request)
+
+    assert result.verified is False
+    assert result.outcome == "failed"
+    assert result.failure_category == "invalid_expected_artifact"
+
+
+def test_empty_command_maps_to_missing_run_command(tmp_path):
+    from paperharness.contracts.run import RunPlan
+
+    class EmptyCommandLLM(FakeLLM):
+        def propose_run_plan(self, request):
+            return RunPlan(
+                resolved_revision="f" * 40,
+                python_version="3.10",
+                command=[],
+                source="repository_analysis",
+            )
+
+    store = RunStore(tmp_path)
+    factory_called = False
+
+    def factory(request, run_dir):
+        nonlocal factory_called
+        factory_called = True
+        return FakeSandboxSession(workspace=run_dir / "workspace")
+
+    runner = HarnessRunner(
+        store=store,
+        llm=EmptyCommandLLM(),
+        sandbox_factory=factory,
+        cloner=lambda req, run_dir: "f" * 40,
+    )
+    request = RunRequest(repo_url="https://github.com/a/b")
+    run_id = store.create_run(request)
+    result = runner.run(run_id, request)
+
+    assert result.outcome == "failed"
+    assert result.failure_category == "missing_run_command"
+    assert factory_called is False
+
+
+def test_clone_failure_does_not_create_sandbox(tmp_path):
+    factory_called = False
+
+    def recording_factory(request, run_dir):
+        nonlocal factory_called
+        factory_called = True
+        return FakeSandboxSession(workspace=run_dir / "workspace")
+
+    def broken_cloner(request, run_dir):
+        raise RuntimeError("clone boom")
+
+    runner, store = make_runner(tmp_path, cloner=broken_cloner, factory=recording_factory)
+    request = RunRequest(repo_url="https://github.com/a/b", command=["python", "main.py"])
+    run_id = store.create_run(request)
+    result = runner.run(run_id, request)
+
+    assert result.failure_category == "clone_failed"
+    assert factory_called is False
