@@ -11,6 +11,8 @@
 
 import json
 import os
+import ssl
+import time
 from pathlib import Path
 
 from pydantic import TypeAdapter
@@ -49,7 +51,8 @@ ACTION_SYSTEM_PROMPT = """你是论文代码复现助手，在一个受限沙箱
 约束：path 必须相对；old 必须在文件中唯一；环境变量只允许
 CUDA_VISIBLE_DEVICES、OMP_NUM_THREADS、MKL_NUM_THREADS、TOKENIZERS_PARALLELISM。
 若失败发生在 install 阶段（requirements.txt 安装失败），请用 replace_exact 修改 requirements.txt（Harness 会重跑 pip install -r requirements.txt 验证）。
-若失败发生在 test 阶段且缺依赖或版本冲突，请使用 install_requirement（或按需使用 replace_exact / set_environment）。
+若失败发生在 test 阶段且缺依赖或版本冲突，只需用 install_requirement 安装兼容版本即可，不要额外修改 requirements.txt。
+search_text 只搜索文件内容（不搜索文件名）；请结合初始观测提供的 workspace_files 与 expected_artifact 定位仓库内已有的数据文件与目标产物路径。
 禁止修改 check.py（确定性验证脚本）；不要重复发出与上一条完全相同且已失败的动作。
 先读文件再改；改完用 run_smoke_test 验证；认为修好了就 finish_repair。
 只输出 JSON，不要解释。"""
@@ -76,21 +79,28 @@ class OpenAICompatibleLLM:
         import httpx
 
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        response = httpx.post(
-            f"{self.base_url}/chat/completions",
-            headers=headers,
-            json={
-                "model": self.model,
-                "response_format": {"type": "json_object"},
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            },
-            timeout=self.timeout_seconds,
-        )
-        response.raise_for_status()
-        return json.loads(response.json()["choices"][0]["message"]["content"])
+        for attempt in range(3):
+            try:
+                response = httpx.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json={
+                        "model": self.model,
+                        "response_format": {"type": "json_object"},
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user},
+                        ],
+                    },
+                    timeout=self.timeout_seconds,
+                )
+                response.raise_for_status()
+                return json.loads(response.json()["choices"][0]["message"]["content"])
+            except (httpx.HTTPError, ssl.SSLError):
+                if attempt == 2:
+                    raise
+                time.sleep(1.0)
+        raise RuntimeError("unreachable")  # pragma: no cover
 
     def propose_run_plan(self, request: RunRequest) -> RunPlan:
         last: Exception | None = None

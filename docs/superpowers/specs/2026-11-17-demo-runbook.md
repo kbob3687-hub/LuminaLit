@@ -53,7 +53,7 @@ $env:HTTPS_PROXY = "http://127.0.0.1:10808"
 |---|---|---|
 | GitHub 直连 | ❌ 校园网 RST | 必须挂代理或用镜像 |
 | GitHub 走代理 | ✅ 3.83 MB/s | 可演示真实仓库 |
-| Docker | ❌ 未安装（非未启动） | **无法跑真实沙箱** |
+| Docker | ✅ 已就绪（base-py3.10 / py3.11 已构建并通过真机验收） | 可运行真沙箱；未启动 Docker 时退回 fail-closed 或 fake 模式 |
 | fake 沙箱 | ✅ | 只到 `smoke_test_failed` |
 
 没有 Docker 时，fake 沙箱不会真正执行 `check.py`，因此工作区里没有 `out.txt`，
@@ -85,10 +85,7 @@ $env:HTTPS_PROXY = "http://127.0.0.1:10808"
 
 ## 六、仍然待办（不属于前端）
 
-- `runner.git_clone` 在没有 `revision` 时走全历史 clone（pysindy 工作区 212 MB，pack 94 MB），
-  建议默认 `--depth 1`。
-- `CLONE_TIMEOUT_SECONDS = 240` 不可配置，对外服务建议缩短。
-- 失败时只存 `clone failed: <异常>`，`git` 的 stderr 摘要没有进入事件，
-  前端只能显示类别，无法告诉用户是网络、仓库不存在还是私有仓库。
-- `_match_target` 用 `repo_url` 字符串精确相等匹配，使用镜像地址会匹配不到内置靶场，
-  计划会退回模型生成。若要支持镜像，需要"匹配用原地址、clone 用拼接地址"。
+- `[已完成]` `runner.git_clone` 固定 commit（40 位 SHA）已走 `--depth 1` 单提交 `fetch` 并强制 `core.autocrlf=false`（无 `revision` 时默认 `--depth 1`）。
+- `[已完成]` `clone_failed` 已脱敏截取 `git` 的 `stderr` 摘要写入事件与失败信息。
+- `[已完成]` `_match_target` 仍用原始 `repo_url` 匹配靶场，镜像回退通过 `PAPERHARNESS_GIT_MIRROR` 在 clone 时拼接；容器内 PyPI 镜像可通过 `PAPERHARNESS_PIP_INDEX_URL` 注入。
+- `CLONE_TIMEOUT_SECONDS = 240` 仍不可配置，后续如需对外服务可改为环境变量。

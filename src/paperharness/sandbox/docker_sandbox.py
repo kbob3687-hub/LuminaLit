@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -18,7 +19,7 @@ TAIL_LIMIT = 2000
 TAIL_BYTES = 16384  # 尾部滚动窗口字节数，覆盖 2000 字符的最坏 UTF-8 编码
 MAX_LOG_BYTES = 50 * 1024 * 1024  # 单条流上限：超出截断并在日志文件里打标
 MAX_DIFF_BYTES = 2 * 1024 * 1024
-EXPORT_DIFF_TIMEOUT_SECONDS = 30
+EXPORT_DIFF_TIMEOUT_SECONDS = 60
 CONTAINER_USER = "1000:1000"
 WORKSPACE_MOUNT = "/workspace"
 MEMORY_LIMIT = "2g"
@@ -251,7 +252,7 @@ class DockerSandboxSession:
             stdout=True,
             stderr=True,
             user=CONTAINER_USER,
-            environment=dict(self._environment),
+            environment=self._effective_exec_env(),
             workdir=WORKSPACE_MOUNT,
         )
         exec_id = created["Id"]
@@ -308,6 +309,14 @@ class DockerSandboxSession:
         if "\n" in name or "\r" in name or "\n" in value or "\r" in value:
             raise ValueError("environment name and value must not contain newlines")
         self._environment[name] = value
+
+    def _effective_exec_env(self) -> dict[str, str]:
+        env: dict[str, str] = {}
+        pip_index_url = os.environ.get("PAPERHARNESS_PIP_INDEX_URL", "").strip()
+        if pip_index_url and "\n" not in pip_index_url and "\r" not in pip_index_url:
+            env["PIP_INDEX_URL"] = pip_index_url
+        env.update(self._environment)
+        return env
 
     def get_environment(self) -> dict[str, str]:
         return dict(self._environment)

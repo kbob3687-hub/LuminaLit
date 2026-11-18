@@ -14,3 +14,4 @@ frontend/dist/
 frontend/tsconfig.tsbuildinfo
 frontend/*.log
 frontend/*.err
+.idea/
