@@ -3,13 +3,13 @@
 一次性脚本，不进 src/。运行：.venv/Scripts/python scripts/spike_sandbox.py
 """
 
-import shutil
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from paperharness.contracts.run import RunRequest
+from paperharness.harness.runner import _rmtree_force
 from paperharness.sandbox.docker_sandbox import create_docker_sandbox
 
 RUN_DIR = Path("runs-test/spike-run")
@@ -24,7 +24,7 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 def main() -> None:
     if RUN_DIR.exists():
-        shutil.rmtree(RUN_DIR)
+        _rmtree_force(RUN_DIR)
     (RUN_DIR / "workspace").mkdir(parents=True)
     # workspace 造一个最小 git 仓库，供 export_diff 用
     import subprocess

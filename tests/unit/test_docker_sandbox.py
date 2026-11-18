@@ -346,3 +346,19 @@ def test_export_diff_uses_safe_git_flags_and_truncates(tmp_path, monkeypatch):
     assert "core.hooksPath=/dev/null" in commands[1]
     assert diff.startswith("diff --git")
     assert "truncated at 10 bytes" in diff
+
+
+def test_exec_streaming_injects_pip_index_url_without_polluting_get_environment(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PAPERHARNESS_PIP_INDEX_URL", "https://mirrors.aliyun.com/pypi/simple/")
+    session, api = make_exec_session(tmp_path, [(b"ok", None)], exit_code=0)
+    out_path = session.logs_dir / "exec-001.out"
+    err_path = session.logs_dir / "exec-001.err"
+    holder: dict = {}
+    session._exec_streaming(["python", "-m", "pip", "--version"], out_path, err_path, holder)
+
+    assert api.create_kwargs["environment"] == {
+        "PIP_INDEX_URL": "https://mirrors.aliyun.com/pypi/simple/"
+    }
+    assert session.get_environment() == {}
