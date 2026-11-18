@@ -181,6 +181,24 @@ export default function App() {
     }, 3050);
   };
 
+  /**
+   * 回到选择页，准备跑下一篇。
+   *
+   * 之前没有这条路：从选择页进了运行页就再也出不来，跑完只能刷新浏览器。
+   *
+   * **只由用户显式点击触发**（顶栏「← 换一篇」、终态横幅「换个仓库再跑」），
+   * 不做「终态 N 秒后自动返回」：真沙箱跑一次几十秒，结果页一停就走掉，
+   * 报告 / 补丁 / 环境 / 失败原因都来不及看；而 backToSelect 会清掉 runId，
+   * 回去之后就再也打不开这次运行的任何产物，只能重跑。
+   */
+  const backToSelect = useCallback(() => {
+    if (timer.current) window.clearTimeout(timer.current);
+    setRunId(null);
+    setPickError(null);
+    setCancelling(false);
+    setScene("select");
+  }, []);
+
   // 动作行、阶段条、回环全部在 RunScene 里由事件推导（runModel.ts）
   return (
     <div className="relative h-full overflow-hidden">
@@ -217,6 +235,7 @@ export default function App() {
               status={status}
               events={events}
               targetName={paper.name || undefined}
+              onBack={backToSelect}
               pollError={demo ? null : live.error}
               cancelling={cancelling}
               onCancel={async () => {

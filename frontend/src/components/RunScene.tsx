@@ -14,7 +14,7 @@ import {
   type ActionRow,
   type StageView,
 } from "../runModel";
-import { StageTrack } from "./StageTrack";
+import { FlowGraph } from "./FlowGraph";
 import { LoopStrip } from "./LoopStrip";
 import { ProgressBand } from "./ProgressBand";
 import { ReportPanel } from "./ReportPanel";
@@ -56,6 +56,8 @@ interface Props {
   pollError?: string | null;
   /** 本次运行的靶场名（用户选的那张卡）。直链进来看不到，就留空。 */
   targetName?: string;
+  /** 返回选择页换个仓库再跑。 */
+  onBack?: () => void;
 }
 
 export function RunScene({
@@ -66,6 +68,7 @@ export function RunScene({
   cancelling,
   pollError,
   targetName,
+  onBack,
 }: Props) {
   const [panel, setPanel] = useState<Panel>(() => {
     // 演示/截图直链：?panel=aci&seq=7 / ?panel=loop（只读，不影响业务逻辑）
@@ -254,6 +257,15 @@ export function RunScene({
         >
           查看计划
         </button>
+        {onBack && (
+          <button
+            onClick={onBack}
+            title="回到首页，可以粘另一个仓库再跑一遍"
+            className="cursor-pointer rounded-[7px] border border-accent/45 bg-accent/[.08] px-4 py-2 text-xs text-[#9db4ff] transition-colors hover:bg-accent/15 hover:text-white"
+          >
+            ← 换一篇
+          </button>
+        )}
         <button
           onClick={onCancel}
           disabled={replay || cancelling || ["succeeded", "failed", "cancelled"].includes(state)}
@@ -262,6 +274,34 @@ export function RunScene({
           {cancelling ? "取消中…" : "取消"}
         </button>
       </header>
+
+      {/* ── 终态横幅：明确告诉用户「完了，可以跑下一篇」 ── */}
+      {terminal && onBack && (
+        <motion.section
+          initial={{ opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: "auto" }}
+          transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+          className="shrink-0 overflow-hidden border-b border-rule bg-gradient-to-r from-accent/[.10] to-transparent"
+        >
+          <div className="flex items-center gap-4 px-6 py-3">
+            <span
+              className={clsx(
+                "font-mono text-[10px] tracking-[.16em] uppercase",
+                isFailed ? "text-reject" : state === "succeeded" ? "text-pass" : "text-ink-muted",
+              )}
+            >
+              {isFailed ? "已判定不可复现" : state === "succeeded" ? "复现完成" : "已取消"}
+            </span>
+            <span className="flex-1" />
+            <button
+              onClick={onBack}
+              className="cursor-pointer rounded-[7px] border border-accent/50 bg-accent/[.12] px-4 py-1.5 text-[11.5px] text-[#bcd0ff] transition-colors hover:bg-accent/20 hover:text-white"
+            >
+              换个仓库再跑 →
+            </button>
+          </div>
+        </motion.section>
+      )}
 
       {/* ── Hero ── */}
       <section className="grid shrink-0 grid-cols-[1fr_auto] items-center gap-8 border-b border-rule px-6 pt-6 pb-5">
@@ -417,12 +457,20 @@ export function RunScene({
       {/* ── 整体进度：百分比 + 倒计时 + 分段条 ── */}
       <ProgressBand p={progress} state={state} />
 
-      {/* ── 3D 阶段轨道 ── */}
-      <section className="relative shrink-0 overflow-hidden border-b border-rule px-6 pt-7 pb-6 [perspective:1400px] [perspective-origin:50%_42%]">
-        <div className="absolute top-4 right-6 z-[3] flex items-center gap-2 rounded-full border border-rule-hi bg-white/[.03] px-3 py-1.5 font-mono text-[10.5px] tracking-[.06em] text-ink-muted">
-          点阶段看事件
+      {/* ── 执行拓扑图：节点像墨迹铺开，回路像活物回转 ── */}
+      <section className="relative h-[340px] shrink-0 overflow-hidden border-b border-rule">
+        <div className="absolute top-3 left-6 z-[3] font-mono text-[9.5px] tracking-[.18em] text-ink-muted uppercase">
+          执行拓扑
         </div>
-        <StageTrack stages={stages} onSelect={(id) => setPanel({ type: "stage", id })} />
+        <div className="absolute top-3 right-6 z-[3] flex items-center gap-2 rounded-full border border-rule-hi bg-white/[.03] px-3 py-1 font-mono text-[9.5px] tracking-[.06em] text-ink-muted">
+          点节点看事件
+        </div>
+        <FlowGraph
+          state={state}
+          blockedCount={blockedCount}
+          onSelectStage={(id) => setPanel({ type: "stage", id })}
+          onSelectGate={() => setPanel({ type: "loop" })}
+        />
       </section>
 
       {/* ── 自愈回环：正在干什么 ── */}
