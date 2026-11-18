@@ -1,4 +1,4 @@
-import type { RunEvent, RunStatus, Target } from "./types";
+import type { EnvironmentManifest, RunEvent, RunStatus, Target } from "./types";
 
 /** 契约 §4：基地址来自 VITE_API_BASE_URL，轮询间隔 1000ms。 */
 const BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
@@ -83,4 +83,23 @@ export function getReport(runId: string) {
 
 export function getPatch(runId: string) {
   return getText(`/api/runs/${runId}/patch`);
+}
+
+/**
+ * 环境清单（`environment.json`）。
+ *
+ * 404 有两种含义，不能混：
+ *   - `run_not_found`：run_id 不对；
+ *   - `environment_not_ready`：后端只在收尾时写这个文件，运行中就是没有。
+ * 所以这里不用 `req()`（它对 404 一律报 run_not_found），自己读 detail.code。
+ */
+export async function getEnvironment(runId: string): Promise<EnvironmentManifest> {
+  const res = await fetch(`${BASE}/api/runs/${runId}/environment`);
+  if (res.status === 404) {
+    const body = (await res.json().catch(() => ({}))) as { detail?: { code?: string } };
+    const notReady = body.detail?.code === "environment_not_ready";
+    throw new ApiError(notReady ? "environment_not_ready" : "run_not_found", 404);
+  }
+  if (!res.ok) throw new ApiError(`HTTP ${res.status}`, res.status);
+  return res.json() as Promise<EnvironmentManifest>;
 }
