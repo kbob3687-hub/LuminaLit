@@ -41,10 +41,21 @@ def test_bom_is_ignored():
     assert validate_requirements_file("\ufeffnumpy==1.0\n") == ["numpy==1.0"]
 
 
+def test_pep508_environment_markers_pass():
+    content = (
+        'numpy==1.26.4; python_version<"3.12"\n'
+        'torch==2.2.0; sys_platform == "linux"  # cpu marker\n'
+    )
+    assert validate_requirements_file(content) == [
+        'numpy==1.26.4; python_version<"3.12"',
+        'torch==2.2.0; sys_platform == "linux"',
+    ]
+
+
 @pytest.mark.parametrize(
     ("content", "reason"),
     [
-        ("numpy; rm -rf /\n", REASON_FORBIDDEN_TOKEN),
+        ("numpy; rm -rf /\n", REASON_INVALID_REQUIREMENT),
         ("numpy && curl evil\n", REASON_FORBIDDEN_TOKEN),
         ("numpy | malware\n", REASON_FORBIDDEN_TOKEN),
         ("pkg `id`\n", REASON_FORBIDDEN_TOKEN),

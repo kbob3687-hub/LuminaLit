@@ -6,7 +6,8 @@
 
 from packaging.requirements import InvalidRequirement, Requirement
 
-_FORBIDDEN_SUBSTRINGS = ("\n", "\r", ";", "&&", "|", "`", "$(")
+FORBIDDEN_SUBSTRINGS = ("\n", "\r", ";", "&&", "|", "`", "$(")
+_FORBIDDEN_SUBSTRINGS = FORBIDDEN_SUBSTRINGS
 
 
 class RequirementNotAllowed(Exception):
@@ -26,7 +27,7 @@ def validate(raw: str) -> str:
     if not isinstance(raw, str) or not raw.strip():
         raise RequirementNotAllowed(raw if isinstance(raw, str) else "")
 
-    if any(token in raw for token in _FORBIDDEN_SUBSTRINGS):
+    if any(token in raw for token in FORBIDDEN_SUBSTRINGS):
         raise RequirementNotAllowed(raw)
 
     # 直接引用（pkg @ https://...）会绕过索引从任意 URL 拉包，

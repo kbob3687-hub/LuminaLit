@@ -1,8 +1,11 @@
 """requirements.txt 文件内容校验（Harness 层）。
 
 `pip install -r requirements.txt` 读的是仓库自带的文件——内容来自任意公开
-仓库，与模型给的依赖字符串同属不可信输入。单行规则与契约 §2.2
-`install_requirement` 的口径一致：先拒注入面，再 `packaging.Requirement` parse。
+仓库，与模型给的依赖字符串同属不可信输入。单行规则复用
+`paperharness.aci.requirement_guard.FORBIDDEN_SUBSTRINGS`，文件级仅放行分号 `;`：
+`INSTALL_COMMAND` 以 argv 数组传给容器 exec、不经 shell，分号用于 PEP 508
+环境标记（如 `numpy==1.26.4; python_version<"3.12"`），其余非法写法由
+`packaging.Requirement` 拦截。
 
 文件级额外规则：
 
@@ -10,9 +13,6 @@
 - 以 `-` 开头的 pip 选项（`--index-url`、`-r`、`-e` …）一律拒绝：这是换源、
   递归拉别的文件、执行 setup.py 的入口
 - 反斜杠一律拒绝：行尾 ``\\`` 续行能把内容拆到两行，绕开逐行校验
-
-刻意不 import `paperharness.aci.requirement_guard`：那份代码还没合入 main
-（PR #9）。收敛为单一来源等合入后再做；本模块规则逐字对齐契约，不另造口径。
 """
 
 from __future__ import annotations
@@ -21,8 +21,10 @@ import re
 
 from packaging.requirements import InvalidRequirement, Requirement
 
-# 与 aci/requirement_guard 的 _FORBIDDEN_SUBSTRINGS 保持同一口径（契约 §2.2）。
-_FORBIDDEN_SUBSTRINGS = ("\n", "\r", ";", "&&", "|", "`", "$(")
+from paperharness.aci.requirement_guard import FORBIDDEN_SUBSTRINGS
+
+# 文件级复用 ACI 单一来源禁词表，但放行分号（PEP 508 环境标记；INSTALL_COMMAND 不经 shell）。
+_FILE_FORBIDDEN_SUBSTRINGS = tuple(tok for tok in FORBIDDEN_SUBSTRINGS if tok != ";")
 _INLINE_COMMENT = re.compile(r"\s#")
 
 # 机器可读的拒绝原因（进事件 detail，前端不映射，原样展示）。
@@ -77,7 +79,7 @@ def validate_requirements_file(text: str) -> list[str]:
         if line.startswith("-"):
             raise RequirementsNotAllowed(line_no, raw_line, REASON_PIP_OPTION)
 
-        if any(token in line for token in _FORBIDDEN_SUBSTRINGS):
+        if any(token in line for token in _FILE_FORBIDDEN_SUBSTRINGS):
             raise RequirementsNotAllowed(line_no, raw_line, REASON_FORBIDDEN_TOKEN)
 
         # 直接引用（pkg @ …）绕过索引从任意 URL 拉包，与依赖串口径一致，一律拒绝。

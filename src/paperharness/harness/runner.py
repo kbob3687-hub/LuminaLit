@@ -72,7 +72,8 @@ def _rmtree_force(path: Path) -> None:
 
 def _workspace_size_bytes(workspace: Path) -> int:
     total = 0
-    for root, _dirs, filenames in os.walk(workspace, followlinks=False):
+    for root, dirs, filenames in os.walk(workspace, followlinks=False):
+        dirs[:] = [d for d in dirs if d != ".git"]
         for fname in filenames:
             fpath = Path(root) / fname
             if fpath.is_symlink():
@@ -716,7 +717,7 @@ class HarnessRunner:
         except _RequirementsRejected as exc:
             return self._fail(
                 run_id,
-                "requirements_rejected",
+                "requirement_rejected",
                 str(exc),
                 session=session,
                 request=request,
@@ -963,7 +964,11 @@ class HarnessRunner:
                 RunState.INSTALLING,
                 "install",
                 f"requirements.txt rejected: {exc}",
-                {"reason": exc.reason, "line_no": exc.line_no},
+                {
+                    "reason": exc.reason,
+                    "line_no": exc.line_no,
+                    "source": "requirements_file",
+                },
             )
             raise _RequirementsRejected(str(exc)) from exc
         session.set_network(True)

@@ -281,13 +281,14 @@ def test_malicious_requirements_rejected_before_pip(tmp_path, content):
     result = runner.run(run_id, request)
 
     assert result.outcome == "failed"
-    assert result.failure_category == "requirements_rejected"
+    assert result.failure_category == "requirement_rejected"
     assert store.read_status(run_id)["state"] == RunState.FAILED.value
     assert holder[0].commands == []  # INSTALL_COMMAND 没执行
     rejected_events = [
         e for e in store.read_events(run_id) if e.kind == "install" and "rejected" in e.message
     ]
     assert rejected_events, "拒绝原因必须写进事件流"
+    assert rejected_events[0].data["source"] == "requirements_file"
 
 
 def test_requirements_with_comments_and_pins_passes(tmp_path):
@@ -390,6 +391,17 @@ def test_git_clone_sanitizes_stderr_and_rejects_oversized_repo(tmp_path, monkeyp
 
     monkeypatch.setattr(runner_mod, "MAX_WORKSPACE_BYTES", 10)
     calls = 0
+
+    def git_only_big_run(cmd, check=False, capture_output=False, text=False, timeout=None, env=None):
+        if "clone" in cmd:
+            ws = Path(cmd[-1])
+            (ws / ".git").mkdir(parents=True, exist_ok=True)
+            (ws / ".git" / "pack.bin").write_bytes(b"0" * 50)
+            (ws / "main.py").write_bytes(b"ok")
+        return subprocess.CompletedProcess(cmd, 0, stdout="a" * 40, stderr="")
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", git_only_big_run)
+    assert git_clone(RunRequest(repo_url="https://github.com/owner/repo"), tmp_path) == "a" * 40
 
     def big_run(cmd, check=False, capture_output=False, text=False, timeout=None, env=None):
         nonlocal calls
