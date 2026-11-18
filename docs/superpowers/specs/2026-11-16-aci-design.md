@@ -105,10 +105,23 @@ execute(action)
 1. `packaging.Requirement(req)` 能否解析——解析不了的直接拒。
 2. 拒绝**直接引用**（含 `@`，如 `pkg @ https://...`）。
 3. 拒绝 URL、换行、分号、`&&`。
-4. 通过后：记录调用前网络状态 → `set_network(True)` → `execute(["python", "-m", "pip", "install", req], timeout)` → **`finally` 恢复调用前的网络状态**。
+4. 通过后：**ACI 自己记录当前网络状态** → `set_network(True)` → `execute(["python", "-m", "pip", "install", req], timeout)` → **`finally` 恢复到 ACI 记录的状态**。
 5. `Observation` 透传 `ExecResult` 的 `exit_code` 与尾部。
 
 第 4 步的 `finally` 是硬要求：装包中途抛异常（超时、容器已关）也必须把网络关回去，否则后面所有动作都在联网状态下跑，「断网」这条隔离承诺当场失效。
+
+**网络状态必须由 ACI 自己维护，不能向会话查询**（2026-11-17 修订，队长 review 指出）：
+
+契约 §1.2 写死沙箱不暴露状态查询接口，调用方自己记录。真沙箱 `DockerSandboxSession`
+只有私有 `_network_enabled`，所以任何 `getattr(session, "network_enabled", True)` 都会
+拿到默认值 `True`——模型装一次包，本该断开的网就被永久打开，隔离当场失效。
+
+**修复期基线约定为断网**：自愈发生在 `runner._run_test()` 的 `set_network(False)` 之后，
+所以 `install_requirement` 结束必须回到 `False`。控制流上安全：`runner._run_install`
+自己会 `set_network(True)`、`_run_test` 自己会断网，都不依赖 ACI 留网。
+
+替身 `FakeSandboxSession` 已同步为只有私有 `_network_enabled` + 仅测试用的
+`network_state` 只读属性，杜绝「替身有公开属性、真实现没有」造成的单测假绿。
 
 提案（待确认）：这里的超时用 `max(timeout_seconds, 120)`——pip 装 scipy/numba 这类包通常比跑一次 smoke test 慢，沿用同一个 300 秒可能不够。
 
@@ -168,7 +181,26 @@ def guard(raw: str) -> Path:            # 抛 PathEscape 或返回安全的绝�
 
 前端失败态要展示 `failure_category`（契约 4.2）。ACI 的 `summary` 是它的上游：模型连续收到 `path_escape` / `replace_not_unique`，最终仍没修好，Harness 分类出的 category 就该能和这些信号对上。
 
-因此 `summary` 的取值集合要**稳定、可枚举**，前端才能做映射表。目前固定 6 个：`path_escape:<原路径>`、`file_not_found`、`replace_not_found`、`replace_not_unique`、`env_not_allowed:<name>`、`unknown_action`。
+因此 `summary` 的取值集合要**稳定、可枚举**，前端才能做映射表。
+
+**当前共 8 种**（2026-11-17 修订：原口径写"固定 6 个"，漏申报了第 7、8 两种）：
+
+| # | 标签 | 形态 | 触发 |
+|---|---|---|---|
+| 1 | `file_not_found` | 常量 | 文件不存在 / 目录 / 二进制 / 超大 |
+| 2 | `replace_not_found` | 常量 | `old` 在文件中出现 0 次 |
+| 3 | `replace_not_unique` | 常量 | `old` 出现多次，或 `old` 为空串 |
+| 4 | `unknown_action` | 常量 | 动作不在枚举内 |
+| 5 | `requirement_not_allowed` | 常量 | 依赖字符串非法（含 `@`/URL/换行/分号/`&&`） |
+| 6 | `path_escape:<原路径>` | 模板 | 路径越界 |
+| 7 | `env_not_allowed:<name>` | 模板 | 环境变量不在白名单 |
+| 8 | `invalid_argument:<field>` | 模板 | `start_line < 1` 或 `line_count` 越界 |
+
+> 第 5 种由队长在 2026-11-17 review 时批准为独立常量（复用 `path_escape` 会误导前端）。
+> 第 8 种此前一直在用（`test_06` 断言它），但没有申报，属于遗漏；现补齐并加
+> `tests/unit/test_aci_error_tags.py` 钉死清单，任何新增/改名都会失败。
+
+前端映射表必须覆盖全部 8 种，否则失败态会显示不出原因（契约 §4.2）。
 
 ## 9. 单元测试计划
 

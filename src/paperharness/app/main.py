@@ -11,6 +11,7 @@
 import os
 from pathlib import Path
 
+from paperharness.aci import PaperACI
 from paperharness.agent.fake import FakeLLM
 from paperharness.agent.llm_agent import OpenAICompatibleLLM
 from paperharness.app.api import create_app
@@ -59,7 +60,11 @@ def build_app(runs_root: str | Path | None = None, backend: str | None = None):
 
     store = RunStore(runs_root)
     runner = HarnessRunner(
-        store=store, llm=_build_llm(), sandbox_factory=factory, targets=manifests
+        store=store,
+        llm=_build_llm(),
+        sandbox_factory=factory,
+        aci_factory=PaperACI,
+        targets=manifests,
     )
     return create_app(store=store, runner=runner, targets=targets)
 
