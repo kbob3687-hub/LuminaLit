@@ -272,13 +272,14 @@ def test_malicious_requirements_rejected_before_pip(tmp_path, content):
     result = runner.run(run_id, request)
 
     assert result.outcome == "failed"
-    assert result.failure_category == "requirements_rejected"
+    assert result.failure_category == "requirement_rejected"
     assert store.read_status(run_id)["state"] == RunState.FAILED.value
     assert holder[0].commands == []  # INSTALL_COMMAND 没执行
     rejected_events = [
         e for e in store.read_events(run_id) if e.kind == "install" and "rejected" in e.message
     ]
     assert rejected_events, "拒绝原因必须写进事件流"
+    assert rejected_events[0].data["source"] == "requirements_file"
 
 
 def test_requirements_with_comments_and_pins_passes(tmp_path):
@@ -318,4 +319,4 @@ def test_install_network_restored_off_when_execute_raises(tmp_path):
     # 原始异常不被 finally 盖掉：仍按超时口径收敛
     assert result.failure_category == "timeout"
     # install 抛异常后网络必须回到断网，不许留在开态
-    assert holder[0].network_enabled is False
+    assert holder[0].network_state is False

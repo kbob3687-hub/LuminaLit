@@ -382,7 +382,7 @@ class HarnessRunner:
             )
         except _RequirementsRejected as exc:
             return self._fail(
-                run_id, "requirements_rejected", str(exc), session=session
+                run_id, "requirement_rejected", str(exc), session=session
             )
         except SandboxClosedError as exc:
             if self._cancel_requested(run_id):
@@ -518,7 +518,11 @@ class HarnessRunner:
                 RunState.INSTALLING,
                 "install",
                 f"requirements.txt rejected: {exc}",
-                {"reason": exc.reason, "line_no": exc.line_no},
+                {
+                    "reason": exc.reason,
+                    "line_no": exc.line_no,
+                    "source": "requirements_file",
+                },
             )
             raise _RequirementsRejected(str(exc)) from exc
         session.set_network(True)
