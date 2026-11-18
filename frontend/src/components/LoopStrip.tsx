@@ -34,6 +34,8 @@ export function LoopStrip({
 
   const current = loop.rounds.at(-1)!;
   const running = state === "diagnosing" || state === "repairing";
+  // 熔断可能发生在更早的轮次（最后一轮正常收尾），所以取最近一次被熔断的轮。
+  const stopped = [...loop.rounds].reverse().find((r) => r.stopped);
 
   return (
     <section className="relative border-b border-rule bg-gradient-to-r from-accent/[.055] via-transparent to-reject/[.04] px-6 py-3">
@@ -82,6 +84,15 @@ export function LoopStrip({
           <span className="rounded-[5px] border border-rule-hi px-2 py-[3px] font-mono text-[10.5px] text-ink-mid">
             {current.phase === "install" ? "安装阶段失败" : "测试阶段失败"}
           </span>
+          {/* 熔断 = 这一轮不是正常跑完的，不写出来会被当成「模型收敛了」 */}
+          {stopped?.stopped && (
+            <span
+              title={stopped.stopped.detail}
+              className="rounded-[5px] border border-reject/40 bg-reject/[.08] px-2 py-[3px] font-mono text-[10.5px] text-reject"
+            >
+              第 {stopped.round} 轮熔断
+            </span>
+          )}
         </div>
 
         {/* 正在做 */}

@@ -129,9 +129,10 @@ export function RunScene({
   const isFailed = state === "failed";
 
   /**
-   * 失败原因的人话版。后端只为失败留了 failure_category 与一句
-   * `clone failed: <异常>`，stderr 不落盘，所以这里**只陈述能核实的事实**，
-   * 不替用户判定成因（见 runModel.explainFailure 的注释）。
+   * 失败原因的人话版。三类失败的原文来源不同：clone_failed 的 git stderr 在
+   * 事件 message 里（PR #15 起），install / test 带 `stderr_tail` 字段，其余
+   * 只有类别。这里**只陈述能核实的事实**，不替用户判定成因
+   * （见 runModel.explainFailure 的注释）。
    */
   const failureCategory = labelOf(status?.result?.failure_category ?? "");
   const failExplain = useMemo(
@@ -359,7 +360,7 @@ export function RunScene({
               {failExplain.stderr && (
                 <div className="mt-2">
                   <div className="font-mono text-[10px] tracking-[.1em] text-reject/70">
-                    stderr 尾段 · {failExplain.stderrFrom}
+                    stderr 原文 · {failExplain.stderrFrom}
                   </div>
                   <pre className="mt-1 max-h-36 overflow-auto rounded-md bg-black/35 p-2 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap break-all text-[rgb(255_180_170_/_0.9)]">
                     {failExplain.stderr}
@@ -507,7 +508,8 @@ export function RunScene({
                 另有 <b className="text-ink-mid">{events.length - rows.length}</b> 条事件不是动作
               </span>
               <span className="text-ink-muted/60">
-                （clone、计划解析、阶段迁移），可在上方阶段条里逐格查看——动作流本来就只收动作。
+                （clone、计划解析、阶段迁移、熔断与收尾清理），可在上方阶段条与自愈回环里逐格查看——
+                动作流本来就只收动作。
               </span>
             </div>
           )}

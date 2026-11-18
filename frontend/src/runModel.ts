@@ -327,6 +327,17 @@ export interface LoopAction {
   timestamp: string;
 }
 
+/**
+ * 本轮为什么提前结束（后端 `loop_stopped` 事件）。
+ *
+ * 后端熔断只有两种触发：模型连续提出同一个动作，或动作连续 3 次被 ACI 拦下
+ * （见 runner.py 的两处 `loop_stopped`）。没有这条事件就是正常跑完一轮。
+ */
+export interface LoopStop {
+  reason: "repeated" | "rejected";
+  detail: string;
+}
+
 export interface LoopRound {
   round: number;
   failureClass: string;
@@ -334,6 +345,7 @@ export interface LoopRound {
   startedAt: string;
   finishedAt: string | null;
   actions: LoopAction[];
+  stopped: LoopStop | null;
 }
 
 export interface LoopView {
@@ -348,6 +360,24 @@ export interface LoopView {
   doingKind: string | null;
 }
 
+/**
+ * `loop_stopped` → 熔断原因。
+ *
+ * 只读后端显式给的 data 字段：重复动作带 `action`，连续被拒带 `count`。
+ * 两个都没有就按"被拦下"记，不猜它为什么停。
+ */
+function parseLoopStop(e: RunEvent): LoopStop {
+  const action = typeof e.data?.action === "string" ? e.data.action : null;
+  if (action) {
+    return { reason: "repeated", detail: `连续提出同一个动作 ${action}` };
+  }
+  const count = typeof e.data?.count === "number" ? e.data.count : null;
+  return {
+    reason: "rejected",
+    detail: count === null ? "动作连续被 ACI 拦下" : `动作连续 ${count} 次被 ACI 拦下`,
+  };
+}
+
 /** 修复后回到的阶段顺序：install → test，所以 installing/testing 也可能属于回环。 */
 export function buildLoop(events: RunEvent[], state: RunState | undefined): LoopView {
   const rounds: LoopRound[] = [];
@@ -360,7 +390,12 @@ export function buildLoop(events: RunEvent[], state: RunState | undefined): Loop
         startedAt: e.timestamp,
         finishedAt: null,
         actions: [],
+        stopped: null,
       });
+      continue;
+    }
+    if (e.kind === "loop_stopped" && rounds.length) {
+      rounds.at(-1)!.stopped = parseLoopStop(e);
       continue;
     }
     if (e.kind === "repair_round" && rounds.length) {
@@ -569,17 +604,25 @@ export function aciTrace(e: RunEvent): AciTrace {
 /**
  * 失败原因的解释。
  *
- * 后端 `_fail` 只为失败留了两样东西：`failure_category` 和一句
- * `clone failed: <CalledProcessError>`。**stderr 不落盘**——实测
- * `runs/<id>/logs/` 是空目录，git 的原始报错只出现在后端自己的 stdout 里。
+ * 后端 `_fail` 只为失败留了两样东西：`failure_category` 和一条 message。
+ * 原文从哪来，三处不同：
+ *   - `clone_failed`：PR #15 起 `git_clone` 把 `CalledProcessError` 的 stderr
+ *     脱敏后塞进 RuntimeError，`_fail` 再拼成 `clone failed: git exited with
+ *     <code>: <stderr>`——所以**现在有 git 原文**，只是藏在 message 里。
+ *   - `install` / `test`：事件自带 `stderr_tail` 字段。
+ *   - 其余（规划、预算耗尽、不可修复）：只有类别，没有原文。
  *
- * 所以前端能核实的只有三件事：失败类别、命令行里带的地址、退出码。
- * 这里因此不给"成因"下断言：把能核实的写进 verdict，把无法区分的情况
+ * 所以前端能核实的是：失败类别、git 的 stderr、stderr_tail、命令行里的地址、
+ * 退出码。这里不给"成因"下断言：把能核实的写进 verdict，把无法区分的情况
  * 并列写进 detail，并给出用户自己能跑的验证命令。
  *
- * 反例（这次修的）：旧代码对任何 clone_failed 都写"pack 数据在传输中被截断，
- * 不是连不上，是没下完"。但真实失败是地址填成了论文页面（USENIX
+ * 反例（2026-11-17 修的）：旧代码对任何 clone_failed 都写"pack 数据在传输中
+ * 被截断，不是连不上，是没下完"。但真实失败是地址填成了论文页面（USENIX
  * presentation 页），git clone 立刻 exit 128——和"没下完"完全无关。
+ *
+ * 第二个反例（本次修的）：旧代码还写"后端没有保存 git 的 stderr（runs/<id>/logs/
+ * 是空目录）"。PR #15 合进来之后这句话已经不成立——stderr 就在 message 里，
+ * 界面一边展示原文一边说"没有原文"，比不展示更糟。
  */
 export interface FailureExplain {
   /** 能核实的第一句，不含推断 */
@@ -598,13 +641,36 @@ export interface FailureExplain {
   stderrFrom?: string;
 }
 
-/** 已知失败类别 → 一句话结论。类别名与后端逐字相同，不做映射。 */
+/**
+ * 已知失败类别 → 一句话结论。类别名与后端逐字相同，不做映射。
+ *
+ * 键必须覆盖后端所有会写进 `failure_category` 的值：`_fail` 的四个直接类别
+ * （clone_failed / missing_run_command / requirement_rejected / time_budget_exceeded）
+ * 加上 classifier 的八类靶场分类里的七个（`none` 不会作为失败出现）。
+ * 漏一个，界面就只能说"没有对应的解释文本"——那等于把后端已经给出的结论吞掉。
+ *
+ * 写这些句子时守同一条规矩：**只陈述后端凭什么这么判**（命中哪条规则、
+ * 哪一步退出码非零），不替它分析成因。
+ */
 const FAILURE_VERDICTS: Record<string, string> = {
   clone_failed: "克隆失败：git clone 直接返回非零退出码，没有进入安装与测试阶段。",
+  missing_run_command:
+    "没能确定运行命令：仓库里没有可识别的入口，规划阶段拿到的命令是空的，因此没有执行任何东西。",
   smoke_test_failed: "测试命令跑完了，但退出码非零，产物校验没过。",
   install_failed: "依赖没装上：requirements 里的包在沙箱内装不下来，或不在允许的依赖清单里。",
   requirement_rejected: "依赖字符串被校验层拦下（含命令分隔符等），这一步没有产生副作用。",
-  missing_dependency: "缺依赖导致 import 失败，进入自愈回环后仍没补齐。",
+  missing_dependency:
+    "缺依赖导致 import 失败：stderr 命中 ModuleNotFoundError / ImportError（自愈回环开着时会先尝试补齐）。",
+  version_conflict:
+    "依赖版本冲突：stderr 命中版本解析失败（VersionConflict / incompatible version），pip 在解依赖时就退出了。",
+  hardcoded_path:
+    "代码里写死了宿主机路径：stderr 里出现 /home/、/Users/、/mnt/、/root/ 这类目录，沙箱里没有它们。",
+  cuda_only: "代码要求 CUDA：stderr 提到 CUDA，而沙箱是无 GPU 的 CPU 容器。",
+  deprecated_api:
+    "用了已移除或签名变了的旧 API：stderr 命中 deprecated / unexpected keyword argument，导入或调用时直接报错。",
+  missing_private_data:
+    "代码要读的数据集不在仓库里：stderr 是 FileNotFoundError 且指向 dataset / corpus / private 数据。",
+  requires_gpu: "运行前提是要 GPU：stderr 命中 requires GPU / nvidia-smi / CUDA 未编译，沙箱没有 GPU。",
   llm_unavailable: "生成运行计划时模型不可用（网关或配额），没进入执行阶段。",
   service_interrupted: "沙箱不可用或后端服务中断，本次运行被打断，可重试。",
   time_budget_exceeded: "整体墙钟预算耗尽被强制结束——通常是某一步一直没有返回。",
@@ -641,6 +707,20 @@ function rawFailureMessage(events: RunEvent[], needle: string): string | undefin
 function firstUrl(text: string): string | undefined {
   const m = text.match(/https?:\/\/[^\s'",\])}]+/);
   return m ? m[0].replace(/[.,;:]+$/, "") : undefined;
+}
+
+/**
+ * 从 clone 失败事件里拆出 `git exited with <code>: <stderr>`。
+ *
+ * PR #15 起 `git_clone` 才会这么拼；更早的 run 只有 `exit status N`，
+ * 那时返回 null，由调用方退回"没有原文"的说法。
+ */
+function parseGitExit(raw: string | undefined): { code: number; stderr: string } | null {
+  if (!raw) return null;
+  const m = /git exited with (-?\d+):\s*([\s\S]+)$/.exec(raw);
+  if (!m) return null;
+  const text = m[2].trim();
+  return text ? { code: Number(m[1]), stderr: text } : null;
 }
 
 /** 只做形态判断，返回 null 表示"看不出来"，不硬给结论。 */
@@ -690,14 +770,9 @@ export function explainFailure(category: string, events: RunEvent[]): FailureExp
 
   if (category === "clone_failed") {
     const raw = rawFailureMessage(events, "clone failed");
+    const git = parseGitExit(raw);
     const repoUrl = raw ? firstUrl(raw) : undefined;
     const shape = repoUrl ? urlShape(repoUrl) : null;
-
-    const detail =
-      "后端在克隆失败时只写下了命令行与退出码，没有保存 git 的 stderr" +
-      "（这次运行的 runs/<id>/logs/ 是空目录），所以「地址不是仓库」「网络中断」「需要凭据」" +
-      "这三种情况在前端无法区分。用同一个地址手动验一下最快：git ls-remote <地址> —— " +
-      "立刻报 repository not found 是地址问题，卡住或中途断开才是网络问题。";
 
     const note =
       shape === "forge-repo"
@@ -706,7 +781,32 @@ export function explainFailure(category: string, events: RunEvent[]): FailureExp
           "如果它其实是论文页面或项目主页而不是仓库地址，git clone 必然失败——" +
           "请换成仓库地址（例：https://github.com/<owner>/<repo>）。";
 
-    return { verdict: FAILURE_VERDICTS.clone_failed, detail, note, repoUrl, raw };
+    // 有 git 原文就摆原文：这时界面唯一该做的是说明这段字是怎么来的。
+    if (git) {
+      return {
+        verdict: FAILURE_VERDICTS.clone_failed,
+        detail:
+          `git 自己的报错就在下面（退出码 ${git.code}）：后端把它的 stderr 拼进了这条事件，` +
+          "宿主机路径已替换成 /workspace。判断依据是这段原文，界面不做二次解读。",
+        note,
+        repoUrl,
+        stderr: git.stderr,
+        stderrFrom: `clone_failed · exit ${git.code}`,
+        raw,
+      };
+    }
+
+    return {
+      verdict: FAILURE_VERDICTS.clone_failed,
+      detail:
+        "这条事件的 message 里只有退出码，没有 git 的原始 stderr，" +
+        "所以「地址不是仓库」「网络中断」「需要凭据」三种情况在前端无法区分。" +
+        "用同一个地址手动验一下最快：git ls-remote <地址> —— " +
+        "立刻报 repository not found 是地址问题，卡住或中途断开才是网络问题。",
+      note,
+      repoUrl,
+      raw,
+    };
   }
 
   const last = lastStderr(events);
