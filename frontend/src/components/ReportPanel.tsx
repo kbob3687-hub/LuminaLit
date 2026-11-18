@@ -1,26 +1,31 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import clsx from "clsx";
-import { ApiError, getPatch, getReport } from "../api";
-import type { RunStatus } from "../types";
+import { ApiError, getEnvironment, getPatch, getReport } from "../api";
+import type { EnvironmentManifest, RunStatus } from "../types";
 
 /**
- * 结果报告面板：把后端落盘的三个文件搬到界面上。
+ * 结果报告面板：把后端落盘的四个文件搬到界面上。
  *
- * 三个端点各管一件事，不要混：
- *   GET /api/runs/{id}/report  → report.md 原文（收尾才落盘，运行中 404）
- *   GET /api/runs/{id}/patch   → patch.diff（无改动回空串，不是 404）
- *   GET /api/runs/{id}         → result.json 里的字段（已在 status 里）
+ * 四个端点各管一件事，不要混：
+ *   GET /api/runs/{id}/report       → report.md 原文（收尾才落盘，运行中 404）
+ *   GET /api/runs/{id}/patch        → patch.diff（无改动回空串，不是 404）
+ *   GET /api/runs/{id}/environment  → environment.json（收尾才落盘，运行中 404）
+ *   GET /api/runs/{id}              → result.json 里的字段（已在 status 里）
  *
  * 报告原文很朴素（`outcome=...` 几行），所以这里做两层：
  * 上层是把 key=value 解析成表格的摘要，下层是「原文」——原文永远可下载，
  * 界面再怎么美化也不改文件内容。
+ *
+ * 环境清单是唯一一个结构化端点（JSON 而非纯文本）。它回答的是报告里看不到的
+ * 那半句：这份结论是在哪个镜像、哪个 commit、装了哪些包的前提下得到的。
  */
 
-type Tab = "report" | "patch" | "json";
+type Tab = "report" | "patch" | "env" | "json";
 
 const TABS: { id: Tab; label: string; file: (rid: string) => string }[] = [
   { id: "report", label: "结果报告", file: (r) => `paperharness-${r.slice(0, 8)}-report.md` },
   { id: "patch", label: "补丁", file: (r) => `paperharness-${r.slice(0, 8)}-patch.diff` },
+  { id: "env", label: "环境", file: (r) => `paperharness-${r.slice(0, 8)}-environment.json` },
   { id: "json", label: "结果 JSON", file: (r) => `paperharness-${r.slice(0, 8)}-result.json` },
 ];
 
@@ -28,9 +33,10 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
   // 演示/截图直链：?panel=report&tab=patch
   const [tab, setTab] = useState<Tab>(() => {
     const t = new URLSearchParams(window.location.search).get("tab");
-    return t === "patch" || t === "json" ? t : "report";
+    return t === "patch" || t === "json" || t === "env" ? t : "report";
   });
   const [docs, setDocs] = useState<Partial<Record<Tab, string>>>({});
+  const [envDoc, setEnvDoc] = useState<EnvironmentManifest | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -50,13 +56,22 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
       setLoading(true);
       setErr(null);
       try {
+        if (which === "env") {
+          const manifest = await getEnvironment(runId);
+          setEnvDoc(manifest);
+          // 复制/下载走的都是这段文本，和环境页签的表格共用一份数据
+          setDocs((d) => ({ ...d, env: JSON.stringify(manifest, null, 2) }));
+          return;
+        }
         const text = which === "report" ? await getReport(runId) : await getPatch(runId);
         setDocs((d) => ({ ...d, [which]: text }));
       } catch (e) {
-        const code = (e as ApiError)?.status;
+        const status = (e as ApiError)?.status;
         setErr(
-          code === 404
-            ? "报告尚未生成：后端只在运行收尾时写 report.md，运行中请稍后再看。"
+          status === 404
+            ? which === "env"
+              ? "环境清单尚未生成：后端在运行收尾时才写 environment.json，运行中请稍后再看。"
+              : "报告尚未生成：后端只在运行收尾时写 report.md，运行中请稍后再看。"
             : `读取失败：${(e as Error)?.message ?? String(e)}`,
         );
       } finally {
@@ -207,6 +222,8 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
         <DiffBody diff={docs.patch} />
       )}
 
+      {!loading && !err && tab === "env" && envDoc && <EnvBody env={envDoc} />}
+
       {!loading && !err && tab === "json" && (
         <pre className="max-h-[52vh] overflow-auto rounded-[9px] border border-rule bg-void/60 px-3.5 py-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-ink-mid">
           {jsonText || "（运行中，暂无 result.json）"}
@@ -321,6 +338,133 @@ function parseReport(md: string) {
     rest.push(line);
   }
   return { title, kv, rest: rest.join("\n").trim() };
+}
+
+/* ────────────────────────────────────────────────── 环境清单 */
+
+/**
+ * environment.json 的表格版。
+ *
+ * 四个头字段由 harness 填（一定有），`environment` / `packages` 由沙箱会话
+ * 提供（只有真实 Docker 沙箱才有）。缺了就说缺——不拿空对象冒充
+ * 「没有环境变量」，那是两件事。
+ */
+function EnvBody({ env }: { env: EnvironmentManifest }) {
+  // 排队阶段就被取消的 run，后端写的是 `{}`——那是"还没有沙箱"，不是"环境干净"
+  if (Object.keys(env).length === 0) {
+    return (
+      <div className="rounded-[9px] border border-rule px-3.5 py-4 font-mono text-[11px] leading-relaxed text-ink-muted">
+        这份环境清单是空的：run 在排队阶段就被取消，还没有创建沙箱会话，所以没有可记录的内容。
+      </div>
+    );
+  }
+
+  const vars = env.environment ? Object.entries(env.environment) : null;
+  const pkgs = env.packages ?? null;
+
+  const rows: [string, string][] = [
+    ["resolved_revision", env.resolved_revision || "None"],
+    ["python_version", env.python_version || "None"],
+    ["base_image", env.base_image || "（这份清单没有记录）"],
+    [
+      "command",
+      env.command && env.command.length > 0 ? env.command.join(" ") : "（没有规划出运行命令）",
+    ],
+  ];
+
+  return (
+    <div className="space-y-3">
+      <div className="overflow-hidden rounded-[9px] border border-rule">
+        <div className="border-b border-rule bg-white/[.02] px-3 py-1.5 font-mono text-[9.5px] tracking-[.16em] text-ink-muted uppercase">
+          environment.json
+        </div>
+        {rows.map(([k, v], i) => (
+          <div
+            key={k}
+            className={clsx(
+              "flex items-baseline gap-3 px-3 py-2 font-mono text-[11.5px]",
+              i > 0 && "border-t border-white/[.045]",
+            )}
+          >
+            <span className="w-[148px] shrink-0 text-ink-muted">{k}</span>
+            <span
+              className={clsx(
+                "min-w-0 flex-1 break-all",
+                v === "None" || v.startsWith("（") ? "text-ink-muted" : "text-ink",
+              )}
+            >
+              {v}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      <EnvSection
+        title={vars ? `环境变量 · ${vars.length}` : "环境变量"}
+        empty={
+          vars === null
+            ? "本次沙箱没有提供环境变量清单（宿主机进程的环境不会进容器）。"
+            : vars.length === 0
+              ? "沙箱报告了空的变量表。"
+              : null
+        }
+      >
+        <div className="divide-y divide-white/[.045]">
+          {vars?.map(([k, v]) => (
+            <div key={k} className="flex items-baseline gap-3 px-3 py-1.5 font-mono text-[11px]">
+              <span className="w-[190px] shrink-0 break-all text-ink-muted">{k}</span>
+              <span className="min-w-0 flex-1 break-all text-ink-mid">{v || "（空）"}</span>
+            </div>
+          ))}
+        </div>
+      </EnvSection>
+
+      <EnvSection
+        title={pkgs ? `pip freeze · ${pkgs.length} 个包` : "pip freeze"}
+        empty={
+          pkgs === null
+            ? "本次沙箱没有采集包清单（只有真实 Docker 沙箱会跑 pip freeze）。"
+            : pkgs.length === 0
+              ? "pip freeze 返回空——数据盘镜像里没有可列的包。"
+              : null
+        }
+      >
+        <pre className="max-h-[38vh] overflow-auto px-3 py-2 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap text-ink-mid">
+          {pkgs?.join("\n")}
+        </pre>
+      </EnvSection>
+
+      <p className="font-mono text-[10px] leading-relaxed text-ink-muted">
+        这份清单说明的是「结论在什么前提下得到的」：同样是 verified=true，在不同 base_image
+        或包版本下含义并不相同。
+      </p>
+    </div>
+  );
+}
+
+function EnvSection({
+  title,
+  empty,
+  children,
+}: {
+  title: string;
+  empty: string | null;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="overflow-hidden rounded-[9px] border border-rule">
+      <div className="border-b border-rule bg-white/[.02] px-3 py-1.5 font-mono text-[9.5px] tracking-[.16em] text-ink-muted uppercase">
+        {title}
+      </div>
+      {empty ? (
+        <div className="px-3 py-2.5 font-mono text-[11px] leading-relaxed text-ink-muted">
+          {empty}
+        </div>
+      ) : (
+        children
+      )}
+    </div>
+  );
 }
 
 /* ────────────────────────────────────────────────── 补丁 */
