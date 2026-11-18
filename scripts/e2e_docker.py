@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from paperharness.agent.fake import FakeLLM
 from paperharness.app.api import create_app
-from paperharness.harness.runner import HarnessRunner
+from paperharness.harness.runner import HarnessRunner, _rmtree_force
 from paperharness.harness.store import RunStore
 from paperharness.sandbox.docker_sandbox import create_docker_sandbox
 
@@ -28,7 +28,7 @@ from paperharness.sandbox.docker_sandbox import create_docker_sandbox
 def make_repo() -> str:
     repo = ROOT / "runs-test" / "e2e-repo"
     if repo.exists():
-        shutil.rmtree(repo)
+        _rmtree_force(repo)
     repo.mkdir(parents=True)
     (repo / "main.py").write_text(
         "from pathlib import Path\n"
@@ -50,7 +50,7 @@ def main() -> None:
     repo = make_repo()
     runs_root = ROOT / "runs-test" / "e2e-runs"
     if runs_root.exists():
-        shutil.rmtree(runs_root)
+        _rmtree_force(runs_root)
 
     def local_repo_cloner(request, run_dir):
         """repo_url 只允许 https://，本地仓通过注入 cloner 复制进 workspace。"""

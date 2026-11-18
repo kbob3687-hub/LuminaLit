@@ -139,6 +139,14 @@ def _clone_once(
             env=git_env,
         )
         subprocess.run(
+            ["git", "-C", str(workspace), "config", "core.autocrlf", "false"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=git_env,
+        )
+        subprocess.run(
             ["git", "-C", str(workspace), "remote", "add", "origin", clone_url],
             check=True,
             capture_output=True,
@@ -182,6 +190,8 @@ def _clone_once(
                     "git",
                     "-c",
                     "http.version=HTTP/1.1",
+                    "-c",
+                    "core.autocrlf=false",
                     "clone",
                     "--depth",
                     "1",
@@ -207,6 +217,8 @@ def _clone_once(
                     "git",
                     "-c",
                     "http.version=HTTP/1.1",
+                    "-c",
+                    "core.autocrlf=false",
                     "clone",
                     "--no-tags",
                     "--no-recurse-submodules",
@@ -233,6 +245,8 @@ def _clone_once(
                 "git",
                 "-c",
                 "http.version=HTTP/1.1",
+                "-c",
+                "core.autocrlf=false",
                 "clone",
                 "--depth",
                 "1",
@@ -305,6 +319,25 @@ def git_clone(request: RunRequest, run_dir: Path) -> str:
             )
     assert last_error is not None
     raise last_error
+
+
+def _list_workspace_files(workspace: Path, limit: int = 60) -> list[str]:
+    if not workspace.is_dir():
+        return []
+    files: list[str] = []
+    root = workspace.resolve(strict=False)
+    for current, dirs, filenames in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in {".git", "__pycache__"})
+        rel_dir = Path(current).relative_to(root)
+        depth = len(rel_dir.parts)
+        if depth >= 3:
+            dirs[:] = []
+        for fname in sorted(filenames):
+            rel = (rel_dir / fname).as_posix() if depth else fname
+            files.append(rel)
+            if len(files) >= limit:
+                return files
+    return files
 
 
 class HarnessRunner:
@@ -805,6 +838,7 @@ class HarnessRunner:
         category: str | None = None
         outcome = "budget_exceeded"
         failure = first_failure
+        workspace_files = _list_workspace_files(workspace)
 
         for round_no in range(1, request.max_repairs + 1):
             self._check_cancel(run_id)
@@ -821,15 +855,22 @@ class HarnessRunner:
                 outcome = "unrepairable"
                 break
 
+            obs_summary = (
+                f"round {round_no}/{request.max_repairs} ({phase}) "
+                f"classified as {category}; command={plan.command} "
+                f"exited with {failure.exit_code}"
+            )
+            if round_no == 1:
+                obs_summary += (
+                    f"; expected_artifact={plan.expected_artifact!r}"
+                    f"; workspace_files={workspace_files}"
+                )
+
             history.append(
                 Observation(
                     ok=False,
                     action=f"{phase}_failed",
-                    summary=(
-                        f"round {round_no}/{request.max_repairs} ({phase}) "
-                        f"classified as {category}; command={plan.command} "
-                        f"exited with {failure.exit_code}"
-                    ),
+                    summary=obs_summary,
                     exit_code=failure.exit_code,
                     timed_out=failure.timed_out,
                     stdout_tail=failure.stdout_tail,

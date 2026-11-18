@@ -60,6 +60,7 @@ python -m venv .venv
 
 ```
 docker build -t paperharness/base-py3.10 -f docker/base-py3.10.Dockerfile docker/
+docker build -t paperharness/base-py3.11 -f docker/base-py3.11.Dockerfile docker/
 ```
 
 ### 3.（可选）配置真 LLM
@@ -76,11 +77,15 @@ $env:PAPERHARNESS_LLM_MODEL='deepseek-flash'
 
 ### 4. 启动服务
 
-```
-.venv/Scripts/python -m uvicorn paperharness.app.main:app --port 8000
+```powershell
+# 后端（http://127.0.0.1:8000）
+.venv/Scripts/python -m uvicorn paperharness.app.main:app --host 127.0.0.1 --port 8000
+
+# 前端（http://127.0.0.1:5173）
+cd frontend && npm install && npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-打开 `http://localhost:8000/api/health` 应返回 `{"status":"ok"}`，`/api/targets` 列出内置靶场。
+访问 `http://127.0.0.1:5173` 打开可视化界面（`http://localhost:8000/api/health` 返回 `{"status":"ok"}`，`/api/targets` 列出内置靶场）。
 
 ### 5. 跑一个靶场
 
@@ -132,6 +137,9 @@ $env:PAPERHARNESS_LLM_MODEL='deepseek-flash'
 | `PAPERHARNESS_LLM_MODEL` | — | 模型名 |
 | `PAPERHARNESS_RUNS` | `runs` | 运行存储目录 |
 | `PAPERHARNESS_TARGETS` | `targets` | 靶场目录 |
+| `PAPERHARNESS_GIT_MIRROR` | — | GitHub clone 失败时追加的镜像前缀（如 `https://ghfast.top/`） |
+| `PAPERHARNESS_PIP_INDEX_URL` | — | 注入容器内 pip 的 `PIP_INDEX_URL`（如阿里云 PyPI 镜像） |
+| `PAPERHARNESS_CORS_ORIGINS` | `localhost/127.0.0.1:5173,4173` | 逗号分隔的允许跨域来源 |
 
 ---
 
@@ -143,11 +151,13 @@ src/paperharness/
   harness/    状态机、运行存储
   agent/      LLM 客户端、分类器、假模型
   sandbox/    DockerSession、FakeSession、协议
+  aci/        受限动作校验层
   contracts/  冻结的数据模型（动作、结果、状态）
   targets/    manifest 契约与加载
+frontend/     React + Vite 可视化界面
 docker/       沙箱基础镜像 Dockerfile
 scripts/      e2e / spike / LLM 冒烟脚本
-targets/      8 个靶场 manifest
+targets/      10 个靶场 manifest（8 自造 + 2 论文）
 tests/        unit / integration / contract
 docs/         接口契约、队员开工指南、设计与计划
 ```
@@ -172,5 +182,5 @@ docs/         接口契约、队员开工指南、设计与计划
 - ✅ 真 Docker + 真 DeepSeek 端到端跑通
 - ✅ 运行中取消（终止容器、阶段边界收敛 `cancelled`）、服务重启恢复（非终态标 `service_interrupted`）、worker 异常兜底（`internal_error`，工作线程不死）
 - ✅ 内置靶场命中与注入物（check.py + requirements），2 个真实论文靶场真机一次通过（PySINDy / UMAP）
-- ⏳ 队员：ACI 校验层、沙箱安全测试、前端
-- ⏳ 待补：环境清单依赖版本采集
+- ✅ ACI 受限动作校验层、沙箱安全集成测试、React + Vite 前端联调上线
+- ✅ 环境清单依赖版本采集（pip freeze）、Windows 换行符兼容及容器 PyPI 镜像支持

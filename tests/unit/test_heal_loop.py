@@ -464,3 +464,48 @@ def test_llm_agent_includes_stderr_and_skips_llm_when_command_given(tmp_path, mo
     )
     assert plan.source == "user"
     assert plan.command == ["python", "demo.py"]
+
+
+def test_heal_round_one_includes_expected_artifact_and_workspace_files(tmp_path):
+    store = RunStore(tmp_path)
+    seen_summaries: list[str] = []
+
+    def factory(request, run_dir):
+        ws = run_dir / "workspace"
+        (ws / "data").mkdir(parents=True, exist_ok=True)
+        (ws / "data" / "input.csv").write_text("name,value\na,1\n", encoding="utf-8")
+        (ws / "main.py").write_text("print('fail')\n", encoding="utf-8")
+        return FakeSandboxSession(
+            [make_result(1, "FileNotFoundError: /data/x.csv"), make_result(1, "still fails")],
+            workspace=ws,
+        )
+
+    class CapturingLLM(FakeLLM):
+        def classify_failure(self, context):
+            return "hardcoded_path"
+
+        def propose_action(self, history):
+            if history:
+                seen_summaries.append(history[0].summary)
+            return FinishRepairAction(action="finish_repair", summary="done")
+
+    runner = HarnessRunner(
+        store=store,
+        llm=CapturingLLM(),
+        sandbox_factory=factory,
+        cloner=lambda req, run_dir: "fake-commit",
+        aci_factory=FakeACI,
+    )
+    request = RunRequest(
+        repo_url="https://github.com/a/b",
+        command=["python", "main.py"],
+        expected_artifact="out.txt",
+        max_repairs=1,
+    )
+    run_id = store.create_run(request)
+    runner.run(run_id, request)
+
+    assert len(seen_summaries) == 1
+    assert "expected_artifact='out.txt'" in seen_summaries[0]
+    assert "data/input.csv" in seen_summaries[0]
+    assert "main.py" in seen_summaries[0]
