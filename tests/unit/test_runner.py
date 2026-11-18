@@ -99,7 +99,13 @@ def test_sandbox_unavailable_marks_service_interrupted(tmp_path):
 
 @pytest.mark.parametrize(
     "bad_url",
-    ["C:/Users/xxx/.ssh", "/etc/passwd", "file:///e:/java/LuminaLit", "ssh://git@h/o/r"],
+    [
+        "C:/Users/xxx/.ssh",
+        "/etc/passwd",
+        "file:///e:/java/LuminaLit",
+        "ssh://git@h/o/r",
+        "https://arxiv.org/html/2512.11143v1",  # 明知不是 Git 仓库的 host：防线御纵深
+    ],
 )
 def test_git_clone_rejects_non_https_sources(tmp_path, bad_url):
     # model_construct 绕过 schema 校验，模拟直接喂 request.json 的路径

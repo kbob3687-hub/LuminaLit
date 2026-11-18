@@ -179,6 +179,8 @@ Agent 只能拿到 `Observation`，永远拿不到 `SandboxSession`。动作 sch
 
 队列满返回 429，body 为 `{"detail": {"code": "queue_full"}}`。输入不合法返回 422，body 为 FastAPI 默认 `{"detail": [ ... ]}`，前端取 `detail[0].msg` 展示。
 
+已知非 Git 仓库的 host（`arxiv.org`、`www.arxiv.org`）在 API 边界直接 422 拒绝（`contracts/run.py` 的 `_NON_GIT_HOSTS`），`detail[0].msg` 会引导提交论文对应的代码仓库；列表只收录有明确证据的 host。前端仍应保留自己的提交前提示（两侧是互补关系：前端拦浏览器输入，后端拦直接 POST）。
+
 `GET /api/runs/{run_id}` 返回：
 
 ```json

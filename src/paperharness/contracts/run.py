@@ -5,6 +5,10 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, JsonValue, field_validator
 
+# 已知不可能是 Git 仓库的 host：收单后必然 clone_failed，在 API 边界直接拒掉。
+# 只收录有明确证据的（用户实测会贴上来的），不猜。
+_NON_GIT_HOSTS = frozenset({"arxiv.org", "www.arxiv.org"})
+
 
 def validate_repo_url(url: str) -> str:
     """安全契约：repo_url 只允许 https:// 公开 Git 地址。
@@ -27,6 +31,11 @@ def validate_repo_url(url: str) -> str:
         raise ValueError("repo_url must include a host")
     if not parsed.path or parsed.path == "/":
         raise ValueError("repo_url must point to a repository path, not a bare host")
+    if parsed.hostname.lower() in _NON_GIT_HOSTS:
+        raise ValueError(
+            f"{parsed.hostname} is not a Git repository host "
+            "(e.g. an arXiv page); submit the paper's code repository instead"
+        )
     if parsed.query or parsed.fragment:
         raise ValueError("repo_url must not include query or fragment")
     return url
