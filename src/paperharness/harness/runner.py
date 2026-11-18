@@ -15,6 +15,10 @@ from paperharness.contracts.run import (
     RunState,
     validate_repo_url,
 )
+from paperharness.harness.requirements_guard import (
+    RequirementsNotAllowed,
+    validate_requirements_file,
+)
 from paperharness.harness.store import RunStore
 from paperharness.sandbox.base import SandboxClosedError, SandboxSession, SandboxUnavailableError
 from paperharness.targets.manifest import TargetManifest
@@ -36,6 +40,10 @@ class TimeBudgetExceeded(RuntimeError):
 
 class _RunCancelled(RuntimeError):
     """用户请求取消：在阶段边界抛出，由 run() 收敛到 CANCELLED 终态。"""
+
+
+class _RequirementsRejected(RuntimeError):
+    """仓库 requirements.txt 内容不合法：整体拒绝安装，run 判失败。"""
 
 
 def git_clone(request: RunRequest, run_dir: Path) -> str:
@@ -372,6 +380,10 @@ class HarnessRunner:
             return self._fail(
                 run_id, TIME_BUDGET_EXHAUSTED, str(exc), outcome="budget_exceeded", session=session
             )
+        except _RequirementsRejected as exc:
+            return self._fail(
+                run_id, "requirement_rejected", str(exc), session=session
+            )
         except SandboxClosedError as exc:
             if self._cancel_requested(run_id):
                 return self._cancelled(run_id, session, attempts)
@@ -485,7 +497,8 @@ class HarnessRunner:
     def _run_install(self, run_id: str, request: RunRequest, session, workspace: Path, deadline: float):
         """跑依赖安装。没有 requirements.txt 时返回 None（无依赖清单，不算失败）。"""
         self.store.write_status(run_id, RunState.INSTALLING, {})
-        if not (workspace / "requirements.txt").exists():
+        req_path = workspace / "requirements.txt"
+        if not req_path.exists():
             self.store.append_event(
                 run_id,
                 RunState.INSTALLING,
@@ -493,10 +506,37 @@ class HarnessRunner:
                 "no requirements.txt, install skipped",
             )
             return None
+        # 文件内容来自任意公开仓库，与模型给的依赖串同属不可信输入：逐行校验，
+        # 任一行不合法就整体拒绝——在 pip 拿到任何执行机会之前（拒绝时零副作用）。
+        try:
+            validate_requirements_file(
+                req_path.read_text(encoding="utf-8", errors="replace")
+            )
+        except RequirementsNotAllowed as exc:
+            self.store.append_event(
+                run_id,
+                RunState.INSTALLING,
+                "install",
+                f"requirements.txt rejected: {exc}",
+                {
+                    "reason": exc.reason,
+                    "line_no": exc.line_no,
+                    "source": "requirements_file",
+                },
+            )
+            raise _RequirementsRejected(str(exc)) from exc
         session.set_network(True)
-        install = session.execute(
-            INSTALL_COMMAND, timeout_seconds=self._step_timeout(request, deadline)
-        )
+        try:
+            install = session.execute(
+                INSTALL_COMMAND, timeout_seconds=self._step_timeout(request, deadline)
+            )
+        finally:
+            try:
+                # 成败都关回断网：修复期基线是断网，execute 抛异常也不许把网留在开态。
+                # install 成功后下一步 _run_test 本来就要求断网，行为不变。
+                session.set_network(False)
+            except SandboxClosedError:
+                pass  # 会话已死，无需恢复；不能让恢复动作盖掉原始异常
         self._check_cancel(run_id)
         self.store.append_event(
             run_id,
