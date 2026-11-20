@@ -58,6 +58,12 @@ export interface EnvironmentManifest {
   command?: string[] | null;
   environment?: Record<string, string>;
   packages?: string[];
+  /**
+   * 沙箱清理失败计数（runner._record_cleanup_failures 写）。
+   * 后端仅在**有**失败时写入该键；没有这个键 = 没有清理失败记录。
+   * 契约把「容器清理失败为 0」当作硬指标，靠这里的记数才能被审计。
+   */
+  cleanup_failures?: number;
 }
 
 export interface RunEvent {

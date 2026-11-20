@@ -1,10 +1,14 @@
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect } from "react";
+import { useEffect, useId, useRef } from "react";
 import { STILL } from "../still";
 
 /**
  * 右侧抽屉：ACI 校验过程 / 自愈回环全量 / 阶段详情 / 执行计划都走这一个容器。
  * ESC 或点遮罩关闭——不再要求"必须先找左上角返回"。
+ *
+ * `aria-modal="true"` 承诺了模态，所以要配套：打开时把焦点移进抽屉、
+ * Tab 只在抽屉内循环、关闭后还给触发按钮，并用标题给 dialog 命名。
+ * 否则键盘用户打开抽屉后焦点仍留在背景，Tab 会跑出对话框。
  */
 export function Drawer({
   open,
@@ -22,14 +26,56 @@ export function Drawer({
   /** 报告 / 计划这类含长文本或 diff 的面板需要更宽，否则只能横向滚。 */
   wide?: boolean;
 }) {
+  const titleId = useId();
+  const asideRef = useRef<HTMLElement | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+  // 只依赖 open：父组件每次 render 传来的 onClose 通常是新函数，
+  // 若把它放进依赖数组，effect 会反复重跑、把焦点来回拽。
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     if (!open) return;
+    const previous = document.activeElement as HTMLElement | null;
+    closeRef.current?.focus();
+
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onCloseRef.current();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const root = asideRef.current;
+      if (!root) return;
+      const focusable = Array.from(
+        root.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (focusable.length === 0) {
+        e.preventDefault();
+        root.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      const outside = !root.contains(active);
+      if (e.shiftKey && (active === first || active === root || outside)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (active === last || outside)) {
+        e.preventDefault();
+        first.focus();
+      }
     };
+
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      previous?.focus();
+    };
+  }, [open]);
 
   return (
     <AnimatePresence>
@@ -44,6 +90,8 @@ export function Drawer({
             onClick={onClose}
           />
           <motion.aside
+            ref={asideRef}
+            tabIndex={-1}
             className={
               wide
                 ? "absolute inset-y-0 right-0 flex w-[min(760px,96vw)] flex-col border-l border-rule-hi bg-surface/95 shadow-[-30px_0_80px_-30px_rgb(0_0_0_/_0.9)] backdrop-blur-xl"
@@ -55,10 +103,14 @@ export function Drawer({
             transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
             role="dialog"
             aria-modal="true"
+            aria-labelledby={titleId}
           >
             <header className="flex items-start justify-between gap-4 border-b border-rule px-5 py-4">
               <div className="min-w-0">
-                <div className="truncate text-[13px] font-semibold tracking-[.02em] text-ink">
+                <div
+                  id={titleId}
+                  className="truncate text-[13px] font-semibold tracking-[.02em] text-ink"
+                >
                   {title}
                 </div>
                 {subtitle && (
@@ -68,6 +120,7 @@ export function Drawer({
                 )}
               </div>
               <button
+                ref={closeRef}
                 onClick={onClose}
                 className="shrink-0 cursor-pointer rounded-[6px] border border-rule-hi px-2.5 py-1 font-mono text-[11px] text-ink-muted transition-colors hover:border-ink-muted hover:text-ink"
               >

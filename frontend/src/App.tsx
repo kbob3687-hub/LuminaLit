@@ -89,8 +89,10 @@ export default function App() {
    * 通了就是 live，不通就回放。这样不用逼用户记 ?live=1 这种参数。
    * `?demo=1` / `?live=1` 仍然可以强行覆盖。
    *
-   * 注意不要用 VITE_API_BASE_URL 直连 8000：那会绕过 vite proxy 变成跨域，
-   * 而后端没有 CORS 中间件，浏览器会直接拦掉。留空走相对路径才对。
+   * 注意不要用 VITE_API_BASE_URL 直连 8000：后端 app/api.py 挂了
+   * CORSMiddleware，默认只允许 5173/4173 及 PAPERHARNESS_CORS_ORIGINS 配置的
+   * origin；部署到白名单外域名时直连会被拦。留空走 vite.config.ts 的同源
+   * proxy 最稳，不用赌部署域名在不在白名单里。
    */
   const apiBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
   const wantReplay = q.get("demo") === "1" || import.meta.env.VITE_DEMO === "1";
@@ -178,8 +180,10 @@ export default function App() {
     setPickError(null);
 
     if (!demo) {
-      // 契约 §4.1：POST /api/runs 只接受 repo_url，202 返回 run_id；
-      // revision 用来命中同一仓库下的具体靶场，见 src/targets.ts 的说明。
+      // 契约 §4.1：repo_url 必填，revision / command / expected_artifact /
+      // python_version / timeout_seconds / max_repairs 均可选，202 返回 run_id。
+      // 这里只提交 repo_url + revision：命中内置靶场时计划来自后端 manifest
+      //（runner.py:546-555）；显式传 command 反而会改走 LLM 生成计划。
       setCreating(true);
       try {
         const res = await createRun({ repo_url: p.repo, revision: p.revision });

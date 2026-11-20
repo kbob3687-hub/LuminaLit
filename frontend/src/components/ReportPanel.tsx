@@ -411,6 +411,12 @@ function EnvBody({ env }: { env: EnvironmentManifest }) {
       "command",
       env.command && env.command.length > 0 ? env.command.join(" ") : "（没有规划出运行命令）",
     ],
+    [
+      "cleanup_failures",
+      env.cleanup_failures === undefined
+        ? "0（后端仅在有清理失败时写入该字段）"
+        : String(env.cleanup_failures),
+    ],
   ];
 
   return (

@@ -3,11 +3,13 @@
   ⚠️ 这是「纯前端 mock 演示文件」，不连后端、不发任何请求。
      用途：视觉与交互定调，供 review / 离线演示。
      真实前端在 frontend/src（React + TS），接口链路：
-       POST /api/runs {repo_url}  →  202 {run_id}
+       POST /api/runs {repo_url, revision?, command?, expected_artifact?,
+                       python_version?, timeout_seconds?, max_repairs?} → 202 {run_id}
        GET  /api/runs/{id}        →  1000ms 轮询
        GET  /api/runs/{id}/events?after=<seq>
      本文件里的 arXiv 解析与两套剧本只是演示层，不代表后端能力：
-     契约 RunRequest 只有 repo_url，arXiv 链接提交给真接口会 clone_failed。
+     后端 contracts/run.py 已把 arxiv.org 列入非 Git host，提交给真接口会在
+     API 边界直接返回 422，不会走到 clone_failed。
 -->
 <html lang="zh-CN">
 <head>
