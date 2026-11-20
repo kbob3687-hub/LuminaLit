@@ -140,8 +140,12 @@ export function RunScene({
     [events, stages, status?.state, tick],
   );
 
+  // rows 是全量（buildRows 不再截断），统计直接用它；只有渲染才截最近 80 条，
+  // 免得几千次 ACI 调用把 DOM 拖垮。被截掉的仍计入上面的数字。
   const blockedCount = rows.filter((r) => r.blocked).length;
   const reviewCount = rows.filter((r) => r.name !== "install" && r.name !== "test").length;
+  const visibleRows = rows.slice(-80);
+  const hiddenRows = rows.length - visibleRows.length;
   const isFailed = state === "failed";
 
   /**
@@ -463,7 +467,6 @@ export function RunScene({
         <div className="flex gap-9">
           <Stat value={reviewCount} label="ACI 审查" />
           <Stat value={blockedCount} label="拦截" tone="bad" />
-          <Stat value={0} label="逃逸" tone="good" />
         </div>
       </section>
 
@@ -550,7 +553,7 @@ export function RunScene({
           )}
 
           <AnimatePresence initial={false}>
-            {rows.map((r) => (
+            {visibleRows.map((r) => (
               <motion.button
                 key={r.seq}
                 onClick={() => setPanel({ type: "aci", seq: r.seq })}
@@ -565,15 +568,22 @@ export function RunScene({
           </AnimatePresence>
 
           {/* 动作少不等于卡住：把"还有多少条非动作事件"摆出来，省得以为是没跑 */}
-          {rows.length > 0 && events.length > rows.length && (
+          {rows.length > 0 && (
             <div className="mt-3 flex flex-wrap items-baseline gap-x-2 gap-y-1 border-t border-white/[.05] pt-3 font-mono text-[10.5px] leading-relaxed text-ink-muted">
-              <span>
-                另有 <b className="text-ink-mid">{events.length - rows.length}</b> 条事件不是动作
-              </span>
-              <span className="text-ink-muted/60">
-                （clone、计划解析、阶段迁移、熔断与收尾清理），可在上方阶段条与自愈回环里逐格查看——
-                动作流本来就只收动作。
-              </span>
+              {events.length > rows.length && (
+                <span>
+                  另有 <b className="text-ink-mid">{events.length - rows.length}</b> 条事件不是动作
+                  <span className="text-ink-muted/60">
+                    （clone、计划解析、阶段迁移、熔断与收尾清理），可在上方阶段条与自愈回环里逐格查看——
+                    动作流本来就只收动作。
+                  </span>
+                </span>
+              )}
+              {hiddenRows > 0 && (
+                <span className="text-ink-muted/60">
+                  动作共 {rows.length} 条，这里只画最近 {visibleRows.length} 条（上方统计仍是全量）。
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -717,6 +727,9 @@ function ActionLine({ row }: { row: ActionRow }) {
   return (
     <>
       <motion.div
+        // App.tsx 的粒子 effect 靠 [data-blocked='1'] 找拦截行；之前没有任何
+        // 元素设置这个属性，那段每 1.5s 的查询永远空转。这里补上让它生效。
+        data-blocked={row.blocked ? "1" : undefined}
         whileHover={{ x: 3, backgroundColor: "rgb(255 255 255 / .04)" }}
         transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
         className={clsx(

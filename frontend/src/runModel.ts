@@ -39,10 +39,12 @@ export function isActionEvent(e: RunEvent): boolean {
   return ACTION_SET.has(e.kind);
 }
 
-/** 拦截标签：优先用后端显式给的 failure_label，老事件从 summary 前缀取。 */
+/**
+ * 拦截标签：后端没有 `failure_label` 字段（runner.py 从不写），标签词干来自
+ * message 前缀（`path_escape:../../etc/passwd` → `path_escape`，见 aci/errors.py）。
+ * 旧代码先读 `e.data.failure_label`，那是个永远读不到的分支。
+ */
 export function labelOfEvent(e: RunEvent): string {
-  const explicit = e.data?.failure_label;
-  if (typeof explicit === "string" && explicit) return explicit;
   return labelOf(e.message);
 }
 
@@ -57,26 +59,56 @@ export function blockLabelText(label: string): string {
 }
 
 /**
- * 事件里可用于展示的"目标"。
+ * 动作事件里后端结构化下发的参数。
  *
- * 后端目前只回 `{ok, exit_code}` + 一句 Observation（契约 §7），动作参数
- * 并不单列。所以这里从 summary 里把目标读回来——**读不出来就返回空串**，
- * 不编一个看着像真的路径。
+ * runner.py:904-922 写的是**扁平字段**：`{ok, exit_code, path?, requirement?,
+ * query?, env_name?}`，并没有 `request` 这个嵌套对象。旧代码只读
+ * `e.data.request`，于是永远拿到空对象，只能退而用英文正则从 summary 里抠，
+ * `search_text`("3 matches") / `run_smoke_test`("smoke test exited with 0") /
+ * `finish_repair`（模型自由文本）这三类在动作流「目标」列恒定空白。
+ *
+ * 保留 `data.request` 作为历史 run 的兼容读法，最后才是 summary 正则。
  */
+export function actionParams(e: RunEvent): Record<string, string> {
+  const out: Record<string, string> = {};
+  const d = (e.data ?? {}) as Record<string, unknown>;
+  for (const key of ["path", "requirement", "query", "env_name"] as const) {
+    const v = d[key];
+    if (typeof v === "string" && v) out[key] = v;
+  }
+  // 早期版本（或外部构造的事件）可能带 request 嵌套对象
+  const nested = d.request;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    for (const [k, v] of Object.entries(nested as Record<string, unknown>)) {
+      if (typeof v === "string" || typeof v === "number") out[k] = String(v);
+    }
+  }
+  return out;
+}
+
+/** 事件里可用于展示的"目标"：优先用后端结构化字段，读不出来就返回空串。 */
 export function targetOf(e: RunEvent): string {
-  const r = (e.data?.request ?? {}) as Record<string, unknown>;
-  if (typeof r.path === "string" && r.path) {
-    const start = typeof r.start_line === "number" && r.start_line > 1 ? `:${r.start_line}` : "";
-    return `${r.path}${start}`;
+  const p = actionParams(e);
+  if (p.path) {
+    // start_line 只在早期 request 嵌套里出现过；后端扁平事件不下发它，
+    // 没有就不拼，不编一个行号出来。
+    const start = p.start_line && Number(p.start_line) > 1 ? `:${p.start_line}` : "";
+    return `${p.path}${start}`;
   }
-  if (typeof r.requirement === "string" && r.requirement) return r.requirement;
-  if (typeof r.name === "string" && r.name) {
-    return typeof r.value === "string" ? `${r.name}=${r.value}` : r.name;
+  if (p.requirement) return p.requirement;
+  if (p.query) return `搜索 "${p.query}"`;
+  if (p.env_name) {
+    // 后端只下发变量名（env_name），值不单列。Observation 的 message 是
+    // `set FOO=1` 这种真实文本，从那里读回值；读不到就只显示变量名。
+    const set = /^set (\S+=.+)$/.exec(e.message);
+    if (set && set[1].startsWith(`${p.env_name}=`)) return set[1];
+    return p.value ? `${p.env_name}=${p.value}` : p.env_name;
   }
-  if (typeof r.summary === "string" && r.summary) return `"${r.summary}"`;
+  if (p.name) return p.value ? `${p.name}=${p.value}` : p.name;
+  if (p.summary) return `"${p.summary}"`;
 
   const m = e.message;
-  // 越界时回显模型给的原始串（errors.path_escape 的格式，逐字固定）。
+  // 老 run 的兜底：越界时回显模型给的原始串（errors.path_escape 的固定格式）。
   const escape = /^path_escape:(.*)$/.exec(m);
   if (escape) return escape[1];
   const env = /^env_not_allowed:(.*)$/.exec(m);
@@ -509,7 +541,10 @@ export function buildRows(events: RunEvent[]): ActionRow[] {
       reason: blocked ? e.message : undefined,
     });
   }
-  return rows.slice(-80);
+  // 返回全量：统计（拦截数、审查数、"另有 N 条事件"）必须基于完整动作表，
+  // 否则超过 80 条后 Hero 数字会停滞甚至倒退，被丢掉的动作还会被算进
+  // 「不是动作」里。渲染要截断由调用方做（RunScene 只画最近 80 条）。
+  return rows;
 }
 
 // ─────────────────────────────────────────────────── ACI 校验轨迹
