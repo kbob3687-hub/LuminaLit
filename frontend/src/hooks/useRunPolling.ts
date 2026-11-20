@@ -3,6 +3,8 @@ import { getEvents, getRun } from "../api";
 import { TERMINAL, type RunEvent, type RunState, type RunStatus } from "../types";
 
 const POLL_MS = 1000; // 契约 §4.2
+/** 单次请求失败后的重试间隔：2s → 4s → 8s 封顶，成功一次即归零。 */
+const RETRY_MAX_MS = 8000;
 
 interface Options {
   /** 演示模式：不请求后端，用给定的假数据驱动。 */
@@ -41,32 +43,54 @@ export function useRunPolling(runId: string | null, opts: Options = {}) {
     let cancelled = false;
     let timer: number | null = null;
     let cursor = 0;
+    let retryMs = 0;
 
     forced.current = false;
     setEvents([]);
     setStatus(null); // 换 run 必须清空旧状态，否则新 run 一进场就显示上一轮的绿
     setError(null);
 
+    /**
+     * 两个请求必须分开看结果：真沙箱一次 run 要几十秒，期间后端一次 5xx、
+     * 代理抖动或网络瞬断都很常见。旧写法用 Promise.all + catch 里直接
+     * `return`，于是 `getRun` 明明成功也拿不到 state，而且**不再排下一次
+     * timer**，界面永久停在最后一帧 —— 看上去和「任务卡住」一模一样。
+     * 现在失败也继续调度（带退避），状态和事件各自独立更新。
+     */
     const tick = async () => {
       if (cancelled || forced.current) return;
-      let next: RunStatus;
-      try {
-        const [s, ev] = await Promise.all([getRun(runId), getEvents(runId, cursor)]);
-        // 请求在途时可能已经被 cleanup 掉，这里必须再查一次
-        if (cancelled || forced.current) return;
-        next = s;
-        setStatus(s);
-        if (ev.length > 0) {
-          cursor = ev[ev.length - 1].sequence;
-          setEvents((prev) => [...prev, ...ev]);
-        }
-      } catch (e) {
-        if (cancelled) return;
-        setError(e instanceof Error ? e.message : String(e));
+      const [statusRes, eventsRes] = await Promise.allSettled([
+        getRun(runId),
+        getEvents(runId, cursor),
+      ]);
+      // 请求在途时可能已经被 cleanup 掉，这里必须再查一次
+      if (cancelled || forced.current) return;
+
+      let next: RunStatus | null = null;
+      if (statusRes.status === "fulfilled") {
+        next = statusRes.value;
+        setStatus(next);
+      }
+      if (eventsRes.status === "fulfilled" && eventsRes.value.length > 0) {
+        const ev = eventsRes.value;
+        cursor = ev[ev.length - 1].sequence;
+        setEvents((prev) => [...prev, ...ev]);
+      }
+
+      const failed = statusRes.status === "rejected" || eventsRes.status === "rejected";
+      if (failed) {
+        const reason = statusRes.status === "rejected" ? statusRes.reason : eventsRes.status === "rejected" ? eventsRes.reason : null;
+        setError(reason instanceof Error ? reason.message : String(reason));
+        // 只有拿到了终态才允许停；请求失败不等于任务结束。
+        retryMs = retryMs === 0 ? POLL_MS * 2 : Math.min(retryMs * 2, RETRY_MAX_MS);
+        timer = window.setTimeout(tick, retryMs);
         return;
       }
+
+      retryMs = 0;
+      setError(null);
       // 终态停轮询
-      if (TERMINAL.has(next.state)) return;
+      if (next && TERMINAL.has(next.state)) return;
       timer = window.setTimeout(tick, POLL_MS);
     };
 
