@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import clsx from "clsx";
 import { ApiError, getEnvironment, getPatch, getReport } from "../api";
+import { failureText } from "../runModel";
 import type { EnvironmentManifest, RunStatus } from "../types";
 
 /**
@@ -142,7 +143,7 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
               </span>
               {result.failure_category && (
                 <span className="rounded-[4px] border border-reject/40 bg-reject/[.08] px-1.5 py-[1px] font-mono text-[10px] text-reject">
-                  {result.failure_category}
+                  {failureText(result.failure_category)}
                 </span>
               )}
               {result.resolved_revision && (

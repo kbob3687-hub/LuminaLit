@@ -1,6 +1,6 @@
 import { motion } from "motion/react";
 import clsx from "clsx";
-import type { LoopView } from "../runModel";
+import { failureText, type LoopView } from "../runModel";
 import type { RunState } from "../types";
 
 const SHORT: Record<string, string> = {
@@ -77,9 +77,9 @@ export function LoopStrip({
                 ? "border-rule-hi text-ink-mid"
                 : "border-warn/40 bg-warn/[.08] text-warn",
             )}
-            title="后端分类器给出的 failure_class，前端原样展示，不做翻译猜测"
+            title="后端分类器给出的 failure_class；括号内保留后端原名以便对照日志"
           >
-            {current.failureClass}
+            {failureText(current.failureClass)}
           </span>
           <span className="rounded-[5px] border border-rule-hi px-2 py-[3px] font-mono text-[10.5px] text-ink-mid">
             {current.phase === "install" ? "安装阶段失败" : "测试阶段失败"}

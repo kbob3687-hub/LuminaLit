@@ -5,9 +5,8 @@ import {
   type RunEvent,
   type RunState,
   type RunStatus,
-  labelOf,
 } from "../types";
-import type { AciTrace, LoopView, StageView } from "../runModel";
+import { failureText, type AciTrace, type LoopView, type StageView } from "../runModel";
 import { dur } from "./StageTrack";
 
 const labelZh = (label: string | null): string =>
@@ -197,7 +196,7 @@ export function LoopPanel({
           <div className="flex items-center gap-2.5 border-b border-rule px-3.5 py-2.5">
             <span className="font-mono text-[11px] text-ink">第 {r.round} 轮</span>
             <span className="rounded-[4px] border border-warn/40 bg-warn/[.07] px-1.5 py-[1px] font-mono text-[10px] text-warn">
-              {r.failureClass}
+              {failureText(r.failureClass)}
             </span>
             <span className="font-mono text-[10px] text-ink-muted">
               {r.phase === "install" ? "安装失败" : "测试失败"}
@@ -325,7 +324,7 @@ export function PlanPanel({ status }: { status: RunStatus | null }) {
         <KV k="attempts" v={result ? String(result.attempts) : "—"} />
         <KV
           k="failure_category"
-          v={result?.failure_category ? `${labelOf(result.failure_category)}` : "—"}
+          v={result?.failure_category ? failureText(result.failure_category) : "—"}
         />
       </div>
       <p className="text-[10.5px] leading-relaxed text-ink-muted">

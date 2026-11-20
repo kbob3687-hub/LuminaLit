@@ -7,7 +7,7 @@
  * 这里改成：某阶段只有真的收到过该阶段的事件、且已经离开它，才算完成。
  */
 
-import { labelOf, TERMINAL, type RunEvent, type RunState } from "./types";
+import { FAILURE_LABELS, labelOf, TERMINAL, type RunEvent, type RunState } from "./types";
 
 export const ACTIONS = [
   "read_file",
@@ -48,6 +48,12 @@ export function labelOfEvent(e: RunEvent): string {
 
 export function isBlockedEvent(e: RunEvent): boolean {
   return isActionEvent(e) && BLOCK_LABELS.has(labelOfEvent(e));
+}
+
+/** 拦截标签的中文展示（带后端原名，便于对照日志）；未收录的原样返回。 */
+export function blockLabelText(label: string): string {
+  const zh = (FAILURE_LABELS as Record<string, string>)[label];
+  return zh ? `${zh}（${label}）` : label;
 }
 
 /**
@@ -112,28 +118,40 @@ export const STAGE_ORDER: { id: RunState | "succeeded"; label: string }[] = [
   { id: "succeeded", label: "成功" },
 ];
 
-/** 失败类别 → 它发生在哪个阶段（用来把断掉的那一格标红）。 */
+/**
+ * 失败类别 → 它发生在哪个阶段（用来把断掉的那一格标红）。
+ *
+ * 键必须是后端真的会写进 `failure_category` 的值。上一版列的
+ * missing_module / missing_attribute / import_error / syntax_error /
+ * runtime_error / assertion_failed / artifact_missing 后端从不产生
+ * （它们看起来像 stderr 的错误类型名，不是类别名），结果所有真实类别
+ * 都映射不上，只能退到最后有事件的那格，红格经常标错地方。
+ *
+ * 映射不出来（timeout / internal_error / none / unknown 这类跨阶段或
+ * 兜底类别）就返回 null，交给 buildStages 的 lastWithEvents 兜底，不硬猜。
+ */
 function stageOfFailure(category: string | null | undefined): RunState | null {
   if (!category) return null;
   const stem = labelOf(category);
   switch (stem) {
     case "clone_failed":
       return "preparing";
+    case "missing_run_command":
+    case "invalid_expected_artifact":
+    case "llm_unavailable":
+      return "planning";
     case "install_failed":
     case "requirement_rejected":
+    case "version_conflict":
       return "installing";
     case "smoke_test_failed":
     case "missing_dependency":
-    case "missing_module":
-    case "missing_attribute":
-    case "import_error":
-    case "syntax_error":
-    case "runtime_error":
-    case "assertion_failed":
-    case "artifact_missing":
+    case "hardcoded_path":
+    case "cuda_only":
+    case "deprecated_api":
+    case "missing_private_data":
+    case "requires_gpu":
       return "testing";
-    case "llm_unavailable":
-      return "planning";
     default:
       return null;
   }
@@ -485,7 +503,7 @@ export function buildRows(events: RunEvent[]): ActionRow[] {
           ? `exit ${code}`
           : e.message.slice(0, 40)
         : blocked
-          ? labelOfEvent(e)
+          ? blockLabelText(labelOfEvent(e))
           : e.message.slice(0, 52),
       blocked,
       reason: blocked ? e.message : undefined,
@@ -644,21 +662,37 @@ export interface FailureExplain {
 /**
  * 已知失败类别 → 一句话结论。类别名与后端逐字相同，不做映射。
  *
- * 键必须覆盖后端所有会写进 `failure_category` 的值：`_fail` 的四个直接类别
- * （clone_failed / missing_run_command / requirement_rejected / time_budget_exceeded）
- * 加上 classifier 的八类靶场分类里的七个（`none` 不会作为失败出现）。
- * 漏一个，界面就只能说"没有对应的解释文本"——那等于把后端已经给出的结论吞掉。
+ * 键必须覆盖后端所有会写进 `failure_category` 的值。来源不只 `_fail`：
+ *   - `_fail` 直接类别：clone_failed / missing_run_command /
+ *     invalid_expected_artifact / service_interrupted / requirement_rejected /
+ *     timeout / smoke_test_failed / install_failed
+ *   - 常量兜底：TIME_BUDGET_EXHAUSTED、LLM_UNAVAILABLE
+ *   - worker 未捕获异常兜底：internal_error（app/worker.py:66）
+ *   - 分类器返回值：classifier 的 7 类 + `none`（规则表没命中时模型的合法
+ *     取值）+ `unknown`（分类失败或模型返回非法值）
+ *
+ * 上一版漏了 invalid_expected_artifact / timeout / internal_error /
+ * unknown / none 五个，注释还写「`none` 不会作为失败出现」——实测 fake
+ * 沙箱跑 paper-pysindy 时 `failure_category` 就是 `none`，界面显示
+ * 「后端回了失败类别，但没有对应的解释文本」。漏一个就等于把后端已经
+ * 给出的结论吞掉。
  *
  * 写这些句子时守同一条规矩：**只陈述后端凭什么这么判**（命中哪条规则、
- * 哪一步退出码非零），不替它分析成因。
+ * 哪一步退出码非零、哪个兜底分支），不替它分析成因。
  */
-const FAILURE_VERDICTS: Record<string, string> = {
+export const FAILURE_VERDICTS: Record<string, string> = {
   clone_failed: "克隆失败：git clone 直接返回非零退出码，没有进入安装与测试阶段。",
   missing_run_command:
     "没能确定运行命令：仓库里没有可识别的入口，规划阶段拿到的命令是空的，因此没有执行任何东西。",
+  invalid_expected_artifact:
+    "期望产物路径不合法：后端要求它是 workspace 内的相对路径，规划阶段给出的值不满足，因此没有进入安装与测试。",
+  timeout:
+    "沙箱会话提前关闭：后端在等待命令返回时收到 SandboxClosedError，把这次运行记为 timeout。",
   smoke_test_failed: "测试命令跑完了，但退出码非零，产物校验没过。",
   install_failed: "依赖没装上：requirements 里的包在沙箱内装不下来，或不在允许的依赖清单里。",
   requirement_rejected: "依赖字符串被校验层拦下（含命令分隔符等），这一步没有产生副作用。",
+  internal_error:
+    "工作线程遇到未分类的异常：后端把 runner 抛出的异常兜底记成 internal_error，只留了异常类型和短消息。",
   missing_dependency:
     "缺依赖导致 import 失败：stderr 命中 ModuleNotFoundError / ImportError（自愈回环开着时会先尝试补齐）。",
   version_conflict:
@@ -674,7 +708,50 @@ const FAILURE_VERDICTS: Record<string, string> = {
   llm_unavailable: "生成运行计划时模型不可用（网关或配额），没进入执行阶段。",
   service_interrupted: "沙箱不可用或后端服务中断，本次运行被打断，可重试。",
   time_budget_exceeded: "整体墙钟预算耗尽被强制结束——通常是某一步一直没有返回。",
+  unknown:
+    "分类器没能给出有效结论：模型返回了不在允许清单里的值，或分类调用本身失败，后端统一记成 unknown。",
+  none:
+    "分类器没能把这次失败归进任何已知类别：规则表未命中，且失败上下文里没有可匹配的错误特征（例如退出码为 0、没有 stderr）。",
 };
+
+/** 类别 → 中文短标签，供标题、回环 chip、报告摘要复用（括号内保留后端原名）。 */
+const FAILURE_SHORT: Record<string, string> = {
+  clone_failed: "克隆失败",
+  missing_run_command: "无运行命令",
+  invalid_expected_artifact: "产物路径非法",
+  timeout: "沙箱超时",
+  smoke_test_failed: "测试未通过",
+  install_failed: "安装失败",
+  requirement_rejected: "依赖被拒",
+  internal_error: "内部异常",
+  missing_dependency: "缺依赖",
+  version_conflict: "版本冲突",
+  hardcoded_path: "硬编码路径",
+  cuda_only: "需要 CUDA",
+  deprecated_api: "旧 API",
+  missing_private_data: "私有数据缺失",
+  requires_gpu: "需要 GPU",
+  llm_unavailable: "模型不可用",
+  service_interrupted: "服务中断",
+  time_budget_exceeded: "预算耗尽",
+  unknown: "无法分类",
+  none: "未归类",
+};
+
+/**
+ * 界面上展示失败类别时统一走这里。
+ *
+ * `short=true` 只给中文短标签（Hero 大标题里放不下括号原名）；默认返回
+ * 「中文（后端原名）」，方便对照后端与日志。未收录的类别原样返回，
+ * 不编一个看着像真的中文名。
+ */
+export function failureText(category: string | null | undefined, short = false): string {
+  if (!category) return "";
+  const stem = labelOf(category);
+  const label = FAILURE_SHORT[stem];
+  if (!label) return stem;
+  return short ? label : `${label}（${stem}）`;
+}
 
 const FAILURE_DETAILS: Record<string, string> = {
   smoke_test_failed:
@@ -809,10 +886,16 @@ export function explainFailure(category: string, events: RunEvent[]): FailureExp
     };
   }
 
+  // 兜底只该在后端新增了类别、前端还没来得及收录时出现：把类别本身说出来，
+  // 不留「没有对应的解释文本」这种把结论吞掉的句子。
+  const verdict =
+    FAILURE_VERDICTS[category] ??
+    `后端给出的失败类别是「${failureText(category) || category}」，前端还没有收录它的解释文本。`;
+
   const last = lastStderr(events);
   if (last) {
     return {
-      verdict: FAILURE_VERDICTS[category] ?? "后端回了失败类别，但没有对应的解释文本。",
+      verdict,
       detail:
         "下面是这次运行里最后一条非零退出动作的 stderr 尾段（后端在 install / test 事件里带 stderr_tail），" +
         "判断依据就在这段原文里，界面不做二次解读。",
@@ -823,7 +906,7 @@ export function explainFailure(category: string, events: RunEvent[]): FailureExp
   }
 
   return {
-    verdict: FAILURE_VERDICTS[category] ?? "后端回了失败类别，但没有对应的解释文本。",
+    verdict,
     detail:
       FAILURE_DETAILS[category] ??
       "这次失败的事件里没有带 stderr_tail（只有 install / test 动作会带），后端也只记了失败类别，" +

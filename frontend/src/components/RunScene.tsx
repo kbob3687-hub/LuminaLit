@@ -9,6 +9,7 @@ import {
   buildRows,
   buildStages,
   explainFailure,
+  failureText,
   isActionEvent,
   isBlockedEvent,
   type ActionRow,
@@ -148,7 +149,7 @@ export function RunScene({
     if (state === "failed")
       return {
         text: "复现失败",
-        accent: labelOf(status?.result?.failure_category ?? "") || "未分类",
+        accent: failureText(status?.result?.failure_category, true) || "未分类",
       };
     if (state === "cancelled") return { text: "已取消", accent: "用户终止" };
     if (state === "repairing")
@@ -386,7 +387,7 @@ export function RunScene({
           {isFailed && (
             <div className="mt-3 max-w-[74ch] rounded-[9px] border border-reject/30 bg-reject/[.055] px-3.5 py-2.5">
               <div className="font-mono text-[10px] tracking-[.16em] text-reject/85 uppercase">
-                失败原因 · {failureCategory || "未分类"}
+                失败原因 · {failureText(failureCategory) || "未分类"}
               </div>
               <p className="mt-1 text-[12.5px] leading-relaxed text-ink">{failExplain.verdict}</p>
               <p className="mt-1.5 text-[11.5px] leading-relaxed text-ink-muted">
