@@ -2,19 +2,20 @@ import { useMemo } from "react";
 import { motion } from "motion/react";
 import dagre from "@dagrejs/dagre";
 import type { RunState } from "../types";
+import type { ActionRow, LoopView, StageView } from "../runModel";
 
 /**
  * 执行拓扑图 —— 用 dagre 自动布局。
  *
- * 为什么自动布局：手算坐标改一次错一次，而且节点一多就排不下。
- * dagre 只负责「谁在哪」；视觉（光环/粒子/发光）仍由这里画。
+ * 图的**结构**是固定的（拉取 → 安装 → 测试 → 诊断 → 门岗 → 修复 → 报告），
+ * 但节点状态、副标题、边标签、以及"被拦截动作"的卫星节点，全部来自后端事件
+ * （buildStages / buildLoop / buildRows）。
  *
- * 图的形状：
- *   拉取 → 安装 → 测试 ──✕ exit 1──→ 诊断 ──→ ACI 门岗 ──→ 修复
- *                        ↑                                    │
- *                        └──────── 修复回环（虚线弧）─────────┘
- *   修复 ──→ 复现报告（成功路径）
- *   ACI 门岗 ──✕──→ 两个被拦截的动作（卫星）
+ * 这里不允许按 `state` 在状态链上的索引去猜"已完成"：runModel.ts 开头已经
+ * 写明那条写法会在 run 一开始就把前面所有阶段点亮成绿色。也不允许写死演示
+ * 数据——上一版把 `exit 1` / `审查 8 次` / `第 1 轮` / `修复回环 ×1` 和两个
+ * 固定的红色拦截节点（`../../etc/passwd`）画进了每一次运行，包括零拦截的
+ * clean-example。界面只陈述后端证明过的事实。
  */
 
 /** 截图模式：关闭入场动画，避免无头渲染抓到半透明中间帧。 */
@@ -40,34 +41,16 @@ interface EdgeDef {
   to: string;
   kind: "flow" | "fail" | "loop" | "ok" | "block";
   label?: string;
+  /** 未发生的条件分支画暗色，不冒充本次运行的真实结果。 */
+  dim?: boolean;
 }
 
-/** 由后端状态推导每个节点的色调。 */
-function buildTones(state: RunState): Record<string, Tone> {
-  const order: RunState[] = [
-    "queued",
-    "preparing",
-    "planning",
-    "installing",
-    "testing",
-    "diagnosing",
-    "repairing",
-    "succeeded",
-  ];
-  const idx = state === "failed" || state === "cancelled" ? 6 : Math.max(0, order.indexOf(state));
-  const failed = state === "failed";
-
-  return {
-    clone: idx >= 1 ? "done" : "active",
-    install: idx >= 4 ? "done" : idx >= 3 ? "active" : "todo",
-    test: state === "succeeded" ? "done" : idx >= 5 || failed ? "bad" : idx >= 4 ? "active" : "todo",
-    diag: idx >= 6 ? "done" : idx >= 5 ? "active" : "todo",
-    gate: idx >= 6 ? "gate" : "todo",
-    repair: idx >= 6 && state !== "succeeded" ? "active" : idx >= 7 ? "done" : "todo",
-    report: state === "succeeded" ? "done" : "todo",
-    block1: "bad",
-    block2: "bad",
-  };
+interface Graph {
+  nodes: NodeDef[];
+  edges: EdgeDef[];
+  blocks: NodeDef[];
+  /** 真实被拦总数（卫星节点最多画 2 个，但徽标要说全量）。 */
+  blockedTotal: number;
 }
 
 const TONE: Record<Tone, { line: string; fill: string; glow: string }> = {
@@ -78,39 +61,8 @@ const TONE: Record<Tone, { line: string; fill: string; glow: string }> = {
   gate: { line: "#9db4ff", fill: "rgba(108,143,255,.22)", glow: "rgba(108,143,255,.9)" },
 };
 
-/** 图定义：节点 + 边。改流程只改这里，坐标由 dagre 算。 */
-const NODES: NodeDef[] = [
-  { id: "clone", label: "拉取仓库", sub: "git clone", tone: "todo" },
-  { id: "install", label: "安装依赖", sub: "pip install", tone: "todo" },
-  { id: "test", label: "运行测试", sub: "exit 1", tone: "todo" },
-  { id: "diag", label: "诊断失败", sub: "missing_dep", tone: "todo" },
-  { id: "gate", label: "ACI 门岗", sub: "审查 8 次", tone: "todo", big: true },
-  { id: "repair", label: "修复动作", sub: "第 1 轮", tone: "todo" },
-  { id: "report", label: "复现报告", sub: "待生成", tone: "todo" },
-  { id: "block1", label: "read_file", sub: "../../etc/passwd", tone: "bad", satellite: true },
-  { id: "block2", label: "install_req", sub: "numpy; rm -rf /", tone: "bad", satellite: true },
-];
-
-const EDGES: EdgeDef[] = [
-  { from: "clone", to: "install", kind: "flow" },
-  { from: "install", to: "test", kind: "flow" },
-  { from: "test", to: "diag", kind: "fail", label: "✕ exit 1" },
-  { from: "diag", to: "gate", kind: "flow" },
-  { from: "gate", to: "repair", kind: "flow" },
-  { from: "repair", to: "report", kind: "ok", label: "通过" },
-  { from: "repair", to: "test", kind: "loop", label: "修复回环 ×1" },
-  { from: "gate", to: "block1", kind: "block" },
-  { from: "gate", to: "block2", kind: "block" },
-];
-
-interface Props {
-  state: RunState;
-  blockedCount: number;
-  onSelectStage?: (id: RunState | "succeeded") => void;
-  onSelectGate?: () => void;
-}
-
-const NODE_TO_STATE: Record<string, RunState | "succeeded"> = {
+/** 节点 → 它由哪个阶段的状态证明。 */
+const NODE_TO_STAGE: Record<string, RunState | "succeeded"> = {
   clone: "preparing",
   install: "installing",
   test: "testing",
@@ -120,8 +72,119 @@ const NODE_TO_STATE: Record<string, RunState | "succeeded"> = {
   report: "succeeded",
 };
 
-export function FlowGraph({ state, blockedCount, onSelectStage, onSelectGate }: Props) {
-  const tones = useMemo(() => buildTones(state), [state]);
+interface Props {
+  state: RunState;
+  stages: StageView[];
+  loop: LoopView;
+  rows: ActionRow[];
+  onSelectStage?: (id: RunState | "succeeded") => void;
+  onSelectGate?: () => void;
+}
+
+/**
+ * 由事件推导整张图。唯一的数据来源是 buildStages / buildLoop / buildRows，
+ * 没有从 state 索引或写死字符串里"推"出来的结论。
+ */
+export function buildGraph({ state, stages, loop, rows }: Omit<Props, "onSelectStage" | "onSelectGate">): Graph {
+  const statusOf = (id: RunState | "succeeded"): StageView["status"] =>
+    stages.find((s) => s.id === id)?.status ?? "todo";
+  const toneOf = (id: RunState | "succeeded"): Tone => {
+    const st = statusOf(id);
+    if (st === "bad") return "bad";
+    if (st === "active") return "active";
+    if (st === "done") return "done";
+    return "todo";
+  };
+
+  // 最后一次测试的执行结果：rows 里 test 行的 result 是 `exit N` 或事件原文。
+  const lastTest = [...rows].reverse().find((r) => r.name === "test");
+  const testSub = lastTest ? lastTest.result.slice(0, 18) : "待运行";
+  const exitMatch = lastTest ? /^exit (-?\d+)$/.exec(lastTest.result) : null;
+  const testFailed = statusOf("testing") === "bad";
+
+  // 诊断结论、门岗审查次数、修复轮数都来自真实事件。
+  const lastRound = loop.rounds.at(-1) ?? null;
+  const reviewCount = rows.filter((r) => r.name !== "install" && r.name !== "test").length;
+  const roundCount = loop.rounds.length;
+  const hasReport = state === "succeeded";
+
+  const nodes: NodeDef[] = [
+    { id: "clone", label: "拉取仓库", sub: "git clone", tone: toneOf("preparing") },
+    { id: "install", label: "安装依赖", sub: "pip install", tone: toneOf("installing") },
+    { id: "test", label: "运行测试", sub: testSub, tone: toneOf("testing") },
+    {
+      id: "diag",
+      label: "诊断失败",
+      sub: lastRound ? lastRound.failureClass.slice(0, 18) : "待诊断",
+      tone: toneOf("diagnosing"),
+    },
+    {
+      id: "gate",
+      label: "ACI 门岗",
+      sub: `审查 ${reviewCount} 次`,
+      tone: statusOf("repairing") === "active" ? "gate" : toneOf("repairing"),
+      big: true,
+    },
+    {
+      id: "repair",
+      label: "修复动作",
+      sub: roundCount > 0 ? `第 ${roundCount} 轮` : "待修复",
+      tone: toneOf("repairing"),
+    },
+    {
+      id: "report",
+      label: "复现报告",
+      sub: hasReport ? "已生成" : "待生成",
+      tone: hasReport ? "done" : toneOf("succeeded"),
+    },
+  ];
+
+  const edges: EdgeDef[] = [
+    { from: "clone", to: "install", kind: "flow" },
+    { from: "install", to: "test", kind: "flow" },
+    {
+      from: "test",
+      to: "diag",
+      kind: "fail",
+      // 只有真的失败过才敢写退出码；否则只标"这是一条失败分支"。
+      label: testFailed && exitMatch ? `✕ exit ${exitMatch[1]}` : "✕ 失败时",
+      dim: !testFailed,
+    },
+    { from: "diag", to: "gate", kind: "flow" },
+    { from: "gate", to: "repair", kind: "flow" },
+    { from: "repair", to: "report", kind: "ok", label: "通过", dim: !hasReport },
+  ];
+
+  // 修复回环：跑过几轮才画几条弧的标注，没有回环就不画。
+  if (roundCount > 0) {
+    edges.push({ from: "repair", to: "test", kind: "loop", label: `修复回环 ×${roundCount}` });
+  }
+
+  // 卫星节点：只对真实被 ACI 拦下的动作生成，最多两个，没有就一个都不画。
+  const blockedRows = rows.filter((r) => r.blocked);
+  const blocks: NodeDef[] = blockedRows.slice(-2).map((r, i) => ({
+    id: `block${i + 1}`,
+    label: r.name,
+    sub: (r.target || r.reason || "—").slice(0, 22),
+    tone: "bad" as Tone,
+    satellite: true,
+  }));
+  for (const b of blocks) {
+    nodes.push(b);
+    edges.push({ from: "gate", to: b.id, kind: "block" });
+  }
+
+  return { nodes, edges, blocks, blockedTotal: blockedRows.length };
+}
+
+export function FlowGraph(props: Props) {
+  const graph = useMemo(
+    () => buildGraph(props),
+    // props 里的对象由父组件 useMemo 缓存，只在 events/state 变化时换引用
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [props.state, props.stages, props.loop, props.rows],
+  );
+  const { nodes, edges, blockedTotal } = graph;
 
   // ── dagre 布局：只在图结构变化时算一次 ──
   const layout = useMemo(() => {
@@ -136,27 +199,27 @@ export function FlowGraph({ state, blockedCount, onSelectStage, onSelectGate }: 
     });
     g.setDefaultEdgeLabel(() => ({}));
 
-    for (const n of NODES) {
+    for (const n of nodes) {
       g.setNode(n.id, {
         width: n.big ? NODE_W + 24 : NODE_W,
         height: n.big ? NODE_H + 12 : NODE_H,
       });
     }
-    for (const e of EDGES) {
+    for (const e of edges) {
       g.setEdge(e.from, e.to);
     }
     dagre.layout(g);
 
-    const nodes: Record<string, { x: number; y: number; w: number; h: number }> = {};
-    for (const n of NODES) {
+    const pos: Record<string, { x: number; y: number; w: number; h: number }> = {};
+    for (const n of nodes) {
       const d = g.node(n.id);
       if (!d) continue;
-      nodes[n.id] = { x: d.x, y: d.y, w: d.width, h: d.height };
+      pos[n.id] = { x: d.x, y: d.y, w: d.width, h: d.height };
     }
 
     // 边的路径：dagre 给了控制点，转成 SVG path
-    const edges: { def: EdgeDef; path: string; labelAt?: { x: number; y: number } }[] = [];
-    for (const e of EDGES) {
+    const paths: { def: EdgeDef; path: string; labelAt?: { x: number; y: number } }[] = [];
+    for (const e of edges) {
       const d = g.edge(e.from, e.to);
       if (!d?.points?.length) continue;
       const pts = d.points;
@@ -164,7 +227,6 @@ export function FlowGraph({ state, blockedCount, onSelectStage, onSelectGate }: 
       if (pts.length === 2) {
         path += ` L ${pts[1].x},${pts[1].y}`;
       } else {
-        // 用二次贝塞尔平滑
         for (let i = 1; i < pts.length - 1; i++) {
           const mx = (pts[i].x + pts[i + 1].x) / 2;
           const my = (pts[i].y + pts[i + 1].y) / 2;
@@ -173,11 +235,11 @@ export function FlowGraph({ state, blockedCount, onSelectStage, onSelectGate }: 
         path += ` L ${pts[pts.length - 1].x},${pts[pts.length - 1].y}`;
       }
       const mid = pts[Math.floor(pts.length / 2)];
-      edges.push({ def: e, path, labelAt: e.label ? { x: mid.x, y: mid.y - 10 } : undefined });
+      paths.push({ def: e, path, labelAt: e.label ? { x: mid.x, y: mid.y - 10 } : undefined });
     }
 
-    return { nodes, edges, width: g.graph().width ?? 800, height: g.graph().height ?? 400 };
-  }, []);
+    return { nodes: pos, edges: paths, width: g.graph().width ?? 800, height: g.graph().height ?? 400 };
+  }, [nodes, edges]);
 
   const pad = 20;
   const vbW = layout.width + pad * 2;
@@ -234,13 +296,15 @@ export function FlowGraph({ state, blockedCount, onSelectStage, onSelectGate }: 
           const isFail = def.kind === "fail";
           const isBlock = def.kind === "block";
           const isOk = def.kind === "ok";
-          const color = isLoop
-            ? "#6c8fff"
-            : isFail || isBlock
-              ? "#ff5c47"
-              : isOk
-                ? "#2ee6a8"
-                : "rgba(148,163,196,.5)";
+          const color = def.dim
+            ? "rgba(148,163,196,.26)"
+            : isLoop
+              ? "#6c8fff"
+              : isFail || isBlock
+                ? "#ff5c47"
+                : isOk
+                  ? "#2ee6a8"
+                  : "rgba(148,163,196,.5)";
 
           return (
             <g key={`${def.from}-${def.to}`}>
@@ -306,7 +370,7 @@ export function FlowGraph({ state, blockedCount, onSelectStage, onSelectGate }: 
                   textAnchor="middle"
                   className="font-mono"
                   fontSize={9.5}
-                  fill={isLoop ? "#9db4ff" : "rgba(255,140,128,.85)"}
+                  fill={def.dim ? "rgba(154,163,181,.5)" : isLoop ? "#9db4ff" : "rgba(255,140,128,.85)"}
                   initial={STILL ? false : { opacity: 0 }}
                   animate={{ opacity: 1 }}
                   transition={STILL ? { duration: 0 } : { delay: 1.2, duration: 0.5 }}
@@ -319,12 +383,11 @@ export function FlowGraph({ state, blockedCount, onSelectStage, onSelectGate }: 
         })}
 
         {/* ── 节点 ── */}
-        {NODES.map((n, i) => {
+        {nodes.map((n, i) => {
           const box = layout.nodes[n.id];
           if (!box) return null;
-          const tone = tones[n.id] ?? "todo";
-          const c = TONE[tone];
-          const isActive = tone === "active" || tone === "gate";
+          const c = TONE[n.tone];
+          const isActive = n.tone === "active" || n.tone === "gate";
 
           return (
             <motion.g
@@ -338,8 +401,8 @@ export function FlowGraph({ state, blockedCount, onSelectStage, onSelectGate }: 
               }}
               onClick={() => {
                 if (n.satellite) return;
-                if (n.id === "gate") onSelectGate?.();
-                else onSelectStage?.(NODE_TO_STATE[n.id] ?? "queued");
+                if (n.id === "gate") props.onSelectGate?.();
+                else props.onSelectStage?.(NODE_TO_STAGE[n.id] ?? "queued");
               }}
             >
               {/* 外发光 */}
@@ -352,7 +415,7 @@ export function FlowGraph({ state, blockedCount, onSelectStage, onSelectGate }: 
                 fill={c.fill}
                 stroke={c.line}
                 strokeWidth={n.big ? 1.8 : 1.2}
-                strokeOpacity={tone === "todo" ? 0.55 : 0.95}
+                strokeOpacity={n.tone === "todo" ? 0.55 : 0.95}
                 filter={n.big ? "url(#fg-glow-strong)" : isActive ? "url(#fg-glow)" : undefined}
               />
 
@@ -399,7 +462,7 @@ export function FlowGraph({ state, blockedCount, onSelectStage, onSelectGate }: 
                 textAnchor="middle"
                 fontSize={n.big ? 13.5 : 12}
                 fontWeight={n.big ? 600 : 500}
-                fill={tone === "todo" ? "rgba(154,163,181,.75)" : "#eef1f6"}
+                fill={n.tone === "todo" ? "rgba(154,163,181,.75)" : "#eef1f6"}
               >
                 {n.label}
               </text>
@@ -409,7 +472,7 @@ export function FlowGraph({ state, blockedCount, onSelectStage, onSelectGate }: 
                 textAnchor="middle"
                 className="font-mono"
                 fontSize={9}
-                fill={tone === "bad" ? "rgba(255,140,128,.9)" : "rgba(154,163,181,.62)"}
+                fill={n.tone === "bad" ? "rgba(255,140,128,.9)" : "rgba(154,163,181,.62)"}
               >
                 {n.sub}
               </text>
@@ -417,8 +480,8 @@ export function FlowGraph({ state, blockedCount, onSelectStage, onSelectGate }: 
           );
         })}
 
-        {/* 拦截计数 */}
-        {blockedCount > 0 && (
+        {/* 拦截计数：只在真有被拦动作时出现，数字是全量不是卫星节点数 */}
+        {blockedTotal > 0 && (
           <motion.g
             initial={STILL ? false : { opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -441,7 +504,7 @@ export function FlowGraph({ state, blockedCount, onSelectStage, onSelectGate }: 
               fontSize={10}
               fill="#ff8c80"
             >
-              ✕ 拦截 {blockedCount}
+              ✕ 拦截 {blockedTotal}
             </text>
           </motion.g>
         )}

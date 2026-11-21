@@ -467,7 +467,9 @@ export function RunScene({
         </div>
         <FlowGraph
           state={state}
-          blockedCount={blockedCount}
+          stages={stages}
+          loop={loop}
+          rows={rows}
           onSelectStage={(id) => setPanel({ type: "stage", id })}
           onSelectGate={() => setPanel({ type: "loop" })}
         />
