@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "motion/react";
 import clsx from "clsx";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { labelOf, type RunEvent, type RunState, type RunStatus } from "../types";
+import { finiteNonNegative, parsePanel } from "../deepLink";
 import {
   aciTrace,
   buildLoop,
@@ -12,6 +13,7 @@ import {
   failureText,
   isActionEvent,
   isBlockedEvent,
+  STAGE_ORDER,
   type ActionRow,
   type StageView,
 } from "../runModel";
@@ -72,13 +74,23 @@ export function RunScene({
   onBack,
 }: Props) {
   const [panel, setPanel] = useState<Panel>(() => {
-    // 演示/截图直链：?panel=aci&seq=7 / ?panel=loop（只读，不影响业务逻辑）
+    // 演示/截图直链：?panel=aci&seq=7 / ?panel=loop / ?panel=stage&id=testing
+    // 只读，不影响业务逻辑。参数一律走白名单与数值兜底（deepLink.ts）：
+    // ?panel=aci&seq=abc 以前会得到一个空白抽屉（events.find(NaN) 恒 undefined）。
     const q = new URLSearchParams(window.location.search);
-    const which = q.get("panel");
-    if (which === "aci") return { type: "aci", seq: Number(q.get("seq") ?? 0) };
+    const which = parsePanel(q);
+    if (which === "aci") {
+      const seq = finiteNonNegative(q.get("seq"));
+      return seq > 0 ? { type: "aci", seq } : null;
+    }
     if (which === "loop") return { type: "loop" };
     if (which === "plan") return { type: "plan" };
     if (which === "report") return { type: "report" };
+    if (which === "stage") {
+      const id = q.get("id");
+      const stage = STAGE_ORDER.find((s) => s.id === id);
+      return stage ? { type: "stage", id: stage.id } : null;
+    }
     return null;
   });
   const state: RunState = status?.state ?? "queued";

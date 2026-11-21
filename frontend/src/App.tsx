@@ -7,8 +7,7 @@ import { PARTICLE_COLORS, ParticleField, type ParticleBurst } from "./components
 import { useRunPolling } from "./hooks/useRunPolling";
 import { useDemoRun } from "./hooks/useDemoRun";
 import { createRun, cancelRun, ApiError } from "./api";
-
-type Scene = "select" | "welcome" | "run";
+import { finiteNonNegative, parseScene, type Scene } from "./deepLink";
 
 /** 截图模式下把所有过渡时长压成 0，避免无头渲染抓到半透明中间帧。 */
 const STILL = new URLSearchParams(window.location.search).get("still") === "1";
@@ -45,13 +44,38 @@ export default function App() {
   const [cancelling, setCancelling] = useState(false);
   const timer = useRef<number | null>(null);
 
-  /** 截图/演示直链：?scene=run / ?scene=welcome，?run=<id> 直接盯一个 run。 */
+  /**
+   * 截图/演示直链：?scene=run / ?scene=welcome，?run=<id> 直接盯一个 run。
+   *
+   * scene 走白名单（见 deepLink.ts），非法值退回 select，不会落进三个渲染
+   * 分支之外的空隙。另外 `?scene=run` 但没带 `?run=` 时，live 模式会
+   * `useRunPolling(null)` → 一个请求都不发 → 永久停在「连接中 · 等待后端」；
+   * 除非是离线回放（有本地时间轴），否则退回选择页。
+   */
   const q = new URLSearchParams(window.location.search);
-  const initialScene = (q.get("scene") as Scene | null) ?? (q.get("run") ? "run" : "select");
+  const rawScene = parseScene(q, Boolean(q.get("run")));
+  const wantDemoLink = q.get("demo") === "1" || import.meta.env.VITE_DEMO === "1";
+  const initialScene: Scene =
+    rawScene === "run" && !q.get("run") && !wantDemoLink ? "select" : rawScene;
 
   useEffect(() => {
     if (initialScene !== "select") setScene(initialScene);
   }, [initialScene]);
+
+  /**
+   * ?scene=welcome 是截图直链，它没经过 pick()，所以下面那个 3050ms 的
+   * 「欢迎 → 运行」定时器不会被设置，页面会永久停在欢迎页。这里补一个：
+   * 有 runId 就进运行页，没有（离线回放）也让时间轴跑起来。
+   */
+  useEffect(() => {
+    if (initialScene !== "welcome") return;
+    const t = window.setTimeout(
+      () => setScene(q.get("run") || wantDemoLink ? "run" : "select"),
+      STILL ? 0 : 3050,
+    );
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /**
    * 数据来源只有两种，且界面上必须能看出来是哪种：
@@ -107,7 +131,9 @@ export default function App() {
   const demo = mode === "replay";
 
   const live = useRunPolling(mode === "live" ? runId : null);
-  const replay = useDemoRun(demo, Number(q.get("t") ?? 0));
+  // ?t=abc → Number(...) 是 NaN，useDemoRun 里 `acc > seekMs` 恒 false，
+  // pre 铺满整个 SCRIPT 后就不再播放。非数字一律当作 0。
+  const replay = useDemoRun(demo, finiteNonNegative(q.get("t")));
   const status = demo ? replay.status : live.status;
   const events = demo ? replay.events : live.events;
 
