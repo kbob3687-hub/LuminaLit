@@ -85,6 +85,41 @@ def test_heal_success_after_one_repair(tmp_path):
     assert "diagnosing" in states and "repairing" in states
 
 
+def test_repair_events_preserve_observation_tails_and_log_path(tmp_path):
+    observation = Observation(
+        ok=False, action="install_requirement", summary="install PyYAML exited with 1",
+        exit_code=1, timed_out=False, stdout_tail="output" * 500,
+        stderr_tail="bounded error tail", log_path="logs/repair.out",
+    )
+
+    class ObservedACI(FakeACI):
+        def execute(self, action):
+            if action.action == "install_requirement":
+                return observation
+            return super().execute(action)
+
+    runner, store = make_heal_runner(
+        tmp_path,
+        results=[make_result(0), make_result(1, "ModuleNotFoundError: yaml"), make_result(0)],
+        actions=[
+            InstallRequirementAction(action="install_requirement", requirement="PyYAML"),
+            FinishRepairAction(action="finish_repair", summary="no change"),
+        ],
+    )
+    runner.aci_factory = ObservedACI
+    request = RunRequest(repo_url="https://github.com/a/b", command=["python", "main.py"])
+    run_id = store.create_run(request)
+    runner.run(run_id, request)
+    event = next(event for event in store.read_events(run_id) if event.kind == "install_requirement")
+    assert event.data == {
+        "ok": False, "exit_code": 1, "timed_out": False,
+        "stdout_tail": observation.stdout_tail, "stderr_tail": observation.stderr_tail,
+        "requirement": "PyYAML",
+    }
+    assert event.log_path == observation.log_path
+    assert event.message == observation.summary
+
+
 def test_heal_budget_exceeded(tmp_path):
     runner, store = make_heal_runner(
         tmp_path,

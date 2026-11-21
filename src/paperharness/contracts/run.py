@@ -88,6 +88,17 @@ class RunEvent(BaseModel):
     log_path: str | None = None
 
 
+class EventExplanation(BaseModel):
+    title: str
+    detail: str
+    tone: Literal["neutral", "success", "warning", "error"]
+
+
+class RunGuidance(EventExplanation):
+    next_steps: list[str]
+    repair_summary: str
+
+
 class ExecResult(BaseModel):
     exit_code: int | None
     timed_out: bool

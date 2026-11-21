@@ -26,8 +26,8 @@ export function AciPanel({ trace, event }: { trace: AciTrace; event: RunEvent })
         className={clsx(
           "rounded-[10px] border px-4 py-3.5",
           blocked
-            ? "border-reject/45 bg-gradient-to-br from-reject/[.13] to-transparent"
-            : "border-pass/35 bg-gradient-to-br from-pass/[.09] to-transparent",
+            ? "border-reject/45 bg-reject/[.07]"
+            : "border-pass/35 bg-pass/[.06]",
         )}
       >
         <div className="flex items-center gap-2.5">
@@ -186,7 +186,7 @@ export function LoopPanel({
       <div className="rounded-[9px] border border-accent/30 bg-accent/[.06] px-3 py-2.5 font-mono text-[11px] text-ink-mid">
         已用 <b className="text-ink">{loop.rounds.length}</b> / {loop.budget} 轮预算 ·{" "}
         {state === "diagnosing" || state === "repairing" ? (
-          <span className="text-[#9db4ff]">{loop.doing}</span>
+          <span className="text-accent">{loop.doing}</span>
         ) : (
           <span>回环已结束</span>
         )}
@@ -301,24 +301,22 @@ export function StagePanel({
 
 /* ───────────────────────────────────────────── 执行计划 */
 
-export function PlanPanel({ status }: { status: RunStatus | null }) {
-  const result = status?.result;
+export function PlanPanel({ status, events }: { status: RunStatus | null; events: RunEvent[] }) {
+  const plan = events.find((event) => event.kind === "plan")?.data;
+  const command = Array.isArray(plan?.command) ? plan.command.join(" ") : "尚未确定";
+  const sandbox = events.some((event) => event.kind === "sandbox_ready");
   return (
     <div className="space-y-3">
+      <h3 className="text-sm font-semibold text-ink">本次运行方式</h3>
       <div className="divide-y divide-white/[.045] overflow-hidden rounded-[9px] border border-rule">
-        <KV k="resolved_revision" v={result?.resolved_revision ?? "—"} />
-        <KV k="outcome" v={result?.outcome ?? "运行中"} />
-        <KV k="verified" v={result ? String(result.verified) : "—"} />
-        <KV k="attempts" v={result ? String(result.attempts) : "—"} />
-        <KV
-          k="failure_category"
-          v={result?.failure_category ? `${labelOf(result.failure_category)}` : "—"}
-        />
+        <KV k="运行命令" v={command} />
+        <KV k="Python 版本" v={typeof plan?.python_version === "string" ? plan.python_version : "尚未确定"} />
+        <KV k="结果文件" v={typeof plan?.expected_artifact === "string" ? plan.expected_artifact : plan ? "未指定结果文件" : "尚未确定"} />
+        <KV k="源码版本" v={status?.result?.resolved_revision ?? (typeof plan?.resolved_revision === "string" ? plan.resolved_revision : "尚未确认")} />
+        <KV k="运行环境" v={sandbox ? "已记录创建成功（不代表当前仍在运行）" : "暂无创建完成记录"} />
+        <KV k="最终错误类别" v={status?.result?.failure_category ? labelOf(status.result.failure_category) : "无"} />
       </div>
-      <p className="text-[10.5px] leading-relaxed text-ink-muted">
-        运行计划（命令、Python 版本、期望产物）在 planning 阶段由后端确定并落盘为
-        run_plan.json；详情见「生成计划」阶段的 plan 事件。
-      </p>
+      <p className="text-xs leading-6 text-ink-muted">本次验证检查程序退出状态和指定结果文件；不代表已验证论文中的全部实验指标。</p>
     </div>
   );
 }

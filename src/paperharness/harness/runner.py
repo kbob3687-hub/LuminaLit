@@ -19,6 +19,7 @@ from paperharness.contracts.run import (
     RunState,
     validate_repo_url,
 )
+from paperharness.harness.preflight import PreflightRecord
 from paperharness.harness.requirements_guard import (
     RequirementsNotAllowed,
     validate_requirements_file,
@@ -116,6 +117,13 @@ def _resolve_artifact_path(workspace: Path, raw: str) -> Path | None:
     if target == base or not target.startswith(base + os.sep):
         return None
     return candidate
+
+
+def _target_destination(workspace: Path, name: str) -> Path:
+    path = workspace / name
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError(f"unsafe target injection destination: {name}")
+    return path
 
 
 def _clone_once(
@@ -475,16 +483,17 @@ class HarnessRunner:
         injected: list[str] = []
         check_src = target.source_dir / "check.py"
         if check_src.is_file():
-            shutil.copy2(check_src, workspace / "check.py")
+            shutil.copy2(check_src, _target_destination(workspace, "check.py"))
             injected.append("check.py")
         req_src = target.source_dir / "requirements.txt"
         if req_src.is_file():
             extra = req_src.read_text(encoding="utf-8")
-            workspace_req = workspace / "requirements.txt"
+            workspace_req = _target_destination(workspace, "requirements.txt")
             existing = (
                 workspace_req.read_text(encoding="utf-8") if workspace_req.exists() else ""
             )
-            workspace_req.write_text(existing + extra, encoding="utf-8")
+            separator = "\n" if existing and not existing.endswith("\n") else ""
+            workspace_req.write_text(existing + separator + extra, encoding="utf-8")
             injected.append("requirements.txt")
         if injected:
             self.store.append_event(
@@ -500,7 +509,8 @@ class HarnessRunner:
         workspace = run_dir / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
         # 内置靶场命中（设计 4.2 第 1 步）：回填 python_version 和 revision，确保浅拉取精确提交
-        target = self._match_target(request)
+        confirmation_json = self.store.read_text(run_id, "preflight.json")
+        target = None if confirmation_json else self._match_target(request)
         if target is not None:
             updates: dict[str, object] = {}
             if request.python_version is None:
@@ -520,8 +530,24 @@ class HarnessRunner:
         plan: RunPlan | None = None
         attempts_tracker = [1]
         self._register_active(run_id, cancel, None)
+        confirmed_plan: RunPlan | None = None
         try:
             self._check_cancel(run_id)
+            if confirmation_json:
+                try:
+                    confirmation = PreflightRecord.model_validate_json(confirmation_json)
+                    if (
+                        not confirmation.check_digest(confirmation.view.confirmation_digest)
+                        or confirmation.request.model_dump() != request.model_dump()
+                    ):
+                        raise ValueError("confirmed inputs changed")
+                    target = confirmation.target.materialize(run_dir / "confirmed-target")
+                    confirmed_plan = confirmation.view.plan
+                except (OSError, ValueError) as exc:
+                    return self._fail(
+                        run_id, "confirmation_mismatch", f"confirmed inputs unavailable: {exc}",
+                        request=request,
+                    )
             self.store.write_status(run_id, RunState.PREPARING, {})
             try:
                 resolved_revision = self.cloner(request, run_dir)
@@ -533,6 +559,12 @@ class HarnessRunner:
                     request=request,
                 )
             self._check_cancel(run_id)
+            if confirmed_plan and resolved_revision != confirmed_plan.resolved_revision:
+                return self._fail(
+                    run_id, "confirmed_revision_mismatch",
+                    "checked-out revision differs from the confirmed plan",
+                    request=request, plan=confirmed_plan, resolved_revision=resolved_revision,
+                )
             self.store.append_event(
                 run_id,
                 RunState.PREPARING,
@@ -543,7 +575,9 @@ class HarnessRunner:
                 self._inject_target_files(run_id, workspace, target)
 
             self.store.write_status(run_id, RunState.PLANNING, {})
-            if target is not None and request.command is None:
+            if confirmed_plan is not None:
+                plan = confirmed_plan
+            elif target is not None and request.command is None:
                 # 内置靶场：运行计划来自人工验证过的 manifest（设计 4.2 第 1 步），
                 # 不问模型、不猜命令
                 plan = RunPlan(
@@ -611,6 +645,9 @@ class HarnessRunner:
             )
 
             sandbox_request = request.model_copy(update={"python_version": plan.python_version})
+            self.store.append_event(
+                run_id, RunState.PLANNING, "sandbox_start", "sandbox creation started"
+            )
             try:
                 session = self.sandbox_factory(sandbox_request, run_dir)
             except SandboxUnavailableError as exc:
@@ -622,6 +659,9 @@ class HarnessRunner:
                     plan=plan,
                     resolved_revision=resolved_revision,
                 )
+            self.store.append_event(
+                run_id, RunState.PLANNING, "sandbox_ready", "sandbox session created"
+            )
             self._register_active(run_id, cancel, session)
             self._check_cancel(run_id)
 
@@ -722,7 +762,8 @@ class HarnessRunner:
             )
             self.store.write_status(run_id, state, {"verified": verified})
             self.store.append_event(
-                run_id, state, "final", f"run {result.outcome}", {"verified": verified}
+                run_id, state, "final", f"run {result.outcome}",
+                {"verified": verified, "failure_category": failure_category, "outcome": outcome}
             )
             self.store.write_result(run_id, result)
             return result
@@ -904,6 +945,9 @@ class HarnessRunner:
                 event_data: dict[str, object] = {
                     "ok": observation.ok,
                     "exit_code": observation.exit_code,
+                    "timed_out": observation.timed_out,
+                    "stdout_tail": observation.stdout_tail,
+                    "stderr_tail": observation.stderr_tail,
                 }
                 for field, key in (
                     ("path", "path"),
@@ -920,6 +964,7 @@ class HarnessRunner:
                     action.action,
                     observation.summary,
                     event_data,
+                    log_path=observation.log_path,
                 )
                 if action.action == "finish_repair":
                     break
@@ -1049,7 +1094,7 @@ class HarnessRunner:
         if target is not None and target.source_dir is not None:
             check_src = target.source_dir / "check.py"
             if check_src.is_file():
-                shutil.copy2(check_src, workspace / "check.py")
+                shutil.copy2(check_src, _target_destination(workspace, "check.py"))
         if attempt is not None and attempt > 1 and plan.expected_artifact:
             artifact_path = _resolve_artifact_path(workspace, plan.expected_artifact)
             if artifact_path is not None and artifact_path.is_file():

@@ -41,6 +41,7 @@ export interface PaperOption {
 interface Props {
   onPick: (paper: PaperOption) => void;
   disabled?: boolean;
+  busy?: boolean;
   /** 后端返回的错误（422 的 detail[0].msg / 429 queue_full 等），原样展示。 */
   error?: string | null;
   /** 离线回放模式：没有后端可提交，卡片下面要写明白。 */
@@ -78,7 +79,7 @@ const FALLBACK: PaperOption[] = FALLBACK_TARGETS.map((t) => ({
   expect: TARGET_META[t.id]?.expect,
 }));
 
-export function SelectScene({ onPick, disabled, error, demo, observer, onObserver }: Props) {
+export function SelectScene({ onPick, disabled, busy, error, demo, observer, onObserver }: Props) {
   const [localError, setLocalError] = useState<string | null>(null);
   const [options, setOptions] = useState<PaperOption[] | null>(null);
 
@@ -106,12 +107,12 @@ export function SelectScene({ onPick, disabled, error, demo, observer, onObserve
     const el = document.getElementById("repo-input") as HTMLInputElement | null;
     const v = el?.value.trim() ?? "";
     if (!v) {
-      setLocalError("先填一个 GitHub 仓库地址，或直接点上面的靶场卡片。");
+      setLocalError("请填写代码仓库地址，或选择下面的内置示例。");
       return;
     }
     if (/arxiv\.org/i.test(v)) {
       setLocalError(
-        "arXiv 链接不是 Git 仓库：POST /api/runs 只接受 repo_url，把 arXiv 地址发过去会以 clone_failed 失败（已实测）。请填论文对应的 GitHub 仓库地址，例如 https://github.com/dynamicslab/pysindy。",
+        "这是论文页面，不是代码仓库。请填写论文对应的 HTTPS Git 仓库地址。",
       );
       return;
     }
@@ -124,11 +125,11 @@ export function SelectScene({ onPick, disabled, error, demo, observer, onObserve
   };
 
   return (
-    <div className="h-full overflow-y-auto px-6 py-10">
+    <main className="run-workspace h-full overflow-y-auto px-5 py-8 sm:px-8">
       <div className="mx-auto w-full max-w-[1020px]">
         <motion.div
           {...FADE_IN(0)}
-          className="mb-6 flex items-baseline justify-between font-mono text-[11px] tracking-[.28em] text-accent uppercase"
+          className="mb-6 flex flex-wrap items-baseline justify-between gap-4 font-mono text-[11px] tracking-[.28em] text-accent uppercase"
         >
           <span>PaperHarness</span>
 
@@ -158,79 +159,53 @@ export function SelectScene({ onPick, disabled, error, demo, observer, onObserve
           {...FADE_IN(0.06)}
           className="mb-3 text-[clamp(30px,3.6vw,44px)] leading-[1.12] font-semibold tracking-[-.02em]"
         >
-          选一个靶场，
-          <span className="text-accent [text-shadow:0_0_34px_rgb(108_143_255_/_0.55)]">
-            看它被跑通
-          </span>
-          或判定不可复现
+          从代码仓库开始，查清一次试跑
         </motion.h1>
 
         <motion.p {...FADE_IN(0.12)} className="mb-8 max-w-[52ch] text-[14px] leading-[1.7] text-ink-mid">
-          整个复现过程在隔离容器里执行。AI 提出的每一个动作都要过校验门岗，
-          越界的请求会被当场拦下并留下记录。
+          在隔离容器中执行代码，记录失败、修复和产物。跑通一段程序，不等于已经复现整篇论文的结论。
         </motion.p>
 
-        <motion.div
-          {...FADE_IN(0.16)}
-          className="mb-3 font-mono text-[10.5px] tracking-[.16em] text-ink-muted uppercase"
-        >
-          内置靶场 · 点一张直接开跑
+        <motion.div {...FADE_IN(0.16)} className="mb-8">
+          <label htmlFor="repo-input" className="mb-3 block text-base font-medium">运行自己的仓库</label>
+          <form onSubmit={(event) => { event.preventDefault(); submit(); }}
+            className="flex flex-col gap-3 border-b border-rule pb-3 transition-colors focus-within:border-accent sm:flex-row sm:items-stretch">
+            <input
+              id="repo-input"
+              placeholder="https://github.com/owner/repo"
+              aria-describedby="repo-help"
+              spellCheck={false}
+              disabled={disabled}
+              onInput={() => setLocalError(null)}
+              className="min-w-0 flex-1 border-0 bg-transparent py-[13px] font-mono text-[13px] text-ink outline-none placeholder:text-ink-muted disabled:opacity-50"
+            />
+            <button type="submit" disabled={disabled}
+              className="shrink-0 cursor-pointer rounded-[7px] bg-accent px-6 py-[10px] text-[13.5px] font-semibold text-white transition-colors hover:bg-accent/85 disabled:opacity-50">
+              {demo ? "查看离线回放" : "开始探索运行"}
+            </button>
+          </form>
+          <p id="repo-help" className="mt-3 max-w-[80ch] text-xs leading-6 text-ink-mid">
+            {demo ? "当前为离线演示：不会下载你填写的仓库，也不会创建真实任务。" : "自定义仓库暂不提供运行前体检；提交后立即下载代码，由模型分析计划并尝试运行，可能发送代码片段并产生模型费用。"}
+          </p>
         </motion.div>
 
-        <div className="mb-8 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+        {shown && <p role="alert" className="mb-5 rounded-lg border border-reject/40 bg-reject/[.07] px-4 py-3 text-sm leading-6 text-ink">{shown}</p>}
+        {busy && <p role="status" className="mb-5 text-sm text-ink-mid">正在提交请求，请稍候…</p>}
+
+        <motion.div {...FADE_IN(0.2)} className="mb-4">
+          <h2 className="text-base font-medium">先用内置示例了解流程</h2>
+          <p className="mt-2 text-xs leading-6 text-ink-mid">
+            {demo ? "选择示例查看预录过程，不会执行代码。" : "点击示例先查看静态体检，再确认执行。它们是小型运行案例，不代表完整论文复现。"}
+          </p>
+        </motion.div>
+        <div className="mb-6 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
           {list.map((p, i) => (
             <TargetCard key={p.id} option={p} index={i} onPick={onPick} disabled={disabled} />
           ))}
         </div>
 
-        <motion.div
-          {...FADE_IN(0.3)}
-          className="mb-3 font-mono text-[10.5px] tracking-[.16em] text-ink-muted uppercase"
-        >
-          或直接输入仓库地址
-        </motion.div>
-
-        <motion.div
-          {...FADE_IN(0.34)}
-          className="flex items-stretch gap-3 border-b border-rule transition-colors focus-within:border-accent"
-        >
-          <input
-            id="repo-input"
-            placeholder="https://github.com/owner/repo"
-            spellCheck={false}
-            disabled={disabled}
-            onInput={() => setLocalError(null)}
-            className="flex-1 border-0 bg-transparent py-[13px] font-mono text-[13px] text-ink outline-none placeholder:text-ink-muted disabled:opacity-50"
-          />
-          <button
-            disabled={disabled}
-            onClick={submit}
-            className="my-2 shrink-0 cursor-pointer rounded-[7px] border border-transparent bg-gradient-to-br from-[#7c9bff] to-[#5a7cf0] px-6 py-[10px] text-[13.5px] font-semibold text-void shadow-[0_8px_26px_-8px_rgb(108_143_255_/_0.8)] transition-transform hover:-translate-y-0.5 disabled:opacity-50"
-          >
-            开始复现
-          </button>
-        </motion.div>
-
-        <motion.div
-          {...FADE_IN(0.38)}
-          className="mt-3 font-mono text-[10.5px] leading-[1.7] text-ink-muted"
-        >
-          提交的是 <code className="text-ink-mid">repo_url</code> +{" "}
-          <code className="text-ink-mid">revision</code>：命中内置靶场时运行计划来自靶场清单，
-          不依赖模型；自定义仓库则由模型现场生成计划。
-        </motion.div>
-
-        {shown && (
-          <motion.div
-            {...FADE_IN(0.4)}
-            role="alert"
-            className="mt-3.5 rounded-[7px] border border-[rgb(255_96_80_/_0.42)] border-l-[3px] border-l-[rgb(255_92_71)] bg-[rgb(255_96_80_/_0.09)] px-3.5 py-3 font-mono text-[11.5px] leading-[1.8] text-[#ffd9d5]"
-          >
-            {shown}
-          </motion.div>
-        )}
       </div>
-    </div>
+    </main>
   );
 }
 
@@ -259,25 +234,10 @@ function TargetCard({
         }
         onPick(option);
       }}
-      onMouseMove={(e) => {
-        const r = e.currentTarget.getBoundingClientRect();
-        e.currentTarget.style.setProperty("--px", `${((e.clientX - r.left) / r.width) * 100}%`);
-        e.currentTarget.style.setProperty("--py", `${((e.clientY - r.top) / r.height) * 100}%`);
-      }}
-      className="group relative cursor-pointer overflow-hidden rounded-[9px] border border-rule bg-gradient-to-br from-white/[.045] to-white/[.012] px-[17px] py-4 text-left transition-colors hover:border-accent/55 disabled:opacity-50"
+      className="group relative cursor-pointer overflow-hidden rounded-[9px] border border-rule bg-surface-hi/50 px-[17px] py-4 text-left transition-colors hover:border-accent/55 disabled:opacity-50"
     >
-      <span
-        aria-hidden
-        className="pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-300 group-hover:opacity-100"
-        style={{
-          background:
-            "radial-gradient(280px circle at var(--px, 50%) var(--py, 50%), rgb(108 143 255 / .16), transparent 62%)",
-        }}
-      />
 
       <span className="mb-2 flex items-center gap-2 font-mono text-[9.5px] tracking-[.14em]">
-        <span className="text-accent/80">{String(index + 1).padStart(2, "0")}</span>
-        <span className="text-ink-muted">·</span>
         <span
           className={
             option.expect === "failed"
@@ -287,7 +247,7 @@ function TargetCard({
                 : "text-ink-muted"
           }
         >
-          {option.expect === "failed" ? "预期不可复现" : option.expect === "succeeded" ? "预期跑通" : "—"}
+          {option.expect === "failed" ? "缺少条件的示例" : option.expect === "succeeded" ? "可运行的示例" : "受维护示例"}
         </span>
       </span>
 

@@ -92,7 +92,7 @@ export function targetOf(e: RunEvent): string {
 export interface StageView {
   id: RunState | "succeeded";
   label: string;
-  status: "todo" | "active" | "done" | "bad";
+  status: "todo" | "active" | "done" | "bad" | "skipped";
   /** 进入该阶段的次数：自愈回环里 installing / testing 会 > 1。 */
   count: number;
   /** 首次进入的绝对时间（ms），没有事件时为 null。 */
@@ -102,14 +102,14 @@ export interface StageView {
 }
 
 export const STAGE_ORDER: { id: RunState | "succeeded"; label: string }[] = [
-  { id: "queued", label: "排队" },
-  { id: "preparing", label: "准备环境" },
-  { id: "planning", label: "生成计划" },
-  { id: "installing", label: "安装依赖" },
-  { id: "testing", label: "运行测试" },
-  { id: "diagnosing", label: "诊断失败" },
-  { id: "repairing", label: "修复中" },
-  { id: "succeeded", label: "成功" },
+  { id: "queued", label: "等待开始" },
+  { id: "preparing", label: "获取项目代码" },
+  { id: "planning", label: "确定运行方式" },
+  { id: "installing", label: "安装所需依赖" },
+  { id: "testing", label: "运行并检查结果" },
+  { id: "diagnosing", label: "分析失败原因" },
+  { id: "repairing", label: "尝试自动修复" },
+  { id: "succeeded", label: "通过本次验证" },
 ];
 
 /** 失败类别 → 它发生在哪个阶段（用来把断掉的那一格标红）。 */
@@ -123,6 +123,12 @@ function stageOfFailure(category: string | null | undefined): RunState | null {
     case "requirement_rejected":
       return "installing";
     case "smoke_test_failed":
+    case "requires_gpu":
+    case "missing_private_data":
+    case "cuda_only":
+    case "hardcoded_path":
+    case "version_conflict":
+    case "deprecated_api":
     case "missing_dependency":
     case "missing_module":
     case "missing_attribute":
@@ -159,15 +165,16 @@ export function buildStages(events: RunEvent[], state: RunState | undefined): St
   }
 
   // 失败落在哪一格：先按 failure_category 映射，映射不出来就退到最后有事件的那格。
-  const lastWithEvents = [...STAGE_ORDER]
-    .reverse()
-    .find((s) => byState.has(s.id) && s.id !== "succeeded")?.id as RunState | undefined;
-  const failureStage =
-    current === "failed"
-      ? (stageOfFailure((events.at(-1)?.data?.failure_category as string | undefined) ?? null) ??
-        lastWithEvents ??
-        null)
-      : null;
+  const lastWithEvents = [...events].reverse().find((event) => !TERMINAL.has(event.state));
+  const failedCommand = [...events].reverse().find((event) =>
+    (event.kind === "test" || event.kind === "install") &&
+    (event.data.timed_out === true || (typeof event.data.exit_code === "number" && event.data.exit_code !== 0)),
+  );
+  const failureStage = current === "failed"
+    ? (lastWithEvents?.kind === "diagnosis"
+      ? failedCommand?.state ?? "testing"
+      : lastWithEvents?.state ?? stageOfFailure((events.at(-1)?.data?.failure_category as string | undefined) ?? null))
+    : null;
 
   const starts = STAGE_ORDER.map((s) => {
     const list = byState.get(s.id) ?? [];
@@ -194,9 +201,10 @@ export function buildStages(events: RunEvent[], state: RunState | undefined): St
     } else if (failureStage === s.id) {
       status = "bad";
     } else if (list.length > 0) {
-      // 离开该阶段后才看最后一次执行结果：exit 0 才算做完，非 0 是坏的。
-      const code = list.at(-1)?.data?.exit_code;
-      status = typeof code === "number" && code !== 0 ? "bad" : "done";
+      const last = list.at(-1)!;
+      const skipped = last.kind === "install" && last.message.includes("no requirements.txt") && last.message.includes("skipped");
+      const code = last.data.exit_code;
+      status = skipped ? "skipped" : (last.data.ok === false || last.data.timed_out === true || (typeof code === "number" && code !== 0)) ? "bad" : "done";
     } else if (s.id === "queued" && current !== "queued" && i < currentIdx) {
       // queued 是状态机里唯一不写事件的阶段：只有它允许"没事件也算走过"。
       status = "done";

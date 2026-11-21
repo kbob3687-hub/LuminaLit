@@ -34,6 +34,49 @@ def make_runner(tmp_path, results=None, artifact_path=None, cloner=None, factory
     return runner, store
 
 
+def test_target_destination_rejects_directory(tmp_path):
+    (tmp_path / "check.py").mkdir()
+    with pytest.raises(ValueError, match="unsafe target injection"):
+        runner_mod._target_destination(tmp_path, "check.py")
+
+
+def test_target_destination_rejects_symlink(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("original", encoding="utf-8")
+    try:
+        (workspace / "check.py").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises(ValueError, match="unsafe target injection"):
+        runner_mod._target_destination(workspace, "check.py")
+    assert outside.read_text(encoding="utf-8") == "original"
+
+
+def test_injected_requirements_start_on_new_line(tmp_path):
+    from paperharness.targets.manifest import TargetManifest
+
+    runner, store = make_runner(tmp_path / "runs")
+    request = RunRequest(repo_url="https://github.com/a/b")
+    run_id = store.create_run(request)
+    workspace = store.run_dir(run_id) / "workspace"
+    (workspace / "requirements.txt").write_text("numpy==1.26.4", encoding="utf-8")
+    source = tmp_path / "target"
+    source.mkdir()
+    (source / "requirements.txt").write_text("scipy==1.12.0\n", encoding="utf-8")
+    target = TargetManifest(
+        id="example", repo_url=request.repo_url, revision="a" * 40,
+        python_version="3.10", command=["python", "main.py"],
+        failure_class="none", repairable=True, allowed_actions=[],
+        expected_final="succeeded", source_dir=source,
+    )
+    runner._inject_target_files(run_id, workspace, target)
+    assert (workspace / "requirements.txt").read_text(encoding="utf-8") == (
+        "numpy==1.26.4\nscipy==1.12.0\n"
+    )
+
+
 def test_runner_success_verifies_artifact(tmp_path):
     runner, store = make_runner(tmp_path, artifact_path="out.txt")
     request = RunRequest(
@@ -84,6 +127,24 @@ def test_clone_failure_marks_failed(tmp_path):
     assert result.outcome == "failed"
     assert result.failure_category == "clone_failed"
     assert store.read_status(run_id)["failure_category"] == "clone_failed"
+
+
+def test_sandbox_start_is_visible_before_factory_returns(tmp_path):
+    def factory(request, run_dir):
+        events = store.read_events(run_dir.name)
+        assert store.read_status(run_dir.name)["state"] == "planning"
+        assert events[-1].kind == "sandbox_start"
+        assert events[-1].data == {}
+        assert all(event.kind != "sandbox_ready" for event in events)
+        return FakeSandboxSession(workspace=run_dir / "workspace")
+
+    runner, store = make_runner(tmp_path, factory=factory)
+    request = RunRequest(repo_url="https://github.com/a/b", command=["python", "main.py"])
+    run_id = store.create_run(request)
+    runner.run(run_id, request)
+    ready = next(event for event in store.read_events(run_id) if event.kind == "sandbox_ready")
+    assert ready.state == RunState.PLANNING
+    assert ready.data == {}  # 不虚构容器 ID 或健康遥测。
 
 
 def test_sandbox_unavailable_marks_service_interrupted(tmp_path):

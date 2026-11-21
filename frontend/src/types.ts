@@ -21,6 +21,36 @@ export interface Target {
   expected_artifact: string | null;
 }
 
+export interface PreflightSettings {
+  /** 每个执行步骤的超时秒数，不是整个运行的总预算。 */
+  timeout_seconds: number;
+  max_repairs: number;
+}
+
+export interface PreflightResult extends PreflightSettings {
+  preflight_id: string;
+  target_id: string;
+  repo_url: string;
+  created_at: string;
+  expires_at: string;
+  confirmation_digest: string;
+  plan: {
+    resolved_revision: string;
+    python_version: "3.10" | "3.11";
+    command: string[];
+    expected_artifact: string | null;
+    source: "target_manifest";
+  };
+  checks: Array<{
+    name: string;
+    status: "passed" | "warning" | "not_checked";
+    detail: string;
+    source: string;
+  }>;
+  limitations: string[];
+  run_id: string | null;
+}
+
 export interface RunResult {
   run_id: string;
   outcome: "succeeded" | "failed" | "budget_exceeded" | "unrepairable" | "cancelled";
@@ -33,10 +63,23 @@ export interface RunResult {
   report_url: string;
 }
 
+export interface EventExplanation {
+  title: string;
+  detail: string;
+  tone: "neutral" | "success" | "warning" | "error";
+}
+
+export interface RunGuidance extends EventExplanation {
+  next_steps: string[];
+  repair_summary: string;
+}
+
 export interface RunStatus {
   run_id: string;
   state: RunState;
   result: RunResult | null;
+  guidance?: RunGuidance;
+  last_event_sequence?: number;
 }
 
 export interface RunEvent {
@@ -48,6 +91,7 @@ export interface RunEvent {
   message: string;
   data: Record<string, unknown>;
   log_path: string | null;
+  explanation?: EventExplanation;
 }
 
 /** ACI 的 8 种失败标签（设计 §8，2026-11-17 修订）。 */
