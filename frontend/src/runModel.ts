@@ -575,11 +575,11 @@ function guardDetail(kind: string): string {
     case "read_file":
       return "start_line ≥ 1 · line_count ∈ [1,200]";
     case "search_text":
-      return "max_results ≤ 50 · 单文件扫描 ≤ 2 MiB";
+      return "max_results ∈ [1,50] · 单文件扫描 ≤ 2 MiB";
     case "replace_exact":
       return "old 必须在文件里唯一命中（空 old 直接拒）";
     case "install_requirement":
-      return "依赖串逐行白名单：禁 ; | & $ ` > < 与空白拼接";
+      return "依赖串：拒 @ / URL / 换行 / 分号 / &&，再经 packaging.Requirement 校验（PEP 508 分号标记只在 requirements.txt 放行）";
     case "set_environment":
       return "变量名 ∈ {CUDA_VISIBLE_DEVICES, OMP_NUM_THREADS, MKL_NUM_THREADS, TOKENIZERS_PARALLELISM}";
     case "run_smoke_test":

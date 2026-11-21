@@ -115,7 +115,7 @@ export function SelectScene({ onPick, disabled, error, demo, observer, onObserve
     }
     if (/arxiv\.org/i.test(v)) {
       setLocalError(
-        "arXiv 链接不是 Git 仓库：POST /api/runs 只接受 repo_url，把 arXiv 地址发过去会以 clone_failed 失败（已实测）。请填论文对应的 GitHub 仓库地址，例如 https://github.com/dynamicslab/pysindy。",
+        "arXiv 链接不是 Git 仓库：后端 contracts/run.py 已把 arxiv.org 列入非 Git host 清单，POST /api/runs 会在 API 边界直接返回 422 拒绝，不会等到 clone_failed。请填论文对应的 GitHub 仓库地址，例如 https://github.com/dynamicslab/pysindy。",
       );
       return;
     }

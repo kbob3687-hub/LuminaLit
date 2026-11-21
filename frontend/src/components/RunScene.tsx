@@ -669,7 +669,7 @@ export function RunScene({
           const stage = stages.find((s) => s.id === panel.id)!;
           return <StagePanel stage={stage} events={events} state={state} />;
         })()}
-        {panel?.type === "plan" && <PlanPanel status={status} />}
+        {panel?.type === "plan" && <PlanPanel status={status} events={events} />}
         {panel?.type === "report" && <ReportPanel runId={runId} status={status} />}
       </Drawer>
     </div>

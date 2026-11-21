@@ -20,10 +20,9 @@ export function AciPanel({ trace, event }: { trace: AciTrace; event: RunEvent })
   // query / env_name），没有 `request` 嵌套对象。actionParams 统一读这些字段，
   // 并兼容早期可能存在的 request 嵌套。
   const request = actionParams(event);
-  // 后端只写 stderr_tail / stdout_tail（contracts/run.py:97），从不下发 output_tail。
-  const stderrTail = typeof event.data?.stderr_tail === "string" ? event.data.stderr_tail : "";
-  const stdoutTail = typeof event.data?.stdout_tail === "string" ? event.data.stdout_tail : "";
-  const tail = stderrTail || stdoutTail;
+  // 动作事件不下发 stdout/stderr 尾段（runner.py:904-922 只写扁平参数）。
+  // install / test 的 stderr_tail 在失败原因区块展示，见 runModel.lastStderr；
+  // 这里若再读一次 tail，永远是空串，是个渲染不到的死分支。
 
   return (
     <div className="space-y-5">
@@ -152,11 +151,7 @@ export function AciPanel({ trace, event }: { trace: AciTrace; event: RunEvent })
           {trace.exitCode !== null && (
             <div className="mt-1 text-ink-muted">exit_code = {trace.exitCode}</div>
           )}
-          {tail && (
-            <pre className="mt-2 max-h-40 overflow-y-auto border-t border-white/[.06] pt-2 text-[10.5px] whitespace-pre-wrap text-ink-muted">
-              {tail}
-            </pre>
-          )}
+          {/* 动作事件没有尾段字段；命令输出原文见失败原因区块 */}
         </div>
         <p className="mt-2 text-[10.5px] leading-relaxed text-ink-muted">
           注：后端只在动作结束后回一条 Observation，没有逐步骤埋点。上面的通过/拦截
@@ -320,23 +315,47 @@ export function StagePanel({
 
 /* ───────────────────────────────────────────── 执行计划 */
 
-export function PlanPanel({ status }: { status: RunStatus | null }) {
+export function PlanPanel({
+  status,
+  events,
+}: {
+  status: RunStatus | null;
+  events: RunEvent[];
+}) {
   const result = status?.result;
+  // 后端 runner.py:605-611 在 planning 阶段下发 kind="plan" 事件，
+  // data 是 RunPlan.model_dump()；/events 按原样返回，不按 kind 过滤。
+  // 旧实现只读 status.result，运行中打开「查看计划」时五行全是「运行中 / —」。
+  const plan = [...events].reverse().find((e) => e.kind === "plan")?.data as
+    | Record<string, unknown>
+    | undefined;
+  const command = Array.isArray(plan?.command)
+    ? (plan?.command as unknown[]).map(String).join(" ")
+    : null;
+  const rows: [string, string][] = [
+    ["command", command ?? "—"],
+    ["python_version", typeof plan?.python_version === "string" ? plan.python_version : "—"],
+    [
+      "expected_artifact",
+      typeof plan?.expected_artifact === "string" ? plan.expected_artifact : "—",
+    ],
+    ["source", typeof plan?.source === "string" ? plan.source : "—"],
+    ["resolved_revision", result?.resolved_revision ?? "—"],
+    ["outcome", result?.outcome ?? "运行中"],
+    ["verified", result ? String(result.verified) : "—"],
+    ["attempts", result ? String(result.attempts) : "—"],
+    ["failure_category", result?.failure_category ? failureText(result.failure_category) : "—"],
+  ];
   return (
     <div className="space-y-3">
       <div className="divide-y divide-white/[.045] overflow-hidden rounded-[9px] border border-rule">
-        <KV k="resolved_revision" v={result?.resolved_revision ?? "—"} />
-        <KV k="outcome" v={result?.outcome ?? "运行中"} />
-        <KV k="verified" v={result ? String(result.verified) : "—"} />
-        <KV k="attempts" v={result ? String(result.attempts) : "—"} />
-        <KV
-          k="failure_category"
-          v={result?.failure_category ? failureText(result.failure_category) : "—"}
-        />
+        {rows.map(([k, v]) => (
+          <KV key={k} k={k} v={v} />
+        ))}
       </div>
       <p className="text-[10.5px] leading-relaxed text-ink-muted">
-        运行计划（命令、Python 版本、期望产物）在 planning 阶段由后端确定并落盘为
-        run_plan.json；详情见「生成计划」阶段的 plan 事件。
+        前四行来自 planning 阶段的 plan 事件（后端同时落盘 run_plan.json），运行中即可查看；
+        outcome / verified / attempts / failure_category 要到收尾才有值。
       </p>
     </div>
   );
