@@ -6,7 +6,7 @@ import {
   type RunState,
   type RunStatus,
 } from "../types";
-import { failureText, type AciTrace, type LoopView, type StageView } from "../runModel";
+import { actionParams, failureText, type AciTrace, type LoopView, type StageView } from "../runModel";
 import { dur } from "./StageTrack";
 
 const labelZh = (label: string | null): string =>
@@ -16,7 +16,14 @@ const labelZh = (label: string | null): string =>
 
 export function AciPanel({ trace, event }: { trace: AciTrace; event: RunEvent }) {
   const blocked = trace.verdict === "block";
-  const request = (event.data?.request ?? {}) as Record<string, unknown>;
+  // 后端 runner.py:904-922 把动作参数作为扁平字段下发（path / requirement /
+  // query / env_name），没有 `request` 嵌套对象。actionParams 统一读这些字段，
+  // 并兼容早期可能存在的 request 嵌套。
+  const request = actionParams(event);
+  // 后端只写 stderr_tail / stdout_tail（contracts/run.py:97），从不下发 output_tail。
+  const stderrTail = typeof event.data?.stderr_tail === "string" ? event.data.stderr_tail : "";
+  const stdoutTail = typeof event.data?.stdout_tail === "string" ? event.data.stdout_tail : "";
+  const tail = stderrTail || stdoutTail;
 
   return (
     <div className="space-y-5">
@@ -60,15 +67,15 @@ export function AciPanel({ trace, event }: { trace: AciTrace; event: RunEvent })
       {/* 动作目标 */}
       <div>
         <SectionTitle>
-          {Object.keys(request).length ? "模型的原始请求" : "动作目标（从 Observation 反推）"}
+          {Object.keys(request).length ? "动作参数（后端事件里的字段）" : "动作目标"}
         </SectionTitle>
         <div className="mt-2 overflow-hidden rounded-[9px] border border-rule">
           {Object.entries(request).length === 0 ? (
             <div className="px-3 py-2.5 font-mono text-[11.5px] leading-relaxed text-ink-mid">
               <span className="text-ink">{trace.target || "—"}</span>
               <div className="mt-1 text-[10.5px] text-ink-muted">
-                契约 §7 只把一句 summary 回给模型，动作参数不单列；这里的路径/依赖串是从
-                summary 的固定格式里读回来的。
+                这个动作没有带路径、依赖串或查询参数（例如 run_smoke_test / finish_repair）；
+                目标一栏是从事件的 Observation 与 message 里读回来的，不是界面编的。
               </div>
             </div>
           ) : (
@@ -145,9 +152,9 @@ export function AciPanel({ trace, event }: { trace: AciTrace; event: RunEvent })
           {trace.exitCode !== null && (
             <div className="mt-1 text-ink-muted">exit_code = {trace.exitCode}</div>
           )}
-          {typeof event.data?.output_tail === "string" && event.data.output_tail && (
+          {tail && (
             <pre className="mt-2 max-h-40 overflow-y-auto border-t border-white/[.06] pt-2 text-[10.5px] whitespace-pre-wrap text-ink-muted">
-              {event.data.output_tail}
+              {tail}
             </pre>
           )}
         </div>

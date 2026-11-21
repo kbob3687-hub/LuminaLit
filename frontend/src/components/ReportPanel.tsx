@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import clsx from "clsx";
 import { ApiError, getEnvironment, getPatch, getReport } from "../api";
 import { failureText } from "../runModel";
@@ -36,11 +36,37 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
     const t = new URLSearchParams(window.location.search).get("tab");
     return t === "patch" || t === "json" || t === "env" ? t : "report";
   });
-  const [docs, setDocs] = useState<Partial<Record<Tab, string>>>({});
-  const [envDoc, setEnvDoc] = useState<EnvironmentManifest | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  /**
+   * 缓存带 runId：换 run 后 docs / envDoc 自动失效，不会短暂（或持续）显示
+   * 上一次运行的报告、补丁、环境清单。旧写法是裸 `{}`，runId 从 null 变成
+   * 真值、demo → live 切换、或退出动画期间换 run，都可能串数据。
+   */
+  const [cache, setCache] = useState<{
+    runId: string;
+    docs: Partial<Record<Tab, string>>;
+    env: EnvironmentManifest | null;
+  }>({ runId: "", docs: {}, env: null });
+  /** loading / err 按 tab 分开：快速切 tab 时两个在途请求不会互相覆盖状态。 */
+  const [loading, setLoading] = useState<Partial<Record<Tab, boolean>>>({});
+  const [err, setErr] = useState<Partial<Record<Tab, string>>>({});
   const [copied, setCopied] = useState(false);
+  /** 每个 tab 一个请求序号，只有最后一次请求的回包才允许写状态。 */
+  const seqRef = useRef<Partial<Record<Tab, number>>>({});
+  const copyTimer = useRef<number | null>(null);
+
+  const docs = cache.runId === runId ? cache.docs : {};
+  const envDoc = cache.runId === runId ? cache.env : null;
+
+  // 换 run：让在途请求全部失效、清掉 loading/err；卸载时清复制计时器。
+  useEffect(() => {
+    seqRef.current = {};
+    setLoading({});
+    setErr({});
+    setCopied(false);
+    return () => {
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    };
+  }, [runId]);
 
   const result = status?.result ?? null;
   const terminal = Boolean(
@@ -52,31 +78,44 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
 
   const load = useCallback(
     async (which: Tab) => {
-      if (!runId) return;
-      if (which === "json") return;
-      setLoading(true);
-      setErr(null);
+      if (!runId || which === "json") return;
+      const seq = (seqRef.current[which] ?? 0) + 1;
+      seqRef.current[which] = seq;
+      const alive = () => seqRef.current[which] === seq;
+      setLoading((s) => ({ ...s, [which]: true }));
+      setErr((s) => ({ ...s, [which]: undefined }));
       try {
         if (which === "env") {
           const manifest = await getEnvironment(runId);
-          setEnvDoc(manifest);
-          // 复制/下载走的都是这段文本，和环境页签的表格共用一份数据
-          setDocs((d) => ({ ...d, env: JSON.stringify(manifest, null, 2) }));
+          if (!alive()) return;
+          setCache((c) => ({
+            runId,
+            docs: { ...(c.runId === runId ? c.docs : {}), env: JSON.stringify(manifest, null, 2) },
+            env: manifest,
+          }));
           return;
         }
         const text = which === "report" ? await getReport(runId) : await getPatch(runId);
-        setDocs((d) => ({ ...d, [which]: text }));
+        if (!alive()) return;
+        setCache((c) => ({
+          runId,
+          docs: { ...(c.runId === runId ? c.docs : {}), [which]: text },
+          env: c.runId === runId ? c.env : null,
+        }));
       } catch (e) {
-        const status = (e as ApiError)?.status;
-        setErr(
-          status === 404
-            ? which === "env"
-              ? "环境清单尚未生成：后端在运行收尾时才写 environment.json，运行中请稍后再看。"
-              : "报告尚未生成：后端只在运行收尾时写 report.md，运行中请稍后再看。"
-            : `读取失败：${(e as Error)?.message ?? String(e)}`,
-        );
+        if (!alive()) return;
+        const code = (e as ApiError)?.status;
+        setErr((s) => ({
+          ...s,
+          [which]:
+            code === 404
+              ? which === "env"
+                ? "环境清单尚未生成：后端在运行收尾时才写 environment.json，运行中请稍后再看。"
+                : "报告尚未生成：后端只在运行收尾时写 report.md，运行中请稍后再看。"
+              : `读取失败：${(e as Error)?.message ?? String(e)}`,
+        }));
       } finally {
-        setLoading(false);
+        if (alive()) setLoading((s) => ({ ...s, [which]: false }));
       }
     },
     [runId],
@@ -98,9 +137,10 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
     try {
       await navigator.clipboard.writeText(text || "");
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => setCopied(false), 1600);
     } catch {
-      setErr("剪贴板不可用，请用「下载」保存文件。");
+      setErr((s) => ({ ...s, [tab]: "剪贴板不可用，请用「下载」保存文件。" }));
     }
   };
 
@@ -168,7 +208,7 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
             key={t.id}
             onClick={() => {
               setTab(t.id);
-              setErr(null);
+              setErr((s) => ({ ...s, [t.id]: undefined }));
             }}
             className={clsx(
               "cursor-pointer rounded-[5px] border px-3 py-1.5 font-mono text-[11px] transition-colors",
@@ -202,30 +242,30 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
         </div>
       </div>
 
-      {/* 文件内容 */}
-      {loading && (
+      {/* 文件内容：loading / err 都按当前 tab 取，切页不会串状态 */}
+      {loading[tab] && (
         <div className="rounded-[9px] border border-rule px-3 py-6 text-center font-mono text-[11px] text-ink-muted">
           读取中…
         </div>
       )}
 
-      {!loading && err && (
+      {!loading[tab] && err[tab] && (
         <div className="rounded-[9px] border border-warn/35 bg-warn/[.06] px-3.5 py-3 font-mono text-[11px] leading-relaxed text-ink-mid">
-          {err}
+          {err[tab]}
         </div>
       )}
 
-      {!loading && !err && tab === "report" && docs.report !== undefined && (
+      {!loading[tab] && !err[tab] && tab === "report" && docs.report !== undefined && (
         <ReportBody md={docs.report} />
       )}
 
-      {!loading && !err && tab === "patch" && docs.patch !== undefined && (
+      {!loading[tab] && !err[tab] && tab === "patch" && docs.patch !== undefined && (
         <DiffBody diff={docs.patch} />
       )}
 
-      {!loading && !err && tab === "env" && envDoc && <EnvBody env={envDoc} />}
+      {!loading[tab] && !err[tab] && tab === "env" && envDoc && <EnvBody env={envDoc} />}
 
-      {!loading && !err && tab === "json" && (
+      {!loading[tab] && !err[tab] && tab === "json" && (
         <pre className="max-h-[52vh] overflow-auto rounded-[9px] border border-rule bg-void/60 px-3.5 py-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-ink-mid">
           {jsonText || "（运行中，暂无 result.json）"}
         </pre>
