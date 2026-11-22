@@ -87,6 +87,7 @@ export const FAILURE_LABELS = {
   path_escape: "路径越界",
   env_not_allowed: "环境变量不在白名单",
   invalid_argument: "参数越界",
+  protected_file: "验收链文件受保护",
 } as const;
 
 export type FailureLabel = keyof typeof FAILURE_LABELS;
@@ -108,6 +109,7 @@ const ACI_KINDS: ReadonlySet<string> = new Set([
   "requirement_not_allowed",
   "file_not_found",
   "invalid_argument",
+  "protected_file",
 ]);
 
 const SYSTEM_KINDS: ReadonlySet<string> = new Set([

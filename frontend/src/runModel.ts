@@ -7,7 +7,14 @@
  * 这里改成：某阶段只有真的收到过该阶段的事件、且已经离开它，才算完成。
  */
 
-import { FAILURE_LABELS, labelOf, TERMINAL, type RunEvent, type RunState } from "./types";
+import {
+  FAILURE_LABELS,
+  labelOf,
+  TERMINAL,
+  type RunEvent,
+  type RunResult,
+  type RunState,
+} from "./types";
 
 export const ACTIONS = [
   "read_file",
@@ -33,6 +40,7 @@ export const BLOCK_LABELS: ReadonlySet<string> = new Set([
   "path_escape",
   "env_not_allowed",
   "invalid_argument",
+  "protected_file",
 ]);
 
 export function isActionEvent(e: RunEvent): boolean {
@@ -948,4 +956,232 @@ export function explainFailure(category: string, events: RunEvent[]): FailureExp
         "所以具体报错要去看后端日志；前端不替它猜原因。",
     raw: rawFailureMessage(events, category) ?? rawFailureMessage(events, "failed"),
   };
+}
+
+// ─────────────────────────────────────────────── 三层验收（L1 / L2 / L3）
+
+/**
+ * 后端目前只下发 `verified: boolean`（`contracts/run.py:115`），没有分层结构。
+ * 所以下面三层不是"后端给的"，是从**可核实的事件**推出来的，每一层都要能
+ * 指出依据在哪：
+ *
+ * - L1 只看 `test` 事件的 `exit_code`；
+ * - L2 用 `verified` 反推：`runner._is_verified` 先判退出码、再判产物存在，
+ *   所以 verified=true 必然蕴含产物已产出；而「exit 0 且 verified=false」
+ *   剩下的唯一解释就是产物缺失；
+ * - L3 只在「跑的是靶场注入的 check.py」时可推 —— 那种情况下 check.py 里的
+ *   assert 就是指标判据，退出码 0 等价于阈值全部通过。
+ *
+ * 推不出来的层一律 `unknown`，caveat 写清缺什么。宁可在界面上写"后端未下发"，
+ * 也不把「退出码 0」包装成「指标达标」——评委点开一眼就能看出哪个是假的。
+ */
+export interface AcceptanceLayer {
+  id: "L1" | "L2" | "L3";
+  title: string;
+  status: "pass" | "fail" | "unknown" | "not_reached";
+  detail: string;
+  evidence: string[];
+  caveat?: string;
+}
+
+export interface AcceptanceView {
+  layers: AcceptanceLayer[];
+  /** 本次 command 是否就是靶场注入的 check.py（决定 L3 能不能由退出码推）。 */
+  scripted: boolean;
+  /** `protected_file` 拦截出现次数 = 模型试图改写判据的次数。 */
+  tamperAttempts: number;
+}
+
+/** planning 阶段下发的事件即为完整 RunPlan（runner.py:605-611）。 */
+export function planOf(events: RunEvent[]): Record<string, unknown> | null {
+  const hit = [...events].reverse().find((e) => e.kind === "plan");
+  return (hit?.data as Record<string, unknown> | undefined) ?? null;
+}
+
+const L2_CAVEAT =
+  "后端只判产物路径 is_file()，不校验格式或内容合法；这一层目前是「存在性」门槛，不是「合格性」。";
+const L3_CAVEAT =
+  "目标阈值写在后端靶场注入的 check.py 里，不随事件下发；模型改不了它（ACI protected_file 拦截）。";
+
+/** stderr 里的 `NAME=数字` 形态，例如 `ARI=0.87`、`error_x=1.2e-03`。 */
+const MEASURED_VALUE = /([A-Za-z_][A-Za-z0-9_]{1,24})\s*=\s*(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)/g;
+
+function measuredValues(text: string): string[] {
+  const out: string[] = [];
+  for (const match of text.matchAll(MEASURED_VALUE)) {
+    const pair = `${match[1]} = ${match[2]}`;
+    if (!out.includes(pair)) out.push(pair);
+    if (out.length >= 3) return out;
+  }
+  return out;
+}
+
+function tailLines(text: string, count = 2): string[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-count);
+}
+
+export function buildAcceptance(
+  state: RunState | undefined,
+  events: RunEvent[],
+  result: RunResult | null,
+): AcceptanceView {
+  const plan = planOf(events);
+  const artifact =
+    typeof plan?.expected_artifact === "string" && plan.expected_artifact
+      ? plan.expected_artifact
+      : null;
+  const command = Array.isArray(plan?.command) ? (plan.command as unknown[]).map(String) : [];
+  const scripted =
+    plan?.source === "target_manifest" &&
+    command.some((part) => part === "check.py" || part.endsWith("/check.py"));
+
+  const lastTest = events.filter((e) => e.kind === "test").at(-1);
+  const rawExit = lastTest?.data?.exit_code;
+  const exitCode = typeof rawExit === "number" ? rawExit : null;
+  const testErr = typeof lastTest?.data?.stderr_tail === "string" ? lastTest.data.stderr_tail : "";
+  const attempt = typeof lastTest?.data?.attempt === "number" ? lastTest.data.attempt : null;
+
+  const ended = state === "succeeded" || state === "failed" || state === "cancelled";
+  const verified = result?.verified === true;
+  const attemptNote = attempt && attempt > 1 ? `（第 ${attempt} 次尝试）` : "";
+  const layers: AcceptanceLayer[] = [];
+
+  // ---- L1 程序跑通
+  if (!lastTest) {
+    layers.push({
+      id: "L1",
+      title: "程序跑通",
+      status: ended ? "fail" : "not_reached",
+      detail: ended
+        ? "这次运行没走到测试阶段，在准备 / 规划 / 安装阶段就结束了。"
+        : "还没跑到测试阶段。",
+      evidence: [],
+    });
+  } else if (exitCode === 0) {
+    layers.push({
+      id: "L1",
+      title: "程序跑通",
+      status: "pass",
+      detail: `命令正常退出${attemptNote}。`,
+      evidence: [`exit_code=0${attempt ? ` · attempt ${attempt}` : ""}`],
+    });
+  } else {
+    layers.push({
+      id: "L1",
+      title: "程序跑通",
+      status: "fail",
+      detail: `命令以非零退出码结束${attemptNote}。`,
+      evidence: [`exit_code=${exitCode ?? "未下发"}`, ...tailLines(testErr)],
+    });
+  }
+
+  // ---- L2 产物合格
+  if (!artifact) {
+    layers.push({
+      id: "L2",
+      title: "产物合格",
+      status: "unknown",
+      detail: "本次计划没有声明期望产物，后端不做产物校验。",
+      evidence: [],
+      caveat: "expected_artifact 为空时 _is_verified 直接返回 True，这一层等于没有门槛。",
+    });
+  } else if (!ended) {
+    layers.push({
+      id: "L2",
+      title: "产物合格",
+      status: "not_reached",
+      detail: `等运行收尾才能确认 ${artifact} 是否产出。`,
+      evidence: [`expected_artifact=${artifact}`],
+      caveat: L2_CAVEAT,
+    });
+  } else if (verified) {
+    layers.push({
+      id: "L2",
+      title: "产物合格",
+      status: "pass",
+      detail: `${artifact} 已在 workspace 产出。`,
+      evidence: [`verified=true`, `expected_artifact=${artifact}`],
+      caveat: L2_CAVEAT,
+    });
+  } else if (exitCode === 0) {
+    layers.push({
+      id: "L2",
+      title: "产物合格",
+      status: "fail",
+      detail: `退出码为 0 但 verified=false：按 _is_verified 的判定顺序，此时唯一没满足的就是 ${artifact} 缺失。`,
+      evidence: [`exit_code=0`, `verified=false`, `expected_artifact=${artifact}`],
+      caveat: L2_CAVEAT,
+    });
+  } else {
+    layers.push({
+      id: "L2",
+      title: "产物合格",
+      status: "not_reached",
+      detail: "测试阶段没通过，后端没有走到产物校验。",
+      evidence: [`expected_artifact=${artifact}`],
+      caveat: L2_CAVEAT,
+    });
+  }
+
+  // ---- L3 指标达标
+  if (!scripted) {
+    layers.push({
+      id: "L3",
+      title: "指标达标",
+      status: "unknown",
+      detail: "这次跑的不是靶场注入的 check.py，事件里没有任何指标判据。",
+      evidence: [],
+      caveat: "RunResult 只有 verified 布尔，没有 metric / target 字段；这里的空白是后端契约的空白。",
+    });
+  } else if (!lastTest) {
+    layers.push({
+      id: "L3",
+      title: "指标达标",
+      status: "not_reached",
+      detail: "还没跑到 check.py。",
+      evidence: [`command=${command.join(" ")}`],
+      caveat: L3_CAVEAT,
+    });
+  } else if (exitCode === 0) {
+    layers.push({
+      id: "L3",
+      title: "指标达标",
+      status: "pass",
+      detail: "check.py 里的断言（含指标阈值）全部通过。",
+      evidence: [`command=${command.join(" ")}`, "exit_code=0"],
+      caveat: L3_CAVEAT,
+    });
+  } else if (/AssertionError/.test(testErr)) {
+    const measured = measuredValues(testErr);
+    layers.push({
+      id: "L3",
+      title: "指标达标",
+      status: "fail",
+      detail: "check.py 的指标断言没通过。",
+      evidence: [
+        ...measured.map((pair) => `实测 ${pair}`),
+        ...tailLines(testErr, 1).filter((line) => line.includes("AssertionError")),
+      ],
+      caveat: L3_CAVEAT,
+    });
+  } else {
+    layers.push({
+      id: "L3",
+      title: "指标达标",
+      status: "unknown",
+      detail: "check.py 没跑到断言就退出了（导入失败 / 依赖缺失 / 语法错误），指标未被评估。",
+      evidence: tailLines(testErr),
+      caveat: L3_CAVEAT,
+    });
+  }
+
+  const tamperAttempts = events.filter(
+    (e) => isActionEvent(e) && labelOfEvent(e) === "protected_file",
+  ).length;
+
+  return { layers, scripted, tamperAttempts };
 }

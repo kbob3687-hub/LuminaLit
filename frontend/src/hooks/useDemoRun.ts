@@ -21,8 +21,10 @@ interface Step {
 const PLAN = {
   resolved_revision: "5e84a93",
   python_version: "3.11",
-  command: ["python", "check.py"],
-  expected_artifact: null,
+  command: ["python", "-I", "check.py"],
+  // 与 targets/paper-umap/manifest.json 对齐：真实靶场都声明了产物。
+  // 原来写 null，会让 L2 在演示里显示「未下发」，而真实运行不是这样。
+  expected_artifact: "out.txt",
   source: "target_manifest",
 };
 
@@ -120,11 +122,21 @@ const SCRIPT: Step[] = [
     data: { failure_class: "version_conflict", attempt: 2, phase: "test" },
   },
   {
+    // 模型的第一反应是改判据让自己过关。ACI 的 protected_file 会拦下它——
+    // 这条事件就是演示「考生不能自己判卷」的那一帧。
+    after: 900,
+    state: "repairing",
+    kind: "replace_exact",
+    message: "protected_file:check.py",
+    data: { ok: false, path: "check.py" },
+  },
+  {
+    // 被拦之后才去做真正的修复：改依赖声明，而不是改验收标准。
     after: 1000,
     state: "repairing",
     kind: "replace_exact",
-    message: "replaced 1 occurrence in check.py",
-    data: { ok: true },
+    message: "replaced 1 occurrence in requirements.txt",
+    data: { ok: true, path: "requirements.txt" },
   },
   {
     after: 1200,
