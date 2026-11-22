@@ -7,7 +7,40 @@
  * 这里改成：某阶段只有真的收到过该阶段的事件、且已经离开它，才算完成。
  */
 
-import { labelOf, TERMINAL, type RunEvent, type RunState } from "./types";
+import { labelOf, TERMINAL, type EventExplanation, type RunEvent, type RunState, type VerificationResult } from "./types";
+
+export const VERIFICATION_TYPES: Record<VerificationResult["level"], string> = {
+  none: "未指定检查类型",
+  execution: "执行检查",
+  artifact: "产物检查",
+  target: "目标指标检查",
+};
+
+/** level 是检查类型；绝不能仅凭 target 或旧 verified 字段称为达标。 */
+export function verificationConclusion(verification: VerificationResult | null | undefined): {
+  label: string;
+  tone: EventExplanation["tone"];
+} {
+  if (!verification) return { label: "未记录分级验证", tone: "neutral" };
+  const status = {
+    not_run: { label: "未运行", tone: "neutral" },
+    passed: { label: "通过", tone: "success" },
+    failed: { label: "未通过", tone: "error" },
+    blocked: { label: "受阻", tone: "warning" },
+  } as const;
+  const conclusion = status[verification.status];
+  if (verification.level === "none") {
+    return { label: verification.status === "passed" ? "未指定检查类型" : `验证${conclusion.label}`, tone: verification.status === "passed" ? "neutral" : conclusion.tone };
+  }
+  return { label: `${VERIFICATION_TYPES[verification.level]}${conclusion.label}`, tone: conclusion.tone };
+}
+
+/** 只允许当前真实任务的固定同源快照端点，不接受任意 URL 或路径。 */
+export function verificationEvidencePath(runId: string | null, evidenceUrl: string | null | undefined): string | null {
+  if (!runId || !/^[0-9a-f]{32}$/.test(runId)) return null;
+  const path = `/api/runs/${runId}/verification/input`;
+  return evidenceUrl === path ? path : null;
+}
 
 export const ACTIONS = [
   "read_file",
@@ -109,7 +142,8 @@ export const STAGE_ORDER: { id: RunState | "succeeded"; label: string }[] = [
   { id: "testing", label: "运行并检查结果" },
   { id: "diagnosing", label: "分析失败原因" },
   { id: "repairing", label: "尝试自动修复" },
-  { id: "succeeded", label: "通过本次验证" },
+  { id: "verifying", label: "独立核验科学指标" },
+  { id: "succeeded", label: "运行结束，查看结论" },
 ];
 
 /** 失败类别 → 它发生在哪个阶段（用来把断掉的那一格标红）。 */
@@ -190,21 +224,23 @@ export function buildStages(events: RunEvent[], state: RunState | undefined): St
     const list = byState.get(s.id) ?? [];
     const startedAt = starts[i];
     const nextStart = starts.slice(i + 1).find((t) => t !== null) ?? null;
-    const end = nextStart ?? (startedAt !== null && !terminal ? Date.now() : null);
+    const end = nextStart ?? (startedAt !== null ? (terminal ? Date.parse(events.at(-1)!.timestamp) : Date.now()) : null);
     const durationMs = startedAt !== null && end !== null ? Math.max(0, end - startedAt) : null;
 
     let status: StageView["status"];
     if (s.id === current && !terminal) {
       status = "active";
     } else if (s.id === "succeeded") {
-      status = current === "succeeded" ? "active" : "todo";
+      status = current === "succeeded" ? "done" : "todo";
     } else if (failureStage === s.id) {
       status = "bad";
     } else if (list.length > 0) {
       const last = list.at(-1)!;
       const skipped = last.kind === "install" && last.message.includes("no requirements.txt") && last.message.includes("skipped");
       const code = last.data.exit_code;
-      status = skipped ? "skipped" : (last.data.ok === false || last.data.timed_out === true || (typeof code === "number" && code !== 0)) ? "bad" : "done";
+      const verificationFailed = s.id === "verifying" && (last.data.status === "failed" || last.data.status === "blocked");
+      const interrupted = current === "cancelled" && s.id === lastWithEvents?.state;
+      status = skipped || interrupted ? "skipped" : (verificationFailed || last.data.ok === false || last.data.timed_out === true || (typeof code === "number" && code !== 0)) ? "bad" : "done";
     } else if (s.id === "queued" && current !== "queued" && i < currentIdx) {
       // queued 是状态机里唯一不写事件的阶段：只有它允许"没事件也算走过"。
       status = "done";
@@ -258,19 +294,21 @@ const STAGE_EST: Partial<Record<RunState, number>> = {
   testing: 22_000,
   diagnosing: 6_000,
   repairing: 45_000,
+  verifying: 8_000,
 };
 
-/** 各阶段在总进度里的权重（合计 90，余下 10 是收尾）。 */
+/** 各阶段在总进度里的权重（合计 96，余下 4 是收尾）。 */
 const STAGE_WEIGHT: Partial<Record<RunState, number>> = {
   queued: 2,
   preparing: 26,
   planning: 6,
   installing: 34,
   testing: 22,
+  verifying: 6,
 };
 
 /** 进度条上的阶段分界刻度（0–1），与上面权重逐项对应。 */
-export const PROGRESS_TICKS = [0.022, 0.311, 0.378, 0.756];
+export const PROGRESS_TICKS = [0.02, 0.28, 0.34, 0.68, 0.90];
 
 export function buildProgress(
   events: RunEvent[],
@@ -301,7 +339,7 @@ export function buildProgress(
       const ratio = est > 0 ? Math.min(0.92, Math.max(0.08, ran / est)) : 0.12;
       pct += w * ratio;
       if (est > 0) remaining += Math.max(0, est - ran);
-    } else if (!terminal) {
+    } else if (!terminal && current !== "verifying") {
       remaining += est;
     }
   }
@@ -389,6 +427,12 @@ export function buildLoop(events: RunEvent[], state: RunState | undefined): Loop
   }
 
   const current = state ?? "queued";
+  // 核验是独立阶段，不是又一轮修复；即使缺少 repair_round / final 事件也不保留“进行中”。
+  if (current === "verifying" || TERMINAL.has(current)) {
+    const boundary = events.find((event) => event.state === "verifying" || TERMINAL.has(event.state))?.timestamp
+      ?? events.at(-1)?.timestamp;
+    if (boundary) for (const round of rounds) round.finishedAt ??= boundary;
+  }
   const last = rounds.at(-1) ?? null;
   const inLoop = current === "diagnosing" || current === "repairing";
 

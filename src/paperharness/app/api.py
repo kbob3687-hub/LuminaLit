@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import shutil
@@ -8,7 +9,7 @@ from datetime import UTC, datetime
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 
 from paperharness.app.guidance import build_run_guidance, explain_event
 from paperharness.app.worker import RunWorker
@@ -246,6 +247,33 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=404, detail={"code": "run_not_found"}) from exc
         return patch or ""
+
+    @app.get("/api/runs/{run_id}/verification")
+    def get_verification(run_id: str):
+        _read_status_or_404(run_id)
+        result = store.read_result(run_id)
+        if result is None or result.verification is None:
+            raise HTTPException(status_code=404, detail={"code": "verification_not_ready"})
+        return result.verification
+
+    @app.get("/api/runs/{run_id}/verification/input")
+    def get_verification_input(run_id: str):
+        _read_status_or_404(run_id)
+        result = store.read_result(run_id)
+        verification = result.verification if result else None
+        if verification is None or verification.evidence_url is None:
+            raise HTTPException(status_code=404, detail={"code": "verification_evidence_not_ready"})
+        path = store.run_dir(run_id) / "verification-input.json"
+        if not path.is_file() or path.is_symlink():
+            raise HTTPException(status_code=404, detail={"code": "verification_evidence_not_ready"})
+        with path.open("rb") as handle:
+            raw = handle.read(32 * 1024 + 1)
+        if len(raw) > 32 * 1024 or hashlib.sha256(raw).hexdigest() != verification.artifact_sha256:
+            raise HTTPException(status_code=409, detail={"code": "verification_evidence_mismatch"})
+        return Response(raw, media_type="application/octet-stream", headers={
+            "Content-Disposition": 'attachment; filename="verification-input.json"',
+            "X-Content-Type-Options": "nosniff",
+        })
 
     @app.get("/api/runs/{run_id}/environment")
     def get_environment(run_id: str):

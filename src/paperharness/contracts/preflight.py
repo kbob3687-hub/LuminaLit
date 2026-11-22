@@ -4,6 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from paperharness.contracts.run import RunPlan, RunRequest
+from paperharness.contracts.verification import VerificationSpec
 
 
 class PreflightRequest(BaseModel):
@@ -45,3 +46,4 @@ class PreflightResult(BaseModel):
     checks: list[PreflightCheck]
     limitations: list[str]
     run_id: str | None = None
+    verification: VerificationSpec | None = None

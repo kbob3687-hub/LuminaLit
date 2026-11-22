@@ -5,6 +5,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, JsonValue, field_validator
 
+from paperharness.contracts.verification import VerificationResult
+
 # 已知不可能是 Git 仓库的 host：收单后必然 clone_failed，在 API 边界直接拒掉。
 # 只收录有明确证据的（用户实测会贴上来的），不猜。
 _NON_GIT_HOSTS = frozenset({"arxiv.org", "www.arxiv.org"})
@@ -72,6 +74,7 @@ class RunState(StrEnum):
     TESTING = "testing"
     DIAGNOSING = "diagnosing"
     REPAIRING = "repairing"
+    VERIFYING = "verifying"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -130,6 +133,7 @@ class RunResult(BaseModel):
     patch_url: str | None = None
     environment_url: str | None = None
     report_url: str
+    verification: VerificationResult | None = None
 
 
 class ReadFileAction(BaseModel):

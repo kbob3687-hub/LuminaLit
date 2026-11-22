@@ -53,6 +53,7 @@ class TargetManifest(BaseModel):
     allowed_actions: list[str]
     expected_final: Literal["succeeded", "failed"]
     notes: str | None = None
+    verification_rule: Literal["pysindy-linear-v1"] | None = None
     # 运行时注记：manifest 所在目录，由 load_targets 填充，供 Harness 定位注入物
     # （check.py / requirements.txt），不出现在 JSON 契约里。
     source_dir: Path | None = None
@@ -62,6 +63,12 @@ class TargetManifest(BaseModel):
         expected = "succeeded" if self.repairable else "failed"
         if self.expected_final != expected:
             raise ValueError(f"repairable={self.repairable} 要求 expected_final={expected}")
+        if self.verification_rule is not None and (
+            self.command != ["python", "-I", "check.py"]
+            or self.expected_artifact != "coefficients.json"
+            or self.python_version != "3.10"
+        ):
+            raise ValueError("pysindy-linear-v1 requires its maintained command and JSON artifact")
         unknown = set(self.allowed_actions) - ACTION_NAMES
         if unknown:
             raise ValueError(f"unknown actions: {sorted(unknown)}")

@@ -126,6 +126,23 @@ cd frontend && npm install && npm run dev -- --host 127.0.0.1 --port 5173
 
 ---
 
+## 成功判定：分级验证
+
+**「命令跑通」不等于「结果可信」。** `result.json` 的 `verified` 只在 `verification.status == "passed"` 时为 true，`verification.level` 说明这个结论依据的是哪一级证据：
+
+| level | 依据 | 典型场景 |
+|---|---|---|
+| `none` | 尚未验证 | 运行未完成，或失败在安装阶段 |
+| `execution` | 退出码 0 + 预期产物存在 | 未声明验证规则的普通运行 |
+| `artifact` | 产物安全读取／结构校验未通过 | 符号链接、越界路径、旧产物残留被拒 |
+| `target` | 独立验证器按预置规则复算指标 | manifest 声明 `verification_rule` 且体检已确认 |
+
+`target` 级最严：先停掉生产容器再取产物快照（防后台进程改写），固定 `artifact_sha256` 与 `validator_digest`，然后把产物字节交给**一次性本地 Docker 容器**里的独立验证器（只查本地镜像、从不拉取），按解析参考值复算并返回 `checks` / `metrics` / `limitations`。验证器脚本和 `check.py` 都由维护者写死，模型无权创建或修改——考生不能自己判卷。证据可从 `GET /api/runs/{id}/verification/input` 下载，接口复核字节数与 SHA-256，不一致返回 409；完整结果在 `verification.json`、`GET /api/runs/{id}/verification` 和报告页的「验证」面板。
+
+目前只有 `pysindy-linear-v1` 一条规则（系数最大误差 < 1e-4）。即便 `target` 级通过，也只是最小合成任务上的指标一致，不等于完整复现论文，这一限制会写进 `limitations` 并展示在面板上。
+
+---
+
 ## 配置
 
 | 环境变量 | 默认 | 说明 |
@@ -148,7 +165,7 @@ cd frontend && npm install && npm run dev -- --host 127.0.0.1 --port 5173
 ```
 src/paperharness/
   app/        FastAPI、组装入口、工作线程
-  harness/    状态机、运行存储
+  harness/    状态机、分级验证、运行存储
   agent/      LLM 客户端、分类器、假模型
   sandbox/    DockerSession、FakeSession、协议
   aci/        受限动作校验层
@@ -184,3 +201,5 @@ docs/         接口契约、队员开工指南、设计与计划
 - ✅ 内置靶场命中与注入物（check.py + requirements），2 个真实论文靶场真机一次通过（PySINDy / UMAP）
 - ✅ ACI 受限动作校验层、沙箱安全集成测试、React + Vite 前端联调上线
 - ✅ 环境清单依赖版本采集（pip freeze）、Windows 换行符兼容及容器 PyPI 镜像支持
+- ✅ 体检确认：注入物、运行计划与验证规则须经用户确认才放行；规则或 revision 变更一律要求重新体检
+- ✅ 分级成功判定：`execution / artifact / target` 三级证据、独立断网只读容器复算指标、证据哈希复核，前端「分级验证证据」面板如实区分「跑通」与「指标达标」，旧结果不推断验证等级

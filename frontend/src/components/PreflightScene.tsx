@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiError, confirmPreflight, createPreflight } from "../api";
 import type { PreflightResult } from "../types";
+import { VerificationSpecPanel } from "./VerificationPanel";
 
 interface Props {
   initialPreflight: PreflightResult;
@@ -111,6 +112,9 @@ export function PreflightScene({ initialPreflight, onBack, onStarted }: Props) {
                 <div><dt className="mb-1.5 text-ink-mid">预期产物</dt><dd className="break-all">{preflight.plan.expected_artifact ?? "未要求产物"}</dd></div>
               </div>
             </dl>
+            {preflight.verification ? <VerificationSpecPanel spec={preflight.verification} /> : (
+              <p className="mt-5 text-sm leading-6 text-ink-mid">此确认单未附带科学指标验证规则，不能据此承诺目标指标通过。</p>
+            )}
             <form onSubmit={(event) => { event.preventDefault(); void recheck(); }} className="mt-6">
               <fieldset disabled={phase !== "idle" || uncertain}>
                 <legend className="mb-3 text-sm font-medium">运行设置</legend>

@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from paperharness.contracts.preflight import PreflightCheck, PreflightRequest, PreflightResult
 from paperharness.contracts.run import RunPlan, RunRequest
 from paperharness.harness.store import RunStore
+from paperharness.harness.verification import verification_spec
 from paperharness.targets.manifest import TargetManifest
 
 PREFLIGHT_TTL = timedelta(minutes=30)
@@ -82,6 +83,7 @@ class PreflightService:
             raise PreflightError("target_not_found", "未找到受维护任务，请刷新任务列表。", 404)
         try:
             frozen = FrozenTarget.capture(target)
+            verification = verification_spec() if target.verification_rule else None
             run_request = RunRequest(
                 repo_url=target.repo_url,
                 revision=target.revision,
@@ -114,8 +116,13 @@ class PreflightService:
             ),
             PreflightCheck(
                 name="验证范围", status="warning",
-                detail="当前以退出状态和指定产物是否存在判定试跑结果；不含独立指标验收。",
-                source="当前 Harness 验证逻辑",
+                detail=(
+                    "运行成功后，在独立、断网、只读容器检查系数 JSON；"
+                    "两个方程各自的最大系数误差须 < 0.0001。指标失败不自动调参。"
+                    if verification else
+                    "当前以退出状态和指定产物是否存在判定试跑结果；不含独立指标验收。"
+                ),
+                source=verification.source if verification else "当前 Harness 验证逻辑",
             ),
             PreflightCheck(
                 name="数据与硬件条件", status="not_checked",
@@ -132,7 +139,12 @@ class PreflightService:
         limitations = [
             "体检未下载仓库、安装依赖或调用模型，不保证任务可运行。",
             "单步超时不是端到端总预算；克隆和安装仍有各自的时间上限。",
-            "暂未提供独立指标验收和干净环境复跑；试跑通过不等于完整复现论文。",
+            (
+                "独立验收只证明输出系数满足固定数值规则，不认证训练过程或输出来源；"
+                "未进行干净环境复跑，不等于完整复现论文。"
+                if verification else
+                "暂未提供独立指标验收和干净环境复跑；试跑通过不等于完整复现论文。"
+            ),
         ]
         if target.command[:2] == ["python", "-I"] and "check.py" in frozen.files:
             limitations.append("该任务使用隔离模式运行维护者脚本，可能测试已安装包而非检出的仓库源码。")
@@ -157,6 +169,7 @@ class PreflightService:
                 max_repairs=request.max_repairs,
                 checks=checks,
                 limitations=limitations,
+                verification=verification,
             ),
             request=run_request,
             target=frozen,

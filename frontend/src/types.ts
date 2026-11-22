@@ -8,6 +8,7 @@ export type RunState =
   | "testing"
   | "diagnosing"
   | "repairing"
+  | "verifying"
   | "succeeded"
   | "failed"
   | "cancelled";
@@ -27,6 +28,51 @@ export interface PreflightSettings {
   max_repairs: number;
 }
 
+/** 固定验证规则来自服务端确认单，不能由前端修改。 */
+export interface VerificationSpec {
+  rule_id: "pysindy-linear-v1";
+  validator_digest: string;
+  artifact: "coefficients.json";
+  threshold: 0.0001;
+  code_under_test: string;
+  dataset: string;
+  source: string;
+}
+
+export interface VerificationCheck {
+  name: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface MetricResult {
+  name: string;
+  observed: number;
+  threshold: number;
+  comparison: "lt";
+  passed: boolean;
+}
+
+export interface VerificationResult {
+  /** 检查类型，不是已获得的等级；必须与 status 一起解读。 */
+  level: "none" | "execution" | "artifact" | "target";
+  status: "not_run" | "passed" | "failed" | "blocked";
+  summary: string;
+  checks: VerificationCheck[];
+  metrics: MetricResult[];
+  rule_id: string | null;
+  validator_digest: string | null;
+  artifact_sha256: string | null;
+  verifier_image_id: string | null;
+  checked_at: string | null;
+  code_under_test: string | null;
+  dataset: string | null;
+  source: string | null;
+  failure_category: string | null;
+  evidence_url: string | null;
+  limitations: string[];
+}
+
 export interface PreflightResult extends PreflightSettings {
   preflight_id: string;
   target_id: string;
@@ -39,7 +85,7 @@ export interface PreflightResult extends PreflightSettings {
     python_version: "3.10" | "3.11";
     command: string[];
     expected_artifact: string | null;
-    source: "target_manifest";
+    source: "user" | "target_manifest" | "repository_analysis";
   };
   checks: Array<{
     name: string;
@@ -49,6 +95,7 @@ export interface PreflightResult extends PreflightSettings {
   }>;
   limitations: string[];
   run_id: string | null;
+  verification?: VerificationSpec | null;
 }
 
 export interface RunResult {
@@ -61,6 +108,7 @@ export interface RunResult {
   patch_url: string | null;
   environment_url: string | null;
   report_url: string;
+  verification?: VerificationResult | null;
 }
 
 export interface EventExplanation {

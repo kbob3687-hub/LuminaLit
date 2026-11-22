@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -8,10 +9,12 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from paperharness.agent.classifier import UNREPAIRABLE, FailureContext, classify_by_rules
 from paperharness.contracts.run import (
+    ExecResult,
     Observation,
     RunPlan,
     RunRequest,
@@ -19,12 +22,24 @@ from paperharness.contracts.run import (
     RunState,
     validate_repo_url,
 )
+from paperharness.contracts.verification import (
+    VerificationCheck,
+    VerificationResult,
+    VerificationSpec,
+)
 from paperharness.harness.preflight import PreflightRecord
 from paperharness.harness.requirements_guard import (
     RequirementsNotAllowed,
     validate_requirements_file,
 )
 from paperharness.harness.store import RunStore
+from paperharness.harness.verification import (
+    ArtifactRejected,
+    prepare_artifact,
+    snapshot_artifact,
+    verification_spec,
+    verify_artifact,
+)
 from paperharness.sandbox.base import SandboxClosedError, SandboxSession, SandboxUnavailableError
 from paperharness.targets.manifest import TargetManifest
 
@@ -357,6 +372,7 @@ class HarnessRunner:
         cloner: Callable[[RunRequest, Path], str] = git_clone,
         aci_factory: Callable[[SandboxSession, Path, RunPlan, int], object] | None = None,
         targets: list[TargetManifest] | None = None,
+        verifier: Callable[..., VerificationResult] = verify_artifact,
     ):
         self.store = store
         self.llm = llm
@@ -364,6 +380,7 @@ class HarnessRunner:
         self.cloner = cloner
         self.aci_factory = aci_factory
         self.targets = list(targets or [])
+        self.verifier = verifier
         # run_id -> (取消事件, 当前 session)；abort() 由 API 线程跨线程调用。
         self._active: dict[str, tuple[threading.Event, SandboxSession | None]] = {}
         self._active_lock = threading.RLock()
@@ -419,10 +436,12 @@ class HarnessRunner:
         resolved_revision: str | None = None,
     ) -> RunResult:
         """CANCELLED 终态：不 export 不到的 patch 就留空，不留僵尸状态。"""
+        verification = self._stored_verification(run_id)
         result = RunResult(
             run_id=run_id,
             outcome="cancelled",
-            verified=False,
+            verified=verification.status == "passed",
+            verification=verification,
             attempts=attempts,
             resolved_revision=resolved_revision,
             patch_url=f"/api/runs/{run_id}/patch",
@@ -446,7 +465,8 @@ class HarnessRunner:
             ),
         )
         self.store.write_text(
-            run_id, "report.md", "# Report\n\noutcome=cancelled\nverified=False\n"
+            run_id, "report.md", "# Report\n\noutcome=cancelled\n"
+            f"verified={result.verified}\n\n```json\n{verification.model_dump_json(indent=2)}\n```\n"
         )
         self.store.write_status(run_id, RunState.CANCELLED, {})
         self.store.append_event(
@@ -531,6 +551,8 @@ class HarnessRunner:
         attempts_tracker = [1]
         self._register_active(run_id, cancel, None)
         confirmed_plan: RunPlan | None = None
+        verification_rule: VerificationSpec | None = None
+        last_test: ExecResult | None = None
         try:
             self._check_cancel(run_id)
             if confirmation_json:
@@ -543,6 +565,11 @@ class HarnessRunner:
                         raise ValueError("confirmed inputs changed")
                     target = confirmation.target.materialize(run_dir / "confirmed-target")
                     confirmed_plan = confirmation.view.plan
+                    verification_rule = confirmation.view.verification
+                    if bool(target.verification_rule) != bool(verification_rule):
+                        raise ValueError("confirmed verification rule missing")
+                    if verification_rule and verification_rule != verification_spec():
+                        raise ValueError("confirmed verification rule changed; recheck required")
                 except (OSError, ValueError) as exc:
                     return self._fail(
                         run_id, "confirmation_mismatch", f"confirmed inputs unavailable: {exc}",
@@ -634,6 +661,14 @@ class HarnessRunner:
                     resolved_revision=resolved_revision,
                 )
 
+            if (
+                not confirmed_plan and target and target.verification_rule
+                and plan.source == "target_manifest" and plan.command == target.command
+                and plan.expected_artifact == target.expected_artifact
+                and plan.resolved_revision == target.revision
+                and plan.python_version == target.python_version
+            ):
+                verification_rule = verification_spec()
             self._check_cancel(run_id)
             self.store.write_text(run_id, "run_plan.json", plan.model_dump_json(indent=2))
             self.store.append_event(
@@ -683,7 +718,9 @@ class HarnessRunner:
                         attempts_tracker=attempts_tracker,
                         deadline=deadline,
                         target=target,
+                        verification_rule=verification_rule,
                     )
+                    last_test = healed["test"]
                     verified = healed["verified"]
                     attempts = healed["attempts"]
                     failure_category = healed["failure_category"]
@@ -702,9 +739,13 @@ class HarnessRunner:
                     )
             else:
                 test = self._run_test(
-                    run_id, request, session, plan, deadline, target=target
+                    run_id, request, session, plan, deadline, target=target,
+                    verification_rule=verification_rule,
                 )
-                verified = self._is_verified(test, plan, workspace)
+                last_test = test
+                verified = self._is_verified(
+                    test, plan, workspace, independent=verification_rule is not None
+                )
                 attempts = 1
                 attempts_tracker[0] = 1
                 failure_category = None if verified else "smoke_test_failed"
@@ -722,21 +763,15 @@ class HarnessRunner:
                         attempts_tracker=attempts_tracker,
                         deadline=deadline,
                         target=target,
+                        verification_rule=verification_rule,
                     )
+                    last_test = healed["test"]
                     verified = healed["verified"]
                     attempts = healed["attempts"]
                     failure_category = healed["failure_category"]
                     outcome = "succeeded" if verified else healed["outcome"]
 
-            state = RunState.SUCCEEDED if verified else RunState.FAILED
             self.store.write_text(run_id, "patch.diff", session.export_diff())
-            self.store.write_text(
-                run_id,
-                "report.md",
-                "# Report\n\n"
-                f"outcome={outcome}\nverified={verified}\nattempts={attempts}\n"
-                f"failure_category={failure_category}\n",
-            )
             self.store.write_text(
                 run_id,
                 "environment.json",
@@ -747,6 +782,29 @@ class HarnessRunner:
                     ensure_ascii=False,
                     indent=2,
                 ),
+            )
+            verification = self._execution_verification(last_test, plan, workspace, verified)
+            if verified and verification_rule:
+                verification = self._verify_target(
+                    run_id, request, session, verification_rule, deadline
+                )
+                verified = verification.status == "passed"
+                outcome = "succeeded" if verified else "failed"
+                failure_category = verification.failure_category
+            self.store.write_text(run_id, "verification.json", verification.model_dump_json(indent=2))
+            self._check_cancel(run_id)
+            if verification_rule and time.monotonic() >= deadline:
+                raise TimeBudgetExceeded("total wall-clock budget exhausted during verification")
+            state = RunState.SUCCEEDED if verified else RunState.FAILED
+            self.store.write_text(
+                run_id,
+                "report.md",
+                "# Report\n\n"
+                f"outcome={outcome}\nverified={verified}\nattempts={attempts}\n"
+                f"failure_category={failure_category}\n\n"
+                f"verification={verification.level}/{verification.status}\n"
+                f"{verification.summary}\n\n"
+                "```json\n" + verification.model_dump_json(indent=2) + "\n```\n",
             )
 
             result = RunResult(
@@ -759,6 +817,7 @@ class HarnessRunner:
                 patch_url=f"/api/runs/{run_id}/patch",
                 environment_url=f"/api/runs/{run_id}/environment",
                 report_url=f"/api/runs/{run_id}/report",
+                verification=verification,
             )
             self.store.write_status(run_id, state, {"verified": verified})
             self.store.append_event(
@@ -767,6 +826,17 @@ class HarnessRunner:
             )
             self.store.write_result(run_id, result)
             return result
+        except ArtifactRejected as exc:
+            verification = VerificationResult(
+                level="artifact", status="failed", summary=str(exc),
+                failure_category="artifact_invalid", checked_at=datetime.now(UTC),
+                limitations=["产物未通过安全读取检查，未执行独立指标验收。", "未进行干净环境复跑。"],
+            )
+            self.store.write_text(run_id, "verification.json", verification.model_dump_json(indent=2))
+            return self._fail(
+                run_id, "artifact_invalid", str(exc), session=session, request=request,
+                plan=plan, resolved_revision=resolved_revision, attempts=attempts_tracker[0],
+            )
         except _RunCancelled:
             return self._cancelled(
                 run_id,
@@ -846,13 +916,90 @@ class HarnessRunner:
                 self._record_cleanup_failures(run_id, session)
             self._unregister_active(run_id)
 
-    def _is_verified(self, test, plan: RunPlan, workspace: Path) -> bool:
+    def _is_verified(
+        self, test, plan: RunPlan, workspace: Path, *, independent: bool = False
+    ) -> bool:
         if test.exit_code != 0 or test.timed_out:
             return False
+        if independent:
+            return True
         if plan.expected_artifact:
             artifact_path = _resolve_artifact_path(workspace, plan.expected_artifact)
             return artifact_path is not None and artifact_path.is_file()
         return True
+
+    @staticmethod
+    def _execution_verification(test, plan, workspace, verified) -> VerificationResult:
+        if test is None:
+            return VerificationResult(summary="程序尚未完成执行，未进行指标验收")
+        executed = test.exit_code == 0 and not test.timed_out
+        checks = [VerificationCheck(
+            name="命令执行", passed=executed,
+            detail=f"退出码 {test.exit_code}；超时：{'是' if test.timed_out else '否'}",
+        )]
+        if plan.expected_artifact:
+            path = _resolve_artifact_path(workspace, plan.expected_artifact)
+            checks.append(VerificationCheck(
+                name="预期文件存在", passed=path is not None and path.is_file(),
+                detail="仅检查文件存在，不代表结构或指标正确。",
+            ))
+        return VerificationResult(
+            level="execution", status="passed" if verified else "failed",
+            summary="程序运行通过，尚未独立验证科研指标" if verified else "本次执行检查未通过",
+            checks=checks, checked_at=datetime.now(UTC),
+            limitations=["未进行独立产物结构和指标验收。", "未进行干净环境复跑，不等于完整复现论文。"],
+        )
+
+    def _verify_target(self, run_id, request, session, spec, deadline) -> VerificationResult:
+        self._check_cancel(run_id)
+        self.store.write_status(run_id, RunState.VERIFYING, {})
+        self.store.append_event(
+            run_id, RunState.VERIFYING, "verification_started", "independent verification started",
+            {"rule_id": spec.rule_id, "validator_digest": spec.validator_digest},
+        )
+        result = VerificationResult(
+            level="target", status="blocked", summary="独立指标验收尚未完成",
+            rule_id=spec.rule_id, validator_digest=spec.validator_digest,
+            code_under_test=spec.code_under_test, dataset=spec.dataset, source=spec.source,
+            checked_at=datetime.now(UTC),
+            limitations=["未进行干净环境复跑，不等于完整复现论文。"],
+        )
+        self.store.write_text(run_id, "verification.json", result.model_dump_json(indent=2))
+        # 先停止生产端的所有进程，再读取快照，避免后台进程在验收期间改写产物。
+        session.close()
+        self._check_cancel(run_id)
+        if getattr(session, "cleanup_errors", None):
+            result.summary = "无法确认运行容器已停止，未读取产物或开始验收"
+            result.failure_category = "verification_error"
+        else:
+            try:
+                raw = snapshot_artifact(self.store.run_dir(run_id) / "workspace", spec)
+            except ArtifactRejected as exc:
+                result.status = "failed"
+                result.summary = str(exc)
+                result.failure_category = "artifact_invalid"
+                result.checks = [VerificationCheck(name="本次产物安全读取", passed=False, detail=str(exc))]
+            else:
+                (self.store.run_dir(run_id) / "verification-input.json").write_bytes(raw)
+                result = self.verifier(
+                    raw, spec, timeout_seconds=min(20, self._step_timeout(request, deadline)),
+                    cancelled=lambda: self._cancel_requested(run_id),
+                )
+                result.artifact_sha256 = hashlib.sha256(raw).hexdigest()
+                result.evidence_url = f"/api/runs/{run_id}/verification/input"
+        result.checks.insert(0, VerificationCheck(
+            name="本次命令执行", passed=True, detail="退出码 0，未超时；旧产物在本次执行前已清除。",
+        ))
+        self.store.write_text(run_id, "verification.json", result.model_dump_json(indent=2))
+        self.store.append_event(
+            run_id, RunState.VERIFYING, "verification", result.summary,
+            result.model_dump(mode="json"),
+        )
+        return result
+
+    def _stored_verification(self, run_id: str) -> VerificationResult:
+        data = self.store.read_text(run_id, "verification.json")
+        return VerificationResult.model_validate_json(data) if data else VerificationResult()
 
     def _self_heal(
         self,
@@ -866,6 +1013,7 @@ class HarnessRunner:
         attempts_tracker: list[int],
         deadline: float,
         target: TargetManifest | None = None,
+        verification_rule: VerificationSpec | None = None,
     ) -> dict:
         """DIAGNOSING → REPAIRING → 重跑当前阶段 的循环。
 
@@ -879,6 +1027,7 @@ class HarnessRunner:
         category: str | None = None
         outcome = "budget_exceeded"
         failure = first_failure
+        last_test = first_failure if phase == "test" else None
         workspace_files = _list_workspace_files(workspace)
 
         for round_no in range(1, request.max_repairs + 1):
@@ -1010,9 +1159,12 @@ class HarnessRunner:
                 deadline,
                 attempt=attempts_tracker[0],
                 target=target,
+                verification_rule=verification_rule,
             )
-            if self._is_verified(test, plan, workspace):
+            last_test = test
+            if self._is_verified(test, plan, workspace, independent=verification_rule is not None):
                 return {
+                    "test": last_test,
                     "verified": True,
                     "attempts": attempts_tracker[0],
                     "failure_category": category,
@@ -1020,6 +1172,7 @@ class HarnessRunner:
                 }
             failure = test
         return {
+            "test": last_test,
             "verified": False,
             "attempts": attempts_tracker[0],
             "failure_category": category,
@@ -1088,6 +1241,7 @@ class HarnessRunner:
         deadline: float,
         attempt: int | None = None,
         target: TargetManifest | None = None,
+        verification_rule: VerificationSpec | None = None,
     ):
         self.store.write_status(run_id, RunState.TESTING, {"attempt": attempt} if attempt else {})
         workspace = self.store.run_dir(run_id) / "workspace"
@@ -1095,7 +1249,9 @@ class HarnessRunner:
             check_src = target.source_dir / "check.py"
             if check_src.is_file():
                 shutil.copy2(check_src, _target_destination(workspace, "check.py"))
-        if attempt is not None and attempt > 1 and plan.expected_artifact:
+        if verification_rule:
+            prepare_artifact(workspace, verification_rule)
+        elif attempt is not None and attempt > 1 and plan.expected_artifact:
             artifact_path = _resolve_artifact_path(workspace, plan.expected_artifact)
             if artifact_path is not None and artifact_path.is_file():
                 artifact_path.unlink()
@@ -1107,7 +1263,8 @@ class HarnessRunner:
             RunState.TESTING,
             "test",
             f"smoke test finished (attempt {attempt})" if attempt else "smoke test finished",
-            {"exit_code": test.exit_code, "stderr_tail": test.stderr_tail, "attempt": attempt},
+            {"exit_code": test.exit_code, "timed_out": test.timed_out,
+             "stderr_tail": test.stderr_tail, "attempt": attempt},
         )
         return test
 
@@ -1209,10 +1366,12 @@ class HarnessRunner:
         resolved_revision: str | None = None,
         attempts: int = 1,
     ) -> RunResult:
+        verification = self._stored_verification(run_id)
         result = RunResult(
             run_id=run_id,
             outcome=outcome,
-            verified=False,
+            verified=verification.status == "passed",
+            verification=verification,
             attempts=attempts,
             failure_category=category,
             resolved_revision=resolved_revision,
@@ -1240,8 +1399,8 @@ class HarnessRunner:
             run_id,
             "report.md",
             "# Report\n\n"
-            f"outcome={outcome}\nverified=False\nfailure_category={category}\n\n"
-            f"{message[:2000]}\n",
+            f"outcome={outcome}\nverified={result.verified}\nfailure_category={category}\n\n"
+            f"{message[:2000]}\n\n```json\n{verification.model_dump_json(indent=2)}\n```\n",
         )
         self.store.write_status(run_id, RunState.FAILED, {"failure_category": category})
         self.store.append_event(

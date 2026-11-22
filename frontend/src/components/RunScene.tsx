@@ -1,7 +1,8 @@
 import clsx from "clsx";
 import { useMemo, useState } from "react";
 import { TERMINAL, type RunEvent, type RunStatus } from "../types";
-import { buildLoop, buildStages } from "../runModel";
+import { buildLoop, buildStages, verificationConclusion } from "../runModel";
+import { VerificationPanel } from "./VerificationPanel";
 import { StageTrack } from "./StageTrack";
 import { ReportPanel } from "./ReportPanel";
 import { Drawer } from "./Drawer";
@@ -40,6 +41,18 @@ export function RunScene({ mode, status, events, onCancel, cancelling, pollError
   const openedEvent = panel?.type === "event" ? events.find((event) => event.sequence === panel.seq) : undefined;
   const openedStage = panel?.type === "stage" ? stages.find((stage) => stage.id === panel.id) : undefined;
   const finalReady = terminal && Boolean(status?.result);
+  const verification = status?.result?.verification;
+  const conclusion = verificationConclusion(verification);
+  const badge = replay ? { label: "示例回放", tone: "warning" }
+    : !status ? { label: "连接中", tone: "neutral" }
+      : state === "cancelled" ? { label: "已取消", tone: "neutral" }
+        : state === "failed" ? {
+          label: verification?.status === "failed" || verification?.status === "blocked" ? conclusion.label : "运行已停止",
+          tone: verification?.status === "blocked" ? "warning" : "error",
+        }
+        : finalReady ? conclusion
+          : terminal ? { label: "运行结束，整理结果", tone: "neutral" }
+            : { label: state === "verifying" ? "独立核验中" : "正在运行", tone: "neutral" };
   const stageEvents = openedStage ? events.filter((event) => event.state === openedStage.id) : [];
   const title = panel?.type === "report" ? "结果与文件"
     : panel?.type === "event" ? "这一步的技术详情"
@@ -51,8 +64,8 @@ export function RunScene({ mode, status, events, onCancel, cancelling, pollError
         {onBack && <button onClick={onBack} className={controlClass} title={terminal ? "返回任务选择" : "返回选择页，不会取消正在运行的任务"}>返回</button>}
         <span className="text-base font-semibold text-ink">PaperHarness</span>
         <span className="hidden max-w-52 truncate text-sm text-ink-mid sm:block" title={targetName}>{targetName ?? "当前任务"}</span>
-        <span className={clsx("rounded-full border px-2.5 py-1 text-xs", replay ? "border-warn/40 text-warn" : state === "succeeded" ? "border-pass/40 text-pass" : state === "failed" ? "border-reject/40 text-reject" : "border-rule-hi text-ink-mid")}>
-          {replay ? "示例回放" : !status ? "连接中" : state === "succeeded" ? "验证通过" : state === "failed" ? "运行已停止" : state === "cancelled" ? "已取消" : "正在运行"}
+        <span className={clsx("rounded-full border px-2.5 py-1 text-xs", badge.tone === "warning" ? "border-warn/40 text-warn" : badge.tone === "success" ? "border-pass/40 text-pass" : badge.tone === "error" ? "border-reject/40 text-reject" : "border-rule-hi text-ink-mid")}>
+          {badge.label}
         </span>
         <div className="ml-auto flex flex-wrap gap-2">
           <button onClick={() => setPanel({ type: "technical" })} className={controlClass}>技术详情</button>
@@ -77,13 +90,15 @@ export function RunScene({ mode, status, events, onCancel, cancelling, pollError
             <summary className="mb-4 cursor-pointer text-sm font-semibold text-ink">执行步骤</summary>
             <StageTrack stages={stages} loop={loop} onSelect={(id) => setPanel({ type: "stage", id })} />
           </details>
-          <p className="mt-5 text-xs leading-6 text-ink-muted">只有运行检查未通过时，才需要分析原因和尝试修复。未开始的步骤不代表失败。</p>
+          <p className="mt-5 text-xs leading-6 text-ink-muted">只有运行检查未通过时，才需要分析原因和尝试修复。科学指标核验是独立检查，不会触发另一轮修复。未开始的步骤不代表失败。</p>
         </aside>
 
         <main className="order-1 min-w-0 shrink-0 px-5 py-7 sm:px-8 lg:order-none lg:overflow-y-auto lg:px-10">
           <div className="mx-auto max-w-[920px]">
             <RunOverview guidance={guidance} terminal={finalReady} onBack={onBack}
               onDetails={() => setPanel({ type: "technical" })} onReport={() => setPanel({ type: "report" })} />
+            {(replay || finalReady) && <VerificationPanel verification={verification} replay={replay}
+              runId={status?.run_id === status?.result?.run_id ? status?.run_id ?? null : null} />}
             <section aria-label="运行经过" className="pt-7">
               <div className="mb-6 flex items-baseline justify-between gap-4">
                 <h2 className="text-base font-semibold text-ink">运行经过</h2>

@@ -67,6 +67,31 @@ _FAILURES: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "程序未满足本次验证条件；可能是命令执行失败，也可能未生成要求的文件。具体原因尚未确认。",
         ("查看最后一次测试详情，核对运行命令、输入数据和预期输出文件后重新运行。",),
     ),
+    "metric_not_met": (
+        "程序运行完成，但指定指标未达标",
+        "独立验证器重新计算的系数误差未满足固定阈值；日志报喜不改变该结论，未继续自动调参。",
+        ("查看指标的实测值、阈值及原始产物，核对算法与输入；验收标准不能通过修复动作修改。",),
+    ),
+    "artifact_invalid": (
+        "产物未通过验收",
+        "本次输出缺失，或未满足安全读取及结构规则；不能认定指标达标。",
+        ("查看验收检查项，核对本次 JSON 产物的字段、维度和数值范围。",),
+    ),
+    "verification_error": (
+        "独立验收未完成",
+        "验收环境或清理过程发生错误；这是系统验收故障，不是仓库指标不达标的证据。",
+        ("请维护者检查 Docker、可信基础镜像及验收环境，恢复后重新运行。",),
+    ),
+    "verification_timeout": (
+        "独立验收超时",
+        "验收未在限定时间内完成，当前没有指标达标结论。",
+        ("请维护者检查验收环境和超时记录，再重新运行。",),
+    ),
+    "verification_rule_changed": (
+        "验收规则与确认记录不一致",
+        "服务端验收器版本已改变，没有使用新规则替代已确认的规则。",
+        ("返回任务选择，重新体检确认当前规则后运行。",),
+    ),
     "artifact_missing": (
         "未找到预期输出文件",
         "测试未生成要求的输出文件，因此不能判定本次验证通过。",
@@ -142,6 +167,7 @@ _STAGES = {
     RunState.TESTING: ("执行测试", "正在执行本次运行命令并检查验证条件；未通过时会按预算分析原因。"),
     RunState.DIAGNOSING: ("分析失败原因", "正在根据本次错误分析原因，随后决定能否尝试修复。"),
     RunState.REPAIRING: ("尝试修复", "正在尝试允许的修复动作，随后会重新测试；修改完成不代表验证通过。"),
+    RunState.VERIFYING: ("独立检查指标", "运行端已进入收尾，正在用隔离验证器检查固定数值规则；尚未得出指标结论。"),
 }
 
 
@@ -218,6 +244,12 @@ def explain_event(event: RunEvent, result: RunResult | None = None) -> EventExpl
         if event.state == RunState.CANCELLED or kind == "cancel":
             return _explanation("任务已取消", "任务已停止，不再继续测试或自动修复。", "warning")
         if event.state == RunState.SUCCEEDED:
+            if result and result.verification and result.verification.status == "passed":
+                return _explanation(
+                    "指定任务指标达标" if result.verification.level == "target" else "程序运行通过",
+                    result.verification.summary + "；未进行干净环境复跑，不等于完整复现论文。",
+                    "success",
+                )
             return _explanation(
                 "本次验证通过", "仅通过本次设置的验证条件，不等于完整复现论文。", "success"
             )
@@ -226,6 +258,13 @@ def explain_event(event: RunEvent, result: RunResult | None = None) -> EventExpl
             category = result.failure_category
         title, detail, _ = _failure(category if isinstance(category, str) else None, event)
         return _explanation(title, detail, "error")
+    if kind == "verification":
+        status = event.data.get("status")
+        if status == "passed":
+            return _explanation("独立指标检查通过", "固定规则已完成数值比较，实测指标与证据见验收结果。", "success")
+        category = event.data.get("failure_category")
+        title, detail, _ = _failure(category if isinstance(category, str) else "verification_error")
+        return _explanation(title, detail, "warning" if status == "blocked" else "error")
     if kind == "diagnosis":
         category = event.data.get("failure_class")
         title, detail, _ = _failure(category if isinstance(category, str) else None)
@@ -272,6 +311,7 @@ def explain_event(event: RunEvent, result: RunResult | None = None) -> EventExpl
             return _explanation(f"已{label}", detail, "success" if kind in _CHANGES else "neutral")
         return _explanation(f"{label}记录", "已记录动作，但未明确说明是否成功，请查看详情。")
     facts = {
+        "verification_started": ("已开始独立指标验收", "将停止运行端并读取本次产物，再在独立断网只读容器中检查；不加载被修复仓库的模块。", "neutral"),
         "queued": ("任务已排队", "已收到运行请求，等待开始。", "neutral"),
         "preparing": ("代码已下载", "指定版本的代码已准备好。", "success"),
         "target": ("已匹配内置示例", "已加入该示例预设的验证文件。", "neutral"),
@@ -311,6 +351,14 @@ def build_run_guidance(
     if state in _TERMINAL and result is None:
         return guidance("正在整理结果", "执行阶段已结束，最终结果尚未写入；请稍候再查看。")
     if state == RunState.SUCCEEDED:
+        if result and result.verification and result.verification.status == "passed":
+            target_passed = result.verification.level == "target"
+            return guidance(
+                "指定任务指标达标" if target_passed else "程序运行通过",
+                result.verification.summary + "；未进行干净环境复跑，不等于完整复现论文。",
+                "success", ("查看验收检查项、实测指标和原始证据；仅对本次声明的小任务成立。",)
+                if target_passed else ("当前只完成执行检查，尚未独立验证科研指标。",),
+            )
         return guidance(
             "本次验证通过", "仅通过本次设置的验证条件，不等于完整复现论文或确认论文结论。", "success",
             ("查看报告中的运行命令、输出和验证条件；若需完整复现，请按论文要求继续核对数据、指标和实验。",),

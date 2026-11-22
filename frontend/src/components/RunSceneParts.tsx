@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import type { EventExplanation, RunEvent, RunGuidance, RunState, RunStatus } from "../types";
-import type { StageView } from "../runModel";
+import { verificationConclusion, type StageView } from "../runModel";
 
 export type Panel =
   | { type: "event"; seq: number }
@@ -17,13 +17,16 @@ export const STATE_COPY: Record<RunState, { title: string; detail: string }> = {
   testing: { title: "正在运行程序并检查结果", detail: "执行本次运行计划，检查程序是否正常结束，以及要求的结果文件是否存在。" },
   diagnosing: { title: "正在分析失败原因", detail: "程序没有通过检查，系统正在根据错误记录判断是否可以自动处理。" },
   repairing: { title: "正在尝试自动修复", detail: "系统会读取相关代码，尝试允许范围内的修改，再重新运行验证；尝试修复不代表已经成功。" },
-  succeeded: { title: "已通过本次运行验证", detail: "程序通过了本次设置的检查条件，这不等于完整复现论文的全部实验结论。" },
+  verifying: { title: "正在独立核验科学指标", detail: "运行命令已结束，独立校验器正在按固定规则核对指标。这不是新一轮自动修复，也不是干净环境重放。" },
+  succeeded: { title: "本次运行已结束", detail: "请以保存的验证记录判断检查范围；运行成功不等于目标指标通过或完整论文复现。" },
   failed: { title: "本次运行未能完成", detail: "请查看运行说明和技术详情，确认停止原因后再开始新的任务。" },
   cancelled: { title: "本次任务已取消", detail: "本次任务不会继续执行，已有记录仍可查看。需要重试时，请返回重新提交。" },
 };
 
 export function guidanceOf(status: RunStatus | null, replay: boolean): RunGuidance {
-  if (status?.guidance) return status.guidance;
+  // 真实的新结果以服务端结论为准；旧 verified 布尔值不能升级为分级验证。
+  const legacySuccess = status?.state === "succeeded" && status.result && !status.result.verification;
+  if (status?.guidance && !replay && !legacySuccess) return status.guidance;
   if (!status) return {
     title: replay ? "正在加载示例回放" : "正在读取任务进展",
     detail: replay ? "这是预设记录，不会创建真实运行任务。" : "连接成功后，这里会显示当前步骤和已经发生的事情。",
@@ -34,9 +37,20 @@ export function guidanceOf(status: RunStatus | null, replay: boolean): RunGuidan
     title: "运行已结束，正在整理结果", detail: "正在同步最终说明和报告，请稍候。",
     tone: "neutral", next_steps: [], repair_summary: "",
   };
+  if (terminal && replay) return {
+    title: "示例回放已结束", detail: "预设记录只演示操作过程，不提供真实执行检查或目标指标结论。",
+    tone: "neutral", next_steps: ["返回选择任务并连接运行服务，生成自己的运行结果。"],
+    repair_summary: "以下为示例中的处理记录，不是本机实际执行结果。",
+  };
+  const verification = status.result?.verification;
+  const conclusion = verificationConclusion(verification);
   return {
     ...STATE_COPY[status.state],
-    tone: status.state === "succeeded" ? "success" : status.state === "failed" ? "error" : "neutral",
+    ...(terminal && status.state !== "cancelled" ? {
+      title: verification ? conclusion.label : `${STATE_COPY[status.state].title}，未记录分级验证`,
+      detail: verification?.summary ?? "历史结果未记录分级验证，无法据此判断目标指标是否通过。",
+    } : {}),
+    tone: terminal && verification ? conclusion.tone : status.state === "failed" ? "error" : "neutral",
     next_steps: terminal ? ["查看运行经过与结果文件，或返回选择其他任务。"] : [],
     repair_summary: replay ? "以下为示例中的处理记录，不是本机实际执行结果。" : "",
   };
@@ -48,7 +62,8 @@ const EVENT_NAMES: Record<string, string> = {
   diagnosis: "已分析失败原因", read_file: "查看相关代码", search_text: "搜索相关位置",
   replace_exact: "尝试修改代码", install_requirement: "尝试补充依赖", set_environment: "调整运行参数",
   run_smoke_test: "重新检查程序", finish_repair: "结束本轮修复决策", repair_round: "本轮修复尝试结束",
-  loop_stopped: "停止重复尝试", final: "本次运行结束", cancel: "取消任务", internal_error: "运行服务发生异常",
+  loop_stopped: "停止重复尝试", verification_started: "开始独立核验科学指标", verification: "独立指标核验结果",
+  final: "本次运行结束", cancel: "取消任务", internal_error: "运行服务发生异常",
 };
 
 export function explanationOf(event: RunEvent): EventExplanation {

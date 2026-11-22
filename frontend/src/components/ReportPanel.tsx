@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import { ApiError, getPatch, getReport } from "../api";
 import type { RunStatus } from "../types";
+import { VerificationPanel } from "./VerificationPanel";
+import { guidanceOf } from "./RunSceneParts";
 
 /**
  * 结果报告面板：把后端落盘的三个文件搬到界面上。
@@ -35,7 +37,7 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
   });
   const result = status?.result ?? null;
   const terminal = Boolean(status && ["succeeded", "failed", "cancelled"].includes(status.state));
-  const guidance = status?.guidance;
+  const guidance = status ? guidanceOf(status, false) : undefined;
   const tone = guidance?.tone ?? "neutral";
   // result.json 直接来自轮询，不重新请求或改写结果字段。
   const jsonText = result ? JSON.stringify(result, null, 2) : "";
@@ -80,6 +82,8 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
           </div>
         )}
       </div>
+
+      {result && <VerificationPanel verification={result.verification} runId={runId === result.run_id ? runId : null} />}
 
       <details
         open={filesOpen}
