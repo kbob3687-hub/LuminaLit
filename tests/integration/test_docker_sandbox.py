@@ -108,9 +108,17 @@ def _require_real_docker(request):
 
     不注册自定义 marker：pyproject.toml 未登记 markers，加 marker 会触发
     PytestUnknownMarkWarning，而本 PR 只允许改这一个文件。
+
+    豁免判据是「显式名单 or `test_aci_` 前缀」。加前缀是因为名单式豁免
+    会让新增的离线用例**静默变成 skip**：用例看着绿，其实一次没跑过
+    （本 PR 加验收链用例时就踩到了）。ACI 层用例不碰 Docker，统一用前缀
+    自证身份，以后再加不用回头改名单。
     """
-    if not _DOCKER_OK and request.node.name not in _NO_DOCKER_TESTS:
-        pytest.skip(f"需要真实 Docker 环境：{_DOCKER_REASON}")
+    if _DOCKER_OK:
+        return
+    if request.node.name in _NO_DOCKER_TESTS or request.node.name.startswith("test_aci_"):
+        return
+    pytest.skip(f"需要真实 Docker 环境：{_DOCKER_REASON}")
 
 
 @pytest.fixture
@@ -666,3 +674,144 @@ def test_aci_search_text_max_results_guard(tmp_path):
         SearchTextAction(action="search_text", query="hello", path=".", max_results=50)
     )
     assert good.ok is True
+
+
+# ----------------------------- ACI 验收链隔离：模型不能自己判卷（离线防 Reward Hacking）
+
+
+def _acceptance_aci(tmp_path, *, source="target_manifest", artifact="out.txt"):
+    """构造已经注入 `check.py` 的 ACI，复现 `runner._inject_target_files` 的现场。
+
+    直接用真实靶场的 `check.py`（`targets/paper-umap`，断言 `ari >= 0.999`），
+    而不是自造一个假脚本：要验的就是「真实判据能不能被模型改写」，用假脚本
+    测不出真问题。靶场目录只读，不修改。
+    """
+    import shutil
+    from pathlib import Path
+
+    from paperharness.aci import PaperACI
+    from paperharness.contracts.run import RunPlan
+    from paperharness.sandbox.fake import FakeSandboxSession
+
+    repo_root = Path(__file__).resolve().parents[2]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shutil.copy2(repo_root / "targets" / "paper-umap" / "check.py", workspace / "check.py")
+    (workspace / "main.py").write_text("x = 1\n", encoding="utf-8")
+    if artifact:
+        artifact_path = workspace / artifact
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text("stale artifact\n", encoding="utf-8")
+
+    plan = RunPlan(
+        resolved_revision="0" * 40,
+        python_version="3.10",
+        command=["python", "-I", "check.py"],
+        expected_artifact=artifact,
+        source=source,
+    )
+    return PaperACI(FakeSandboxSession(workspace=workspace), workspace, plan, 60), workspace
+
+
+def test_aci_acceptance_rejects_script_rewrite(tmp_path):
+    """注入的 check.py 不可写：否则 `assert ari >= 0.999` 能被改成 `>= 0.0`。
+
+    runner.py:471 的承诺是「check.py 是我们写死的确定性断言，模型无权创建或
+    修改——验证不能让考生自己判卷」。这条承诺此前只存在于注释里：path_guard
+    只保证不越界，replace_exact 照样能改 workspace 内任何文件。改动不报错，
+    只会让 verified=true 失去意义。
+    """
+    from paperharness.contracts.run import ReplaceExactAction
+
+    aci, workspace = _acceptance_aci(tmp_path)
+    observation = aci.execute(
+        ReplaceExactAction(
+            action="replace_exact",
+            path="check.py",
+            old="assert ari >= 0.999",
+            new="assert ari >= 0.0",
+        )
+    )
+
+    assert observation.ok is False
+    assert observation.summary == "protected_file:check.py"
+    assert "assert ari >= 0.999" in (workspace / "check.py").read_text(encoding="utf-8"), (
+        "拦截必须发生在写入之前，check.py 内容不能变"
+    )
+
+
+def test_aci_acceptance_rejects_artifact_rewrite(tmp_path):
+    """期望产物是验收的证据，模型直接改写它等于伪造证据。"""
+    from paperharness.contracts.run import ReplaceExactAction
+
+    aci, workspace = _acceptance_aci(tmp_path)
+    observation = aci.execute(
+        ReplaceExactAction(
+            action="replace_exact", path="out.txt", old="stale", new="forged"
+        )
+    )
+
+    assert observation.ok is False
+    assert observation.summary == "protected_file:out.txt"
+    assert (workspace / "out.txt").read_text(encoding="utf-8") == "stale artifact\n"
+
+
+def test_aci_acceptance_rejects_nested_artifact_rewrite(tmp_path):
+    """`./out.txt` 与 `out.txt` 是同一个文件，不能靠同义写法绕过保护。"""
+    from paperharness.contracts.run import ReplaceExactAction
+
+    aci, workspace = _acceptance_aci(tmp_path, artifact="reports/out.txt")
+
+    observation = aci.execute(
+        ReplaceExactAction(
+            action="replace_exact", path="./reports/out.txt", old="stale", new="forged"
+        )
+    )
+
+    assert observation.ok is False
+    assert observation.summary == "protected_file:reports/out.txt"
+    assert (workspace / "reports" / "out.txt").read_text(encoding="utf-8") == "stale artifact\n"
+
+
+def test_aci_acceptance_allows_source_edit(tmp_path):
+    """隔离不能过宽：修复本来就该改源码，误伤会让自愈彻底失效。"""
+    from paperharness.contracts.run import ReplaceExactAction
+
+    aci, workspace = _acceptance_aci(tmp_path)
+    observation = aci.execute(
+        ReplaceExactAction(action="replace_exact", path="main.py", old="x = 1", new="x = 2")
+    )
+
+    assert observation.ok is True
+    assert observation.summary == "replaced 1 occurrence in main.py"
+    assert (workspace / "main.py").read_text(encoding="utf-8") == "x = 2\n"
+
+
+def test_aci_acceptance_allows_script_read(tmp_path):
+    """「只读隔离」的字面含义：可读不可写。读被禁会破坏现有诊断流程。"""
+    from paperharness.contracts.run import ReadFileAction
+
+    aci, _ = _acceptance_aci(tmp_path)
+    observation = aci.execute(
+        ReadFileAction(action="read_file", path="check.py", start_line=1, line_count=5)
+    )
+
+    assert observation.ok is True
+    assert "read 5 lines from check.py" == observation.summary
+
+
+def test_aci_acceptance_allows_user_owned_check(tmp_path):
+    """source != target_manifest 时同名文件是待修代码，不是官方判据。"""
+    from paperharness.contracts.run import ReplaceExactAction
+
+    aci, _ = _acceptance_aci(tmp_path, source="user", artifact=None)
+    observation = aci.execute(
+        ReplaceExactAction(
+            action="replace_exact",
+            path="check.py",
+            old="assert ari >= 0.999",
+            new="assert ari >= 0.999  # tuned",
+        )
+    )
+
+    assert observation.ok is True

@@ -19,6 +19,8 @@ EXPECTED_TAGS = {
     "path_escape",
     "env_not_allowed",
     "invalid_argument",
+    # 写到验收链上的文件（官方注入的 check.py、期望产物）：写入被拒。
+    "protected_file",
 }
 
 
