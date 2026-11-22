@@ -50,6 +50,9 @@ ALLOWED_ENV_NAMES = frozenset(
 # install 可跑满 120s 并绕过总墙钟。与 run_smoke_test 保持同一口径。
 # 设计稿 §5.4「提案 4」的下限仍标着「待确认」，在确认前不落地。
 
+# Harness 注入 workspace 的验收脚本名（runner._inject_target_files 写死这个路径）。
+ACCEPTANCE_SCRIPT = "check.py"
+
 
 class PaperACI:
     def __init__(
@@ -149,6 +152,13 @@ class PaperACI:
         target = self._guard(action)
         if isinstance(target, Observation):
             return target
+
+        # 先验后做：受保护判定必须落在 is_file / 读取 / 写入之前，否则
+        # 「用一次非法写入换一次合法读」就成了绕过通道（本文件 §2 的顺序要求）。
+        protected = self._protected_path(target)
+        if protected is not None:
+            return self._fail(action.action, errors.protected_file(protected))
+
         if not target.is_file():
             return self._fail(action.action, errors.FILE_NOT_FOUND)
 
@@ -218,6 +228,31 @@ class PaperACI:
             return path_guard.resolve(self.workspace, action.path)
         except path_guard.PathEscape as exc:
             return self._fail(action.action, errors.path_escape(exc.raw))
+
+    def _protected_path(self, target: Path) -> str | None:
+        """验收链上的文件不可写，返回 workspace 相对路径；未命中返回 None。
+
+        为什么需要这层：runner.py:471 白纸黑字承诺「check.py 是我们写死的
+        确定性断言，模型无权创建或修改——验证不能让考生自己判卷」，但那条
+        承诺此前只存在于注释里。`path_guard` 只保证路径不越界，`replace_exact`
+        照样能改写 workspace 内的任何文件，实测把
+        `assert ari >= 0.999` 改成 `assert ari >= 0.0` 仍返回 ok=True。
+        这类动作不会让 run 失败，只会让「通过」变得毫无意义——这正是
+        评委要看的那类 Reward Hacking。
+
+        受保护集合刻意取「参与判定成立与否的文件」，而不是「看起来像测试的
+        文件」：`check.py` 是 Harness 注入的判据，`expected_artifact` 是判据
+        的唯一证据。两者被改写，验收即失效。
+        """
+        rel = self._relative(target)
+        artifact = self.plan.expected_artifact
+        if artifact and _normalize_rel(artifact) == rel:
+            return rel
+        # 只有靶场注入的 check.py 才是官方验收脚本；用户自带仓库里的同名
+        # 文件属于待修代码，改它是正当修复动作，不能误伤。
+        if self.plan.source == "target_manifest" and rel == ACCEPTANCE_SCRIPT:
+            return rel
+        return None
 
     def _fail(self, action: str, summary: str) -> Observation:
         return Observation(ok=False, action=action, summary=summary)
@@ -312,3 +347,13 @@ class PaperACI:
         if not text:
             return ""
         return text[-MAX_TAIL_CHARS:]
+
+
+def _normalize_rel(raw: str) -> str:
+    """把计划里的相对路径压成 workspace 相对的 POSIX 形式。
+
+    只处理同义写法（`./out.txt`、`out\\out.txt`），**不做安全判断**：
+    越界是 `path_guard` 的职责，这里多拦一次只会让错误码变得含混。
+    """
+    parts = [seg for seg in raw.replace("\\", "/").split("/") if seg not in ("", ".")]
+    return "/".join(parts)
