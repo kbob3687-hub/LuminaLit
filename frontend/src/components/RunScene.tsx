@@ -15,7 +15,6 @@ import {
   isActionEvent,
   isBlockedEvent,
   STAGE_ORDER,
-  type ActionRow,
   type StageView,
 } from "../runModel";
 import { FlowGraph } from "./FlowGraph";
@@ -24,7 +23,8 @@ import { ProgressBand } from "./ProgressBand";
 import { ReportPanel } from "./ReportPanel";
 import { Drawer } from "./Drawer";
 import { AcceptanceStrip } from "./AcceptancePanel";
-import { AciPanel, LoopPanel, PlanPanel, StagePanel } from "./DrawerPanels";
+import { AciPanel, EventPanel, LoopPanel, PlanPanel, StagePanel } from "./DrawerPanels";
+import { ActionRowItem } from "./ActionRowItem";
 
 /**
  * 场景 3：运行现场。
@@ -38,6 +38,7 @@ import { AciPanel, LoopPanel, PlanPanel, StagePanel } from "./DrawerPanels";
 
 type Panel =
   | { type: "aci"; seq: number }
+  | { type: "event"; seq: number }
   | { type: "loop" }
   | { type: "stage"; id: StageView["id"] }
   | { type: "plan" }
@@ -185,6 +186,43 @@ export function RunScene({
   const activeStage = stages.find((s) => s.status === "active");
   const openedEvent =
     panel?.type === "aci" ? events.find((e) => e.sequence === panel.seq) : undefined;
+  const detailEvent =
+    panel?.type === "event" ? events.find((e) => e.sequence === panel.seq) : undefined;
+
+  /**
+   * 动作流的就地展开状态。
+   *
+   * 为什么不是"点开抽屉"一条路：同一轮里通常要连着对照好几条动作，
+   * 抽屉是全屏遮罩，看一条关一次；而且行内截断的 target/result 展开前
+   * 根本没有第二个入口。高度按行单独记，长路径和短命令不会互相牵连。
+   */
+  const [expandedRows, setExpandedRows] = useState<number[]>([]);
+  const [rowHeights, setRowHeights] = useState<Record<number, number>>({});
+  /** 拓扑图默认展开；看长事件时收起来，把高度让给动作流。 */
+  const [graphOpen, setGraphOpen] = useState(true);
+  const eventBySeq = useMemo(() => new Map(events.map((e) => [e.sequence, e])), [events]);
+  /** 拓扑是不是被"展开某一行"这个动作自动收起的；是的话收起行时再还回去。 */
+  const autoCollapsed = useRef(false);
+  const toggleRow = (seq: number) => {
+    const willExpand = !expandedRows.includes(seq);
+    if (willExpand && graphOpen) {
+      // 900px 高的屏幕上动作流只剩一百多像素，展开的详情根本放不下。
+      // 展开即进入"看步骤"模式：拓扑让位，收完最后一行再自动放回来。
+      setGraphOpen(false);
+      autoCollapsed.current = true;
+    } else if (!willExpand && expandedRows.length === 1 && autoCollapsed.current) {
+      setGraphOpen(true);
+      autoCollapsed.current = false;
+    }
+    setExpandedRows((prev) => (prev.includes(seq) ? prev.filter((s) => s !== seq) : [...prev, seq]));
+  };
+
+  /** 点圆点 / 行内「单独打开」：ACI 动作走校验流水线，其它事件走事件详情。 */
+  const openEvent = (seq: number) => {
+    const ev = eventBySeq.get(seq);
+    if (ev && isActionEvent(ev)) setPanel({ type: "aci", seq });
+    else if (ev) setPanel({ type: "event", seq });
+  };
 
   return (
     <div className="flex h-full flex-col">
@@ -482,21 +520,53 @@ export function RunScene({
       <ProgressBand p={progress} state={state} />
 
       {/* ── 执行拓扑图：节点像墨迹铺开，回路像活物回转 ── */}
-      <section className="relative h-[340px] shrink-0 overflow-hidden border-b border-rule">
-        <div className="absolute top-3 left-6 z-[3] font-mono text-[9.5px] tracking-[.18em] text-ink-muted uppercase">
-          执行拓扑
+      <section className="shrink-0 border-b border-rule">
+        <div className="flex h-9 items-center justify-between gap-4 px-6">
+          <div className="flex items-center gap-3">
+            <span className="font-mono text-[9.5px] tracking-[.18em] text-ink-muted uppercase">
+              执行拓扑
+            </span>
+            <span className="font-mono text-[9.5px] text-ink-muted/60">
+              {stages.filter((s) => s.status === "done").length}/{stages.length} 阶段 · 审查{" "}
+              {reviewCount} 次 · <b className="text-reject">拦截 {blockedCount} 次</b>
+            </span>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="hidden items-center gap-2 font-mono text-[9px] text-ink-muted/70 lg:flex">
+              <i className="size-[5px] rounded-full bg-pass" /> 通过
+              <i className="ml-1.5 size-[5px] rounded-full bg-warn" /> 失败
+              <i className="ml-1.5 size-[5px] rounded-full bg-reject" /> 拦截
+            </span>
+            <span className="hidden font-mono text-[9.5px] tracking-[.06em] text-ink-muted md:inline">
+              点圆点看单步 · 点节点看全部步骤
+            </span>
+            {/* 动作流窗口被上面几段挤得很矮，看步骤时可以把拓扑收起来 */}
+            <button
+              onClick={() => setGraphOpen((v) => !v)}
+              title={graphOpen ? "收起拓扑，把高度让给动作流" : "展开拓扑图"}
+              className="cursor-pointer rounded-[5px] border border-rule-hi bg-white/[.03] px-2 py-0.5 font-mono text-[9.5px] text-ink-muted transition-colors hover:border-ink-muted hover:text-ink"
+            >
+              {graphOpen ? "收起 ⌃" : "展开 ⌄"}
+            </button>
+          </div>
         </div>
-        <div className="absolute top-3 right-6 z-[3] flex items-center gap-2 rounded-full border border-rule-hi bg-white/[.03] px-3 py-1 font-mono text-[9.5px] tracking-[.06em] text-ink-muted">
-          点节点看事件
+        <div
+          className={clsx(
+            "overflow-hidden transition-[height] duration-300 ease-out",
+            graphOpen ? "h-[304px]" : "h-0",
+          )}
+        >
+          <FlowGraph
+            state={state}
+            stages={stages}
+            loop={loop}
+            rows={rows}
+            events={events}
+            onSelectStage={(id) => setPanel({ type: "stage", id })}
+            onSelectGate={() => setPanel({ type: "loop" })}
+            onSelectStep={openEvent}
+          />
         </div>
-        <FlowGraph
-          state={state}
-          stages={stages}
-          loop={loop}
-          rows={rows}
-          onSelectStage={(id) => setPanel({ type: "stage", id })}
-          onSelectGate={() => setPanel({ type: "loop" })}
-        />
       </section>
 
       {/* ── 自愈回环：正在干什么 ── */}
@@ -509,8 +579,13 @@ export function RunScene({
 
       {/* ── 动作流 + 遥测 ── */}
       <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[1fr_296px]">
-        <div className="min-h-0 overflow-y-auto px-6 py-5">
-          <div className="sticky top-0 z-[2] mb-1.5 flex items-center justify-between border-b border-rule bg-void pt-0.5 pb-3">
+        <div className="flex min-h-0 flex-col">
+          {/*
+            标签条是这一栏自己的子头部，**不吸顶浮在事件行上**。
+            之前它在滚动容器里 sticky top-0，背景只盖住两个按钮的宽度，
+            滚动时正好骑在第一行中间，看起来像 UI 错位（截屏里那个悬空块）。
+          */}
+          <div className="flex shrink-0 items-center justify-between gap-4 border-b border-rule bg-void/70 px-6 pt-3 pb-2.5">
             <div className="flex gap-[3px]">
               <button className="cursor-pointer rounded-[5px] border border-rule-hi bg-surface-hi px-3.5 py-1.5 text-xs text-ink">
                 动作流
@@ -521,12 +596,17 @@ export function RunScene({
               >
                 自愈回环 {loop.rounds.length > 0 && `×${loop.rounds.length}`}
               </button>
+              <span className="ml-2 self-center font-mono text-[9.5px] text-ink-muted/60">
+                点一行就地展开（拓扑自动让位）· 展开区可拖动改高度
+              </span>
             </div>
             <div className="font-mono text-[10.5px] tracking-[.03em] text-ink-muted">
               {rows.length} 个动作 · ACI 审查 {reviewCount} 次 ·{" "}
               <b className="text-reject">拦截 {blockedCount} 次</b>
             </div>
           </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
 
           {rows.length === 0 && (
             <div className="mt-10 text-center font-mono text-[11.5px] leading-relaxed text-ink-muted">
@@ -562,16 +642,22 @@ export function RunScene({
 
           <AnimatePresence initial={false}>
             {visibleRows.map((r) => (
-              <motion.button
+              <motion.div
                 key={r.seq}
-                onClick={() => setPanel({ type: "aci", seq: r.seq })}
-                className="block w-full cursor-pointer text-left"
                 initial={STILL ? false : { opacity: 0, x: -18 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ duration: 0.42, ease: [0.16, 1, 0.3, 1] }}
               >
-                <ActionLine row={r} />
-              </motion.button>
+                <ActionRowItem
+                  row={r}
+                  event={eventBySeq.get(r.seq)}
+                  expanded={expandedRows.includes(r.seq)}
+                  height={rowHeights[r.seq] ?? null}
+                  onToggle={() => toggleRow(r.seq)}
+                  onResize={(h) => setRowHeights((prev) => ({ ...prev, [r.seq]: h }))}
+                  onOpenDetail={() => openEvent(r.seq)}
+                />
+              </motion.div>
             ))}
           </AnimatePresence>
 
@@ -594,6 +680,7 @@ export function RunScene({
               )}
             </div>
           )}
+          </div>
         </div>
 
         <aside className="min-h-0 overflow-y-auto border-l border-rule bg-gradient-to-b from-white/[.018] to-transparent p-5">
@@ -659,13 +746,18 @@ export function RunScene({
       <Drawer
         open={panel !== null}
         wide={panel?.type === "report" || panel?.type === "plan"}
-        title={drawerTitle(panel, openedEvent, stages, loop)}
-        subtitle={drawerSubtitle(panel, openedEvent)}
+        title={drawerTitle(panel, panel?.type === "event" ? detailEvent : openedEvent, stages, loop)}
+        subtitle={drawerSubtitle(panel, panel?.type === "event" ? detailEvent : openedEvent)}
         onClose={() => setPanel(null)}
       >
-        {panel?.type === "aci" && openedEvent && isActionEvent(openedEvent) && (
-          <AciPanel trace={aciTrace(openedEvent)} event={openedEvent} />
-        )}
+        {panel?.type === "aci" &&
+          openedEvent &&
+          (isActionEvent(openedEvent) ? (
+            <AciPanel trace={aciTrace(openedEvent)} event={openedEvent} />
+          ) : (
+            <EventPanel event={openedEvent} />
+          ))}
+        {panel?.type === "event" && detailEvent && <EventPanel event={detailEvent} />}
         {panel?.type === "loop" && (
           <LoopPanel
             loop={loop}
@@ -691,6 +783,7 @@ function drawerTitle(
   loop: ReturnType<typeof buildLoop>,
 ): string {
   if (panel?.type === "aci") return event ? `ACI 审查 · ${event.kind}` : "ACI 审查";
+  if (panel?.type === "event") return event ? `事件 #${event.sequence} · ${event.kind}` : "事件详情";
   if (panel?.type === "loop")
     return loop.rounds.length ? `自愈回环 · ${loop.rounds.length} 轮` : "自愈回环";
   if (panel?.type === "stage")
@@ -702,6 +795,7 @@ function drawerTitle(
 function drawerSubtitle(panel: Panel, event: RunEvent | undefined): string | undefined {
   if (panel?.type === "aci" && event)
     return isBlockedEvent(event) ? "校验失败：零副作用拦截" : "校验通过：动作已执行";
+  if (panel?.type === "event") return "单条后端事件原文（不是 ACI 动作，无校验流水线）";
   if (panel?.type === "stage") return "该阶段全部事件（后端原样）";
   if (panel?.type === "report") return "report.md · patch.diff · result.json（后端落盘原文）";
   return undefined;
@@ -725,70 +819,6 @@ function Stat({ value, label, tone }: { value: number; label: string; tone?: "ba
       </motion.div>
       <div className="mt-2.5 text-[10px] tracking-[.16em] text-ink-muted uppercase">{label}</div>
     </div>
-  );
-}
-
-function ActionLine({ row }: { row: ActionRow }) {
-  const sym =
-    row.kind === "reject" ? "✕" : row.kind === "finish" ? "⊘" : row.kind === "ok" ? "✓" : "⟩";
-
-  return (
-    <>
-      <motion.div
-        // App.tsx 的粒子 effect 靠 [data-blocked='1'] 找拦截行；之前没有任何
-        // 元素设置这个属性，那段每 1.5s 的查询永远空转。这里补上让它生效。
-        data-blocked={row.blocked ? "1" : undefined}
-        whileHover={{ x: 3, backgroundColor: "rgb(255 255 255 / .04)" }}
-        transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-        className={clsx(
-          // 列宽按"时间 图标 动作 参数 结果"分配：结果列用 max-content，
-          // 宁可挤参数列也不截断结论（`20 matches` 截成 `20 ma…` 就没信息了）
-          "relative -mx-[13px] grid grid-cols-[62px_15px_146px_minmax(0,1fr)_minmax(104px,max-content)] items-center gap-x-[10px] rounded-[5px] border-b border-white/[.045] px-[13px] py-[8px] font-mono text-[12px] last:border-b-0",
-          row.blocked &&
-            "border-b-reject/15 bg-gradient-to-r from-reject/[.11] to-reject/[.02] pl-[15px] shadow-[inset_2px_0_0_var(--color-reject)] hover:from-reject/[.18] hover:to-reject/[.04]",
-        )}
-      >
-        <span className="text-[10.5px] tabular-nums text-ink-muted/85">{row.ts}</span>
-        <span
-          className={clsx(
-            "text-center text-[12px]",
-            row.kind === "reject" ? "font-bold text-reject" : "text-ink-muted/70",
-          )}
-        >
-          {sym}
-        </span>
-        <span className="truncate text-[11.5px] text-ink" title={row.name}>
-          {row.name}
-        </span>
-        <span
-          className={clsx(
-            "truncate text-[11.5px]",
-            row.blocked ? "text-[rgb(255_180_170_/_0.9)]" : "text-ink-mid",
-          )}
-          title={row.target}
-        >
-          {row.target}
-        </span>
-        <span
-          className={clsx(
-            "max-w-[300px] justify-self-end truncate text-right text-[11.5px] tabular-nums",
-            row.kind === "reject" && "font-semibold text-reject",
-            row.kind === "ok" && "text-pass",
-            row.kind === "call" && "text-ink-muted",
-          )}
-          title={row.result}
-        >
-          {row.result}
-        </span>
-      </motion.div>
-
-      {row.reason && (
-        <div className="mb-0.5 -mx-[13px] flex items-baseline gap-2.5 rounded-b-md px-[13px] pt-1 pb-2 pl-[87px] font-mono text-[10.5px] leading-relaxed text-[rgb(255_140_128_/_0.9)]">
-          <span className="text-reject/50">└</span>
-          <span>{row.reason}</span>
-        </div>
-      )}
-    </>
   );
 }
 

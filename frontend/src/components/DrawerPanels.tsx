@@ -313,6 +313,56 @@ export function StagePanel({
   );
 }
 
+/* ───────────────────────────────────────────── 单条事件 */
+
+/**
+ * 单条事件详情。
+ *
+ * 拓扑图节点下面的步骤圆点、动作流里 install/test 这类**非 ACI 动作**的行，
+ * 都落到这里：它们没有校验流水线，硬塞进 AciPanel 会得到一张空表。
+ */
+export function EventPanel({ event }: { event: RunEvent }) {
+  const data = event.data ?? {};
+  const hasData = Object.keys(data).length > 0;
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-4 gap-2.5">
+        <Meta k="序号" v={`#${event.sequence}`} />
+        <Meta k="阶段" v={event.state} />
+        <Meta k="类型" v={event.kind} />
+        <Meta
+          k="时间"
+          v={new Date(event.timestamp).toLocaleTimeString("zh-CN", { hour12: false })}
+        />
+      </div>
+
+      <div className="rounded-[9px] border border-rule bg-white/[.02] px-3.5 py-3">
+        <div className="font-mono text-[9.5px] tracking-[.14em] text-ink-muted uppercase">
+          事件原文
+        </div>
+        <p className="mt-1.5 font-mono text-[12px] leading-relaxed break-all text-ink">
+          {event.message}
+        </p>
+      </div>
+
+      {hasData ? (
+        <div>
+          <SectionTitle>data</SectionTitle>
+          <pre className="mt-2 max-h-[46vh] overflow-auto rounded-[9px] border border-rule bg-void/60 px-3 py-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-all text-ink-mid">
+            {JSON.stringify(data, null, 2)}
+          </pre>
+        </div>
+      ) : (
+        <p className="font-mono text-[11px] text-ink-muted">这条事件没有 data 字段。</p>
+      )}
+
+      <p className="font-mono text-[10.5px] leading-relaxed text-ink-muted/75">
+        这是阶段/执行事件，不是 ACI 动作，因此没有「校验流水线」。动作类事件的详情走 ACI 面板。
+      </p>
+    </div>
+  );
+}
+
 /* ───────────────────────────────────────────── 执行计划 */
 
 export function PlanPanel({

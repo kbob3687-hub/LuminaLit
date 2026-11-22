@@ -1,8 +1,8 @@
 import { useMemo } from "react";
 import { motion } from "motion/react";
 import dagre from "@dagrejs/dagre";
-import type { RunState } from "../types";
-import type { ActionRow, LoopView, StageView } from "../runModel";
+import type { RunEvent, RunState } from "../types";
+import { isActionEvent, isBlockedEvent, type ActionRow, type LoopView, type StageView } from "../runModel";
 
 /**
  * 执行拓扑图 —— 用 dagre 自动布局。
@@ -22,7 +22,14 @@ import type { ActionRow, LoopView, StageView } from "../runModel";
 const STILL = new URLSearchParams(window.location.search).get("still") === "1";
 
 const NODE_W = 148;
-const NODE_H = 74;
+/** 节点高度要放得下「标签 / 副标题 / 步骤圆点」三行，72 那版没有圆点的位置。 */
+const NODE_H = 92;
+/** 节点下方最多画几个圆点；多出来的折成「+N」。 */
+const MAX_DOTS = 4;
+const DOT_GAP = 16;
+/** 图会被缩到 0.9 倍左右，圆点本身得画大些才看得见（命中区再大一圈）。 */
+const DOT_R = 5;
+const DOT_HIT = 11;
 
 type Tone = "done" | "active" | "bad" | "todo" | "gate";
 
@@ -77,15 +84,24 @@ interface Props {
   stages: StageView[];
   loop: LoopView;
   rows: ActionRow[];
+  /** 原始事件：节点下面的步骤圆点就是按 state 从这儿分桶的。 */
+  events: RunEvent[];
   onSelectStage?: (id: RunState | "succeeded") => void;
   onSelectGate?: () => void;
+  /** 点某一个圆点：看那一步的原文（动作走 ACI 流水线，其余走事件详情）。 */
+  onSelectStep?: (seq: number) => void;
 }
 
 /**
  * 由事件推导整张图。唯一的数据来源是 buildStages / buildLoop / buildRows，
  * 没有从 state 索引或写死字符串里"推"出来的结论。
  */
-export function buildGraph({ state, stages, loop, rows }: Omit<Props, "onSelectStage" | "onSelectGate">): Graph {
+export function buildGraph({
+  state,
+  stages,
+  loop,
+  rows,
+}: Omit<Props, "events" | "onSelectStage" | "onSelectGate" | "onSelectStep">): Graph {
   const statusOf = (id: RunState | "succeeded"): StageView["status"] =>
     stages.find((s) => s.id === id)?.status ?? "todo";
   const toneOf = (id: RunState | "succeeded"): Tone => {
@@ -186,15 +202,46 @@ export function FlowGraph(props: Props) {
   );
   const { nodes, edges, blockedTotal } = graph;
 
+  /**
+   * 节点 → 它自己的步骤（后端事件原文，不按数量编）。
+   *
+   * 用 event.state 分桶而不是**动作行**：install / test / preparing 这些
+   * 阶段事件不在动作流里（动作流只收 ACI 动作），但它们是节点的真实步骤。
+   * gate / repair 共用 repairing：ACI 动作归门岗，其余（patch、finish_repair）
+   * 归修复节点，否则门岗会吃掉修复的步骤。
+   */
+  const stepsByNode = useMemo(() => {
+    const map = new Map<string, RunEvent[]>();
+    const push = (id: string, e: RunEvent) => {
+      const arr = map.get(id);
+      if (arr) arr.push(e);
+      else map.set(id, [e]);
+    };
+    for (const e of props.events) {
+      if (e.state === "repairing") {
+        push(isActionEvent(e) ? "gate" : "repair", e);
+        continue;
+      }
+      const node = (Object.keys(NODE_TO_STAGE) as string[]).find(
+        (k) => NODE_TO_STAGE[k] === e.state,
+      );
+      // planning / queued 没有对应节点，落在「另有 N 条事件」里，不硬塞给谁
+      if (node) push(node, e);
+    }
+    return map;
+  }, [props.events]);
+
   // ── dagre 布局：只在图结构变化时算一次 ──
   const layout = useMemo(() => {
     const g = new dagre.graphlib.Graph();
     g.setGraph({
       rankdir: "LR",
-      nodesep: 34,
-      ranksep: 62,
-      marginx: 24,
-      marginy: 20,
+      // 三条竖排（主链 + 两个卫星节点）已经很高了，再留 34px 的节点间距，
+      // 整张图只能缩到 0.8 倍，节点下方的步骤圆点就糊成一片了。
+      nodesep: 26,
+      ranksep: 56,
+      marginx: 18,
+      marginy: 14,
       ranker: "network-simplex",
     });
     g.setDefaultEdgeLabel(() => ({}));
@@ -296,6 +343,10 @@ export function FlowGraph(props: Props) {
           const isFail = def.kind === "fail";
           const isBlock = def.kind === "block";
           const isOk = def.kind === "ok";
+          // 正在进行的节点，入边上有颗光点在跑：这是「这一步还在走」的唯一动效，
+          // 不再给所有边加无意义的流水动画。
+          const targetTone = nodes.find((n) => n.id === def.to)?.tone;
+          const flowing = !def.dim && (targetTone === "active" || targetTone === "gate");
           const color = def.dim
             ? "rgba(148,163,196,.26)"
             : isLoop
@@ -363,6 +414,12 @@ export function FlowGraph(props: Props) {
                 </>
               )}
 
+              {flowing && !isLoop && (
+                <circle r={2.2} fill={color === "rgba(148,163,196,.5)" ? "#cfd9f2" : color}>
+                  <animateMotion dur="1.9s" repeatCount="indefinite" path={path} />
+                </circle>
+              )}
+
               {labelAt && def.label && (
                 <motion.text
                   x={labelAt.x}
@@ -389,6 +446,21 @@ export function FlowGraph(props: Props) {
           const c = TONE[n.tone];
           const isActive = n.tone === "active" || n.tone === "gate";
 
+          /** 这个节点的真实步骤（卫星节点是被拦动作，没有自己的步骤列表）。 */
+          const steps = n.satellite ? [] : (stepsByNode.get(n.id) ?? []);
+          const shown = steps.slice(-MAX_DOTS);
+          const overflow = steps.length - shown.length;
+          const dotY = box.y + box.h / 2 - (n.big ? 21 : 20);
+          const dotsW = Math.max(0, (shown.length - 1) * DOT_GAP);
+          const stripW = dotsW + (overflow > 0 ? 26 : 0);
+          const dotsX0 = box.x - stripW / 2 + (overflow > 0 ? 26 : 0);
+
+          const openAll = () => {
+            if (n.satellite) return;
+            if (n.id === "gate") props.onSelectGate?.();
+            else props.onSelectStage?.(NODE_TO_STAGE[n.id] ?? "queued");
+          };
+
           return (
             <motion.g
               key={n.id}
@@ -399,11 +471,7 @@ export function FlowGraph(props: Props) {
                 transformOrigin: `${box.x}px ${box.y}px`,
                 cursor: n.satellite ? "default" : "pointer",
               }}
-              onClick={() => {
-                if (n.satellite) return;
-                if (n.id === "gate") props.onSelectGate?.();
-                else props.onSelectStage?.(NODE_TO_STAGE[n.id] ?? "queued");
-              }}
+              onClick={openAll}
             >
               {/* 外发光 */}
               <rect
@@ -458,7 +526,7 @@ export function FlowGraph(props: Props) {
               {/* 标签 */}
               <text
                 x={box.x}
-                y={box.y - 5}
+                y={box.y - (n.big ? 22 : 20)}
                 textAnchor="middle"
                 fontSize={n.big ? 13.5 : 12}
                 fontWeight={n.big ? 600 : 500}
@@ -468,7 +536,7 @@ export function FlowGraph(props: Props) {
               </text>
               <text
                 x={box.x}
-                y={box.y + 12}
+                y={box.y - (n.big ? 6 : 4)}
                 textAnchor="middle"
                 className="font-mono"
                 fontSize={9}
@@ -476,6 +544,132 @@ export function FlowGraph(props: Props) {
               >
                 {n.sub}
               </text>
+
+              {/*
+                步骤圆点：一个点 = 一条后端事件（不是按进度编的格子）。
+                只画最近 MAX_DOTS 个，更早的折成「+N」——点它等于点节点，
+                看该阶段全部步骤；点某个点只看那一步的原文。
+              */}
+              {shown.length > 0 && (
+                <g>
+                  {shown.length > 1 && (
+                    <line
+                      x1={dotsX0}
+                      y1={dotY}
+                      x2={dotsX0 + dotsW}
+                      y2={dotY}
+                      stroke="rgba(148,163,196,.3)"
+                      strokeWidth={1}
+                      strokeLinecap="round"
+                    />
+                  )}
+
+                  {/* 新的一步落下来时，轨道从左往右重新亮一遍——"这一步接上了" */}
+                  {shown.length > 1 && (
+                    <motion.line
+                      key={`fill-${steps.length}-${shown.length}`}
+                      x1={dotsX0}
+                      y1={dotY}
+                      x2={dotsX0 + dotsW}
+                      y2={dotY}
+                      stroke="rgba(168,189,228,.8)"
+                      strokeWidth={1.3}
+                      strokeLinecap="round"
+                      initial={STILL ? false : { pathLength: 0, opacity: 0.9 }}
+                      animate={{ pathLength: 1, opacity: 0.55 }}
+                      transition={STILL ? { duration: 0 } : { duration: 0.65, ease: [0.16, 1, 0.3, 1] }}
+                    />
+                  )}
+
+                  {/* 步骤之间的动态：活跃节点上有一颗光点沿圆点轨道跑 */}
+                  {isActive && shown.length > 1 && !STILL && (
+                    <circle r={1.9} fill="#dce7ff" opacity={0.9}>
+                      <animateMotion
+                        dur="1.8s"
+                        repeatCount="indefinite"
+                        path={`M ${dotsX0},${dotY} L ${dotsX0 + dotsW},${dotY}`}
+                      />
+                    </circle>
+                  )}
+
+                  {shown.map((e, k) => {
+                    const cx = dotsX0 + k * DOT_GAP;
+                    const blocked = isBlockedEvent(e);
+                    const code = typeof e.data?.exit_code === "number" ? e.data.exit_code : null;
+                    const ok = e.data?.ok === true || code === 0;
+                    // 退出码非 0 是"这一步真的失败了"，不是被拦（红）；用琥珀色分开，
+                    // 否则 install 第一次 exit 1 会和成功一样是绿点，等于骗人。
+                    const fill = blocked
+                      ? "#ff5c47"
+                      : code !== null && code !== 0
+                        ? "#ffb454"
+                        : ok
+                          ? "#2ee6a8"
+                          : "#a8bde4";
+                    const newest = k === shown.length - 1;
+                    return (
+                      <g
+                        key={e.sequence}
+                        style={{ cursor: "pointer" }}
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          props.onSelectStep?.(e.sequence);
+                        }}
+                      >
+                        <title>{`#${e.sequence} ${e.kind} · ${e.message.slice(0, 46)}`}</title>
+                        {/* 命中区比圆点大：缩放后 5px 的点直接点也很难点中 */}
+                        <circle cx={cx} cy={dotY} r={DOT_HIT} fill="transparent" />
+                        {newest && isActive && !STILL && (
+                          <motion.circle
+                            cx={cx}
+                            cy={dotY}
+                            r={DOT_R}
+                            fill="none"
+                            stroke={fill}
+                            strokeWidth={1}
+                            animate={{ r: [DOT_R, DOT_R * 2.1], opacity: [0.75, 0] }}
+                            transition={{ duration: 1.7, repeat: Infinity, ease: "easeOut" }}
+                          />
+                        )}
+                        <motion.circle
+                          cx={cx}
+                          cy={dotY}
+                          r={blocked ? DOT_R + 0.6 : DOT_R}
+                          fill={fill}
+                          initial={STILL ? false : { scale: 0, opacity: 0 }}
+                          animate={{ scale: 1, opacity: 1 }}
+                          transition={
+                            STILL ? { duration: 0 } : { duration: 0.32, ease: [0.16, 1, 0.3, 1] }
+                          }
+                          style={{ transformOrigin: `${cx}px ${dotY}px` }}
+                        />
+                      </g>
+                    );
+                  })}
+
+                  {overflow > 0 && (
+                    <g
+                      style={{ cursor: "pointer" }}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        openAll();
+                      }}
+                    >
+                      <title>{`还有 ${overflow} 步更早，点开看全部`}</title>
+                      <text
+                        x={dotsX0 - 8}
+                        y={dotY + 3.6}
+                        textAnchor="end"
+                        className="font-mono"
+                        fontSize={10}
+                        fill="rgba(168,189,228,.95)"
+                      >
+                        +{overflow}
+                      </text>
+                    </g>
+                  )}
+                </g>
+              )}
             </motion.g>
           );
         })}
