@@ -9,12 +9,12 @@
  *   - panel / tab / seq 都走白名单与整数校验，非法值回退到默认视图。
  */
 
-export type Scene = "select" | "preflight" | "welcome" | "run";
+export type Scene = "select" | "preflight" | "welcome" | "run" | "result";
 
 const RUN_ID_RE = /^[0-9a-f]{32}$/;
-const SCENES: ReadonlySet<string> = new Set(["select", "preflight", "welcome", "run"]);
+const SCENES: ReadonlySet<string> = new Set(["select", "preflight", "welcome", "run", "result"]);
 const PANELS: ReadonlySet<string> = new Set(["event", "stage", "technical", "report"]);
-const TABS: ReadonlySet<string> = new Set(["report", "patch", "json", "environment", "bundle"]);
+const TABS: ReadonlySet<string> = new Set(["report", "patch", "json"]);
 
 export function isRunId(value: string | null | undefined): value is string {
   return typeof value === "string" && RUN_ID_RE.test(value);
@@ -30,7 +30,9 @@ export function parseScene(q: URLSearchParams, hasRealPreflight = false): Scene 
   const requested = q.get("scene");
   if (requested && !SCENES.has(requested)) return "select";
   // 确认页必须来自真实的 POST /api/preflights 结果，深链不得凭空进入。
+  // 确认页与结果页都必须持有真实数据：前者来自服务端确认单，后者来自 run。
   if (requested === "preflight") return hasRealPreflight ? "preflight" : "select";
+  if (requested === "result") return parseRunId(q) ? "result" : "select";
   if (parseRunId(q)) return "run";
   if (requested === "run") {
     // 只有显式演示/离线回放才允许「没有 run 的运行页」。
@@ -50,7 +52,7 @@ export function parsePanel(q: URLSearchParams): { type: PanelId; seq: number } |
   return { type: mapped as PanelId, seq: Number.isSafeInteger(seq) && seq > 0 ? seq : 0 };
 }
 
-export type TabId = "report" | "patch" | "json" | "environment" | "bundle";
+export type TabId = "report" | "patch" | "json";
 
 export function parseTab(q: URLSearchParams): TabId {
   const raw = q.get("tab");

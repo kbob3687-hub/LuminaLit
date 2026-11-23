@@ -14,7 +14,7 @@ import {
   RunOverview, STATE_COPY, TechnicalEvent, type Panel,
 } from "./RunSceneParts";
 
-export function RunScene({ mode, status, events, onCancel, cancelling, pollError, pollRetrying, cancelError, targetName, onBack }: {
+export function RunScene({ mode, status, events, onCancel, cancelling, pollError, pollRetrying, cancelError, targetName, onBack, onShowResult }: {
   mode: "live" | "replay";
   status: RunStatus | null;
   events: RunEvent[];
@@ -25,6 +25,8 @@ export function RunScene({ mode, status, events, onCancel, cancelling, pollError
   cancelError?: string | null;
   targetName?: string;
   onBack?: () => void;
+  /** 用户主动进入结果页；终态绝不自动跳转。 */
+  onShowResult?: () => void;
 }) {
   const [panel, setPanel] = useState<Panel>(() => {
     // 深链走白名单：非法 panel / seq 回退，不打开一个空抽屉。
@@ -65,7 +67,10 @@ export function RunScene({ mode, status, events, onCancel, cancelling, pollError
         </span>
         <div className="ml-auto flex flex-wrap gap-2">
           <button onClick={() => setPanel({ type: "technical" })} className={controlClass}>技术详情</button>
-          <button onClick={() => setPanel({ type: "report" })} className={clsx(controlClass, finalReady && "border-accent/50 bg-accent/10 text-ink")}>结果与文件</button>
+          <button onClick={() => setPanel({ type: "report" })} className={controlClass}>结果与文件</button>
+          {finalReady && onShowResult && (
+            <button onClick={onShowResult} className={clsx(controlClass, "border-accent/50 bg-accent/10 text-ink")}>查看完整结果</button>
+          )}
           {!terminal && !replay && <button onClick={onCancel} disabled={!status || cancelling} className={controlClass}>{cancelling ? "正在取消…" : "取消任务"}</button>}
         </div>
       </header>

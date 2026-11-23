@@ -4,6 +4,7 @@ import { SelectScene, type PaperOption } from "./components/SelectScene";
 import { PreflightScene } from "./components/PreflightScene";
 import { WelcomeScene } from "./components/WelcomeScene";
 import { RunScene } from "./components/RunScene";
+import { ResultScene } from "./components/ResultScene";
 import { useRunPolling } from "./hooks/useRunPolling";
 import { useDemoRun } from "./hooks/useDemoRun";
 import { createRun, createPreflight, cancelRun, ApiError } from "./api";
@@ -230,6 +231,7 @@ export default function App() {
               pollError={demo ? null : live.error}
               pollRetrying={!demo && live.retrying}
               cancelError={cancelError?.runId === runId ? cancelError.message : null}
+              onShowResult={() => showScene("result")}
               onBack={() => {
                 // 清掉运行直链，保留显式 demo/live 等模式标记。
                 const params = new URLSearchParams(window.location.search);
@@ -261,6 +263,34 @@ export default function App() {
                   cancelLock.current = false;
                   if (mounted.current) setCancelling(false);
                 }
+              }}
+            />
+          </SceneShell>
+        )}
+
+        {scene === "result" && (
+          <SceneShell key="result">
+            <ResultScene
+              status={status}
+              runId={runId}
+              onBack={() => showScene("run")}
+              onNewRun={() => {
+                const params = new URLSearchParams(window.location.search);
+                params.delete("run");
+                params.delete("scene");
+                params.delete("panel");
+                const search = params.toString();
+                window.history.replaceState(null, "", `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`);
+                setRunId(null);
+                setPaper({ name: "", id: "" });
+                setPreflight(null);
+                showScene("select");
+              }}
+              onTechnical={() => {
+                const url = new URL(window.location.href);
+                url.searchParams.set("panel", "technical");
+                window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+                showScene("run");
               }}
             />
           </SceneShell>

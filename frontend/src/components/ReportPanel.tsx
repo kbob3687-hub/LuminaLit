@@ -4,6 +4,7 @@ import { ApiError, getPatch, getReport } from "../api";
 import type { RunStatus } from "../types";
 import { VerificationPanel } from "./VerificationPanel";
 import { guidanceOf } from "./RunSceneParts";
+import { parseTab, type TabId } from "../deepLink";
 
 /**
  * 结果报告面板：把后端落盘的三个文件搬到界面上。
@@ -17,7 +18,7 @@ import { guidanceOf } from "./RunSceneParts";
  * 下载只使用真实取得的文本，不改写内容，也不为回放生成假文件。
  */
 
-type Tab = "report" | "patch" | "json";
+type Tab = TabId;
 
 const TABS: { id: Tab; label: string; file: (rid: string) => string }[] = [
   { id: "report", label: "结果报告", file: (r) => `paperharness-${r.slice(0, 8)}-report.md` },
@@ -26,15 +27,11 @@ const TABS: { id: Tab; label: string; file: (rid: string) => string }[] = [
 ];
 
 export function ReportPanel({ runId, status }: { runId: string | null; status: RunStatus | null }) {
-  // 显式文件直链展开技术区，普通入口默认只展示可读结论。
-  const [tab, setTab] = useState<Tab>(() => {
-    const t = new URLSearchParams(window.location.search).get("tab");
-    return t === "patch" || t === "json" ? t : "report";
-  });
-  const [filesOpen, setFilesOpen] = useState(() => {
-    const t = new URLSearchParams(window.location.search).get("tab");
-    return t === "patch" || t === "json";
-  });
+  // 显式文件直链展开技术区，普通入口默认只展示可读结论；tab 走白名单。
+  const q = new URLSearchParams(window.location.search);
+  const initialTab = parseTab(q);
+  const [tab, setTab] = useState<Tab>(() => initialTab);
+  const [filesOpen, setFilesOpen] = useState(() => initialTab !== "report");
   const result = status?.result ?? null;
   const terminal = Boolean(status && ["succeeded", "failed", "cancelled"].includes(status.state));
   const guidance = status ? guidanceOf(status, false) : undefined;
