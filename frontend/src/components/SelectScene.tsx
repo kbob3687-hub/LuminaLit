@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { motion } from "motion/react";
 import { targets as fetchTargets } from "../api";
-import type { Target } from "../types";
+import type { HealthDetails, Target } from "../types";
 import { FALLBACK_TARGETS, TARGET_META } from "../targets";
+import { HealthBanner } from "./HealthBanner";
 
 /** 截图模式：关闭入场动画，避免无头渲染抓到半透明中间帧。 */
 const STILL = new URLSearchParams(window.location.search).get("still") === "1";
@@ -49,6 +50,9 @@ interface Props {
   /** 观测者名字：不再写死，欢迎页直接用它。 */
   observer: string;
   onObserver: (name: string) => void;
+  /** 评审稿 §11.3：宿主健康检查逐项结果；后端未实现时为 null。 */
+  health?: HealthDetails | null;
+  healthError?: string | null;
 }
 
 /** 后端列表 → 卡片数据。接口没回的字段从 TARGET_META 补。 */
@@ -79,7 +83,7 @@ const FALLBACK: PaperOption[] = FALLBACK_TARGETS.map((t) => ({
   expect: TARGET_META[t.id]?.expect,
 }));
 
-export function SelectScene({ onPick, disabled, busy, error, demo, observer, onObserver }: Props) {
+export function SelectScene({ onPick, disabled, busy, error, demo, observer, onObserver, health, healthError }: Props) {
   const [localError, setLocalError] = useState<string | null>(null);
   const [options, setOptions] = useState<PaperOption[] | null>(null);
 
@@ -202,6 +206,10 @@ export function SelectScene({ onPick, disabled, busy, error, demo, observer, onO
           {list.map((p, i) => (
             <TargetCard key={p.id} option={p} index={i} onPick={onPick} disabled={disabled} />
           ))}
+        </div>
+
+        <div className="mb-4">
+          <HealthBanner details={health ?? null} error={healthError ?? null} />
         </div>
 
       </div>

@@ -7,9 +7,9 @@ import { RunScene } from "./components/RunScene";
 import { ResultScene } from "./components/ResultScene";
 import { useRunPolling } from "./hooks/useRunPolling";
 import { useDemoRun } from "./hooks/useDemoRun";
-import { createRun, createPreflight, cancelRun, ApiError } from "./api";
+import { createRun, createPreflight, cancelRun, ApiError, healthDetails } from "./api";
 import { finiteNonNegative, parseRunId, parseScene, type Scene } from "./deepLink";
-import type { PreflightResult } from "./types";
+import type { HealthDetails, PreflightResult } from "./types";
 
 /** 截图模式下把所有过渡时长压成 0，避免无头渲染抓到半透明中间帧。 */
 const STILL = new URLSearchParams(window.location.search).get("still") === "1";
@@ -101,6 +101,9 @@ export default function App() {
 
   /** null = 还在探测 */
   const [healthy, setHealthy] = useState<boolean | null>(null);
+  /** 逐项健康检查（§11.3）：后端未实现时保持 null，界面明确说「未提供」。 */
+  const [healthInfo, setHealthInfo] = useState<HealthDetails | null>(null);
+  const [healthInfoError, setHealthInfoError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -121,6 +124,17 @@ export default function App() {
       ctrl.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    // 只做一次只读探测，不发起模型推理；失败时保留 null，不拿 200 冒充就绪。
+    void healthDetails()
+      .then((d) => { if (alive) setHealthInfo(d); })
+      .catch((e: unknown) => {
+        if (alive) setHealthInfoError(e instanceof Error ? e.message : String(e));
+      });
+    return () => { alive = false; };
   }, []);
 
   // 已有任务直链始终使用真实 API；探测失败才自动回退离线回放。
@@ -194,6 +208,8 @@ export default function App() {
               demo={demo}
               observer={observer}
               onObserver={rename}
+              health={healthInfo}
+              healthError={healthInfoError}
             />
           </SceneShell>
         )}

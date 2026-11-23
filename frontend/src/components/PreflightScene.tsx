@@ -162,6 +162,21 @@ export function PreflightScene({ initialPreflight, onBack, onStarted }: Props) {
             {preflight.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}
           </ul>
         </section>
+        <section aria-labelledby="budget-title" className="mt-8 border-t border-rule pt-5">
+          <h2 id="budget-title" className="mb-1 text-base font-medium">开销与提醒</h2>
+          <p className="mb-4 text-xs leading-6 text-ink-mid">
+            以下为这份确认单冻结的值与尚未下发的字段。改动运行设置会生成新的确认单，不能在这里绕过服务端冻结配置。
+          </p>
+          <dl className="grid gap-x-8 gap-y-3 text-sm sm:grid-cols-2">
+            <div><dt className="text-ink-mid">单步超时</dt><dd className="mt-0.5 text-ink">{preflight.timeout_seconds} 秒（不是总预算）</dd></div>
+            <div><dt className="text-ink-mid">最多修复轮数</dt><dd className="mt-0.5 text-ink">{preflight.max_repairs} 轮</dd></div>
+            <div><dt className="text-ink-mid">总时间上限</dt><dd className="mt-0.5 text-ink-muted">确认单未下发总预算，界面不编造</dd></div>
+            <div><dt className="text-ink-mid">模型调用 / token 上限</dt><dd className="mt-0.5 text-ink-muted">确认单未下发，界面不编造</dd></div>
+            <div><dt className="text-ink-mid">费用</dt><dd className="mt-0.5 text-ink-muted">未知（没有可靠价格配置，不显示金额）</dd></div>
+            <div><dt className="text-ink-mid">是否要求干净复跑</dt><dd className="mt-0.5 text-ink-muted">由服务端冻结配置决定；正式任务默认要求一次干净复跑</dd></div>
+            <div className="sm:col-span-2"><dt className="text-ink-mid">可能发送给模型服务的仓库片段与日志</dt><dd className="mt-0.5 text-ink-muted">确认单未声明范围，界面不推断；以服务端实际配置为准</dd></div>
+          </dl>
+        </section>
         <div aria-live="polite" className="mt-5 text-sm leading-7">
           {dirty && <p className="text-warn">设置已改变，请重新体检后确认。</p>}
           {mustRecheck && <p className="text-warn">这份确认单已失效，请重新体检。</p>}
