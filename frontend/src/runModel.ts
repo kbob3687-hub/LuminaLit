@@ -7,7 +7,17 @@
  * 这里改成：某阶段只有真的收到过该阶段的事件、且已经离开它，才算完成。
  */
 
-import { labelOf, TERMINAL, type EventExplanation, type RunEvent, type RunState, type VerificationResult } from "./types";
+import {
+  labelOf,
+  TERMINAL,
+  type BundleResult,
+  type EventExplanation,
+  type ReplayResult,
+  type RunEvent,
+  type RunState,
+  type RunStatus,
+  type VerificationResult,
+} from "./types";
 
 export const VERIFICATION_TYPES: Record<VerificationResult["level"], string> = {
   none: "未指定检查类型",
@@ -40,6 +50,127 @@ export function verificationEvidencePath(runId: string | null, evidenceUrl: stri
   if (!runId || !/^[0-9a-f]{32}$/.test(runId)) return null;
   const path = `/api/runs/${runId}/verification/input`;
   return evidenceUrl === path ? path : null;
+}
+
+/* ─────────────────────────── 评审稿 §3.3 / §3.4：结论语义 ───────────────────────────
+ *
+ * 顶部结论必须由「当前环境验收 + 干净复跑 + 结束原因」三者共同决定。
+ * 下面几条是硬约束，改之前请先读评审稿：
+ *   - `verified` 只代表当前环境验收 passed，不能因复跑失败被抹掉，也不能
+ *     单独用来显示「完整成功」。
+ *   - 后端本轮尚未下发 replay / bundle 字段（Issue #30 仍开放），缺字段时
+ *     一律显示「未记录」，绝不推断成 passed 或 not_requested。
+ *   - 只有 replay.status=passed 且 bundle.integrity=complete 才算可交付的
+ *     完整成功；材料缺项必须留在 gaps 里，不能用绿色徽标盖住。
+ *   - 复跑失败 / 条件不足 / 未要求复跑，分别有各自的固定文案。
+ */
+
+export interface OverallConclusion {
+  label: string;
+  detail: string;
+  tone: EventExplanation["tone"];
+  /** 是否允许展示「完整可复跑成功」。 */
+  completeSuccess: boolean;
+  /** 未验证、未记录或缺失的事项，必须原样留在结论里。 */
+  gaps: string[];
+}
+
+const REPLAY_COPY: Record<ReplayResult["status"], { label: string; tone: EventExplanation["tone"] }> = {
+  not_requested: { label: "未要求干净复跑", tone: "neutral" },
+  pending: { label: "等待干净复跑", tone: "neutral" },
+  running: { label: "干净复跑进行中", tone: "neutral" },
+  passed: { label: "干净复跑通过", tone: "success" },
+  failed: { label: "干净复跑未通过", tone: "error" },
+  blocked: { label: "复跑条件不足", tone: "warning" },
+};
+
+export function replayConclusion(replay: ReplayResult | null | undefined) {
+  if (!replay) return { label: "后端未下发复跑结果", detail: "这次运行没有干净复跑记录，不能据此判断可复跑性。", tone: "neutral" as const };
+  const base = REPLAY_COPY[replay.status] ?? REPLAY_COPY.pending;
+  const reason = replay.reason ? `（${replay.reason}）` : "";
+  return { label: `${base.label}${reason}`, tone: base.tone, detail: replay.differences?.join("；") || "" };
+}
+
+/** 材料完整性是独立结论：不完整不提供下载，也不能冒充已交付。 */
+export function bundleConclusion(bundle: BundleResult | null | undefined): {
+  label: string;
+  tone: EventExplanation["tone"];
+  downloadable: boolean;
+} {
+  if (!bundle) return { label: "后端未下发材料清单", tone: "neutral", downloadable: false };
+  if (bundle.integrity === "complete" && bundle.url) {
+    return { label: "复跑材料完整", tone: "success", downloadable: true };
+  }
+  if (bundle.integrity === "blocked") {
+    return { label: "复跑材料被阻止导出", tone: "warning", downloadable: false };
+  }
+  return { label: "复跑材料不完整", tone: "warning", downloadable: false };
+}
+
+/** 顶部唯一结论：页面、报告、抽屉都用它，避免各自维护一套成功语义（§11.1）。 */
+export function overallConclusion(status: RunStatus | null, isReplay: boolean): OverallConclusion {
+  if (!status) return { label: "连接中", detail: "尚未取得这次运行的记录。", tone: "neutral", completeSuccess: false, gaps: [] };
+  const state = status.state;
+  const result = status.result;
+  if (isReplay) return { label: "示例回放", detail: "离线预设记录，不代表本机执行或验证结果。", tone: "warning", completeSuccess: false, gaps: [] };
+  if (!TERMINAL.has(state)) {
+    if (state === "replaying") return { label: "干净复跑进行中", detail: "当前环境已有结果，正在新目录与新容器中按同一规则复验。", tone: "neutral", completeSuccess: false, gaps: [] };
+    return { label: "正在运行", detail: "结论会在运行结束、结果与收尾记录写完后给出。", tone: "neutral", completeSuccess: false, gaps: [] };
+  }
+
+  const outcome = result?.outcome;
+  if (outcome === "cancelled") return { label: "已取消，同时保留已有证据", detail: "已完成的检查不会被抹去。", tone: "neutral", completeSuccess: false, gaps: [] };
+  if (outcome === "budget_exceeded") return { label: "预算已用完，同时保留已通过检查", detail: "未完成的复跑不得记为通过。", tone: "warning", completeSuccess: false, gaps: ["总预算耗尽"] };
+  if (outcome === "unrepairable") return { label: "当前任务条件不足或超出支持范围", detail: "不评价论文真实性。", tone: "warning", completeSuccess: false, gaps: [] };
+
+  const verification = result?.verification ?? null;
+  const verificationPassed = verification?.status === "passed";
+  // 历史 run 只有 verified=true、没有结构化 verification：不能升格为「已验证」。
+  const legacyOnly = !verification && result?.verified === true;
+  const replay = result?.replay ?? null;
+  const bundle = result?.bundle ?? null;
+  const gaps: string[] = [];
+  if (legacyOnly) gaps.push("历史结果未记录分级验证");
+  if (!replay) gaps.push("后端未下发干净复跑结果");
+  if (!bundle) gaps.push("后端未下发材料完整性清单");
+
+  if (!verificationPassed) {
+    const stage = result?.failure_category ?? verification?.failure_category;
+    return {
+      label: legacyOnly ? "当前运行通过，但缺少分级验证记录" : "当前运行未通过验收",
+      detail: stage ? `实际失败阶段/类别：${stage}。` : "展示实际失败阶段；验收器故障不得归因于仓库。",
+      tone: verification?.status === "blocked" ? "warning" : "error",
+      completeSuccess: false,
+      gaps,
+    };
+  }
+
+  // 当前验收 passed：从此处起，结论只由复跑与材料决定。
+  if (!replay || replay.status === "pending" || replay.status === "running") {
+    return { label: "当前运行通过，复跑结论未记录", detail: "当前环境的证据已保留，但还不能证明修复在新环境可复现。", tone: "warning", completeSuccess: false, gaps };
+  }
+  if (replay.status === "not_requested") {
+    return { label: "试跑通过，未验证可复跑性", detail: "这是事先确认不要求干净复跑的探索试跑。", tone: "warning", completeSuccess: false, gaps };
+  }
+  if (replay.status === "failed") {
+    return { label: "当前运行通过，干净复跑失败", detail: "不得显示完整成功；当前环境已通过的检查仍然有效。", tone: "error", completeSuccess: false, gaps };
+  }
+  if (replay.status === "blocked") {
+    return { label: "当前运行通过，复跑条件不足", detail: "网络或数据来源不可用导致无法复跑，不能断言修复无效。", tone: "warning", completeSuccess: false, gaps };
+  }
+
+  const bundleResult = bundleConclusion(bundle);
+  if (!bundleResult.downloadable) {
+    gaps.push(bundleResult.label);
+    return { label: "指定等级通过，干净复跑通过，材料未齐全", detail: "复跑通过的事实保留，但材料尚未完整交付，不提供误导性的完整材料下载。", tone: "warning", completeSuccess: false, gaps };
+  }
+  return {
+    label: "指定等级通过，干净复跑通过",
+    detail: "仅代表指定版本、数据与运行配置下的指定任务通过，不等于整篇论文结论得到验证。",
+    tone: "success",
+    completeSuccess: true,
+    gaps,
+  };
 }
 
 export const ACTIONS = [
@@ -143,6 +274,7 @@ export const STAGE_ORDER: { id: RunState | "succeeded"; label: string }[] = [
   { id: "diagnosing", label: "分析失败原因" },
   { id: "repairing", label: "尝试自动修复" },
   { id: "verifying", label: "独立核验科学指标" },
+  { id: "replaying", label: "干净环境复跑" },
   { id: "succeeded", label: "运行结束，查看结论" },
 ];
 
@@ -295,6 +427,7 @@ const STAGE_EST: Partial<Record<RunState, number>> = {
   diagnosing: 6_000,
   repairing: 45_000,
   verifying: 8_000,
+  replaying: 60_000, // 新容器里重新安装 + 运行 + 同规则验收
 };
 
 /** 各阶段在总进度里的权重（合计 96，余下 4 是收尾）。 */
@@ -304,7 +437,8 @@ const STAGE_WEIGHT: Partial<Record<RunState, number>> = {
   planning: 6,
   installing: 34,
   testing: 22,
-  verifying: 6,
+  verifying: 5,
+  replaying: 5,
 };
 
 /** 进度条上的阶段分界刻度（0–1），与上面权重逐项对应。 */

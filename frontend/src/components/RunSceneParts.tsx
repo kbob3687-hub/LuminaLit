@@ -18,6 +18,7 @@ export const STATE_COPY: Record<RunState, { title: string; detail: string }> = {
   diagnosing: { title: "正在分析失败原因", detail: "程序没有通过检查，系统正在根据错误记录判断是否可以自动处理。" },
   repairing: { title: "正在尝试自动修复", detail: "系统会读取相关代码，尝试允许范围内的修改，再重新运行验证；尝试修复不代表已经成功。" },
   verifying: { title: "正在独立核验科学指标", detail: "运行命令已结束，独立校验器正在按固定规则核对指标。这不是新一轮自动修复，也不是干净环境重放。" },
+  replaying: { title: "正在干净环境复跑", detail: "新建目录与容器，只使用冻结的输入和声明过的变更，按同一规则重新运行与验收。这一步没结束，不能显示完整成功。" },
   succeeded: { title: "本次运行已结束", detail: "请以保存的验证记录判断检查范围；运行成功不等于目标指标通过或完整论文复现。" },
   failed: { title: "本次运行未能完成", detail: "请查看运行说明和技术详情，确认停止原因后再开始新的任务。" },
   cancelled: { title: "本次任务已取消", detail: "本次任务不会继续执行，已有记录仍可查看。需要重试时，请返回重新提交。" },

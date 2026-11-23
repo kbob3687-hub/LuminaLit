@@ -49,6 +49,8 @@ export function useRunPolling(runId: string | null, opts: Options = {}) {
     let timer: number | null = null;
     let cursor = 0;
     let retryMs = POLL_MS;
+    /** 终态后已观察的轮数：历史记录没有 finalized 时用于收敛，不无限轮询。 */
+    let terminalTicks = 0;
 
     const tick = async () => {
       if (cancelled || forced.current) return;
@@ -88,8 +90,23 @@ export function useRunPolling(runId: string | null, opts: Options = {}) {
         retryMs = Math.min(retryMs * 2, 8000);
         return;
       }
-      // 终态可能先于结果落盘或最后一页事件到达，必须等两者都收齐。
-      if (TERMINAL.has(next.state) && next.result && cursor >= (next.last_event_sequence ?? 0)) return;
+      /**
+       * 评审稿 §9.3：终态、结果可读、finalized=true 且游标达到最终事件序号
+       * 才停刷新；final 事件之后还可能有清理事件，不能凭当时的
+       * last_event_sequence 提前收工。
+       *
+       * 旧记录没有 finalized 字段时按「历史记录模式」处理：只给有限的收尾
+       * 窗口（5 轮），不进入等待 finalized 的无限轮询；有 finalized 但迟迟
+       * 不落盘也设 30 轮硬上限，避免服务异常时永远转圈。
+       */
+      const finalSeq = next.final_event_sequence ?? next.last_event_sequence ?? 0;
+      if (TERMINAL.has(next.state) && next.result && cursor >= finalSeq) {
+        terminalTicks += 1;
+        const tracked = typeof next.finalized === "boolean";
+        if ((tracked && next.finalized === true) || (!tracked && terminalTicks >= 5) || terminalTicks >= 30) return;
+      } else {
+        terminalTicks = 0;
+      }
       timer = window.setTimeout(tick, POLL_MS);
     };
 
@@ -117,6 +134,8 @@ export function stageIndex(state: RunState | undefined): number {
     "testing",
     "diagnosing",
     "repairing",
+    "verifying",
+    "replaying",
     "succeeded",
   ];
   if (!state) return 0;
