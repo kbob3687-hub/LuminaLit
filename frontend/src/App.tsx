@@ -289,6 +289,7 @@ export default function App() {
             <ResultScene
               status={status}
               runId={runId}
+              isDemo={demo}
               onBack={() => showScene("run")}
               onNewRun={() => {
                 const params = new URLSearchParams(window.location.search);
