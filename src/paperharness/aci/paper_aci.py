@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from paperharness.aci import errors, path_guard, requirement_guard
+from paperharness.aci.policy import ActionPolicy
 from paperharness.contracts.run import (
     ExecResult,
     Observation,
@@ -55,12 +56,17 @@ class PaperACI:
         workspace: Path,
         plan: RunPlan,
         timeout_seconds: int,
+        policy: ActionPolicy | None = None,
     ):
         self.session = session
         # workspace 先 resolve 一次并缓存：符号链接会让边界判断漂移。
         self.workspace = Path(workspace).resolve(strict=False)
         self.plan = plan
         self.timeout_seconds = timeout_seconds
+        # 评审稿 §4.1 / R06：执行权限与验收链保护。不传策略时用 for_plan，
+        # 保证即便 app 层仍是 `aci_factory=PaperACI`，check.py 与预期产物
+        # 也立刻不可写。policy 是可选参数，HarnessRunner 的工厂签名不用改。
+        self.policy = policy if policy is not None else ActionPolicy.for_plan(plan)
         # ACI 自己维护网络状态。**不向会话查询**：契约 §1.2 写死沙箱不暴露状态
         # 查询接口，`getattr(session, "network_enabled", True)` 在真沙箱上永远拿到
         # 默认值 True，会让 install 之后把本该断开的网永久打开。
@@ -71,9 +77,15 @@ class PaperACI:
     # ------------------------------------------------------------------ 入口
 
     def execute(self, action: ToolAction) -> Observation:
-        handler = getattr(self, f"_do_{getattr(action, 'action', '')}", None)
+        name = getattr(action, "action", "")
+        handler = getattr(self, f"_do_{name}", None)
         if handler is None:
-            return self._fail(getattr(action, "action", "unknown"), errors.UNKNOWN_ACTION)
+            return self._fail(name, errors.UNKNOWN_ACTION)
+        # 执行权限是整条流水线的第 0 步：任何拒绝都必须发生在读文件、
+        # 写文件、开网、改环境变量之前，不能「用一次非法写入换一次合法读」。
+        rejected = self.policy.rejection(action)
+        if rejected is not None:
+            return self._fail(name, rejected)
         return handler(action)
 
     # ------------------------------------------------------------- 动作实现
@@ -185,7 +197,8 @@ class PaperACI:
         return self._from_exec(action.action, result, f"install {requirement}")
 
     def _do_set_environment(self, action) -> Observation:
-        if action.name not in ALLOWED_ENV_NAMES:
+        # 白名单与策略共用同一份判定（rejection 已先跑过一次，这里不重复开洞）。
+        if action.name not in self.policy.allowed_env_names:
             return self._fail(action.action, errors.env_not_allowed(action.name))
         self.session.set_environment(action.name, action.value)
         return Observation(

@@ -10,6 +10,7 @@ import pytest
 from paperharness.aci import errors
 
 #: 前端映射表必须覆盖的全部失败标签。新增标签必须先出现在这里。
+#: 2026-11-23 补评审稿 §4.1 / R06 的三个执行权限标签（前端 types.ts 同步）。
 EXPECTED_TAGS = {
     "file_not_found",
     "replace_not_found",
@@ -19,6 +20,9 @@ EXPECTED_TAGS = {
     "path_escape",
     "env_not_allowed",
     "invalid_argument",
+    "action_not_allowed",
+    "change_not_allowed",
+    "protected_file",
 }
 
 
@@ -46,6 +50,9 @@ def test_every_tag_has_a_builder_or_constant():
         ("path_escape", "path_escape"),
         ("env_not_allowed", "env_not_allowed"),
         ("invalid_argument", "invalid_argument"),
+        ("action_not_allowed", "action_not_allowed"),
+        ("change_not_allowed", "change_not_allowed"),
+        ("protected_file", "protected_file"),
     ]:
         fn = getattr(errors, fn_name)
         produced = fn("X")
@@ -70,9 +77,12 @@ def test_templates_use_single_colon_separator():
 
     冒号本身是合法的分隔符（前端按 `:` 前缀匹配），要查的是**没有双冒号**。
     """
-    for name in ("_PATH_ESCAPE", "_ENV_NOT_ALLOWED", "_INVALID_ARGUMENT"):
+    for name in (
+        "_PATH_ESCAPE", "_ENV_NOT_ALLOWED", "_INVALID_ARGUMENT",
+        "_ACTION_NOT_ALLOWED", "_CHANGE_NOT_ALLOWED", "_PROTECTED_FILE",
+    ):
         value = getattr(errors, name)
         head, _, tail = value.partition("{")
         assert head.endswith(":"), f"{name} 缺少分隔冒号：{value!r}"
         assert not head.endswith("::"), f"{name} 出现双冒号：{value!r}"
-        assert tail.startswith(("raw", "name", "field")), f"{name} 占位符异常：{value!r}"
+        assert tail.startswith(("raw", "name", "field", "path")), f"{name} 占位符异常：{value!r}"
