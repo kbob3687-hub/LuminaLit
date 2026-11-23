@@ -191,9 +191,9 @@ export function getVerification(runId: string) {
  * 这里只给同源 URL；不完整时后端的 404/409 会带 bundle_incomplete /
  * bundle_blocked，界面据此显示缺项，不提供误导性下载。
  */
-export function bundleDownloadUrl(runId: string, bundle: BundleResult | null | undefined): string | null {
+export function bundleDownloadUrl(runId: string | null | undefined, bundle: BundleResult | null | undefined): string | null {
   if (!bundle || bundle.integrity !== "complete" || !bundle.url) return null;
-  if (!/^[0-9a-f]{32}$/.test(runId)) return null;
+  if (!runId || !/^[0-9a-f]{32}$/.test(runId)) return null;
   // 只接受服务端给出的同源相对路径，拒绝绝对 URL、协议或 .. 逃逸。
   if (!bundle.url.startsWith(`/api/runs/${runId}/`)) return null;
   return `${BASE}${bundle.url}`;

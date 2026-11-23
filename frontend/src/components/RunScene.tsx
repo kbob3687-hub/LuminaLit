@@ -1,12 +1,14 @@
 import clsx from "clsx";
 import { useMemo, useState } from "react";
 import { TERMINAL, type RunEvent, type RunStatus } from "../types";
-import { buildLoop, buildStages, verificationConclusion } from "../runModel";
+import { buildLoop, buildStages, overallConclusion } from "../runModel";
 import { VerificationPanel } from "./VerificationPanel";
+import { ReplayPanel } from "./ReplayPanel";
 import { StageTrack } from "./StageTrack";
 import { ReportPanel } from "./ReportPanel";
 import { Drawer } from "./Drawer";
 import { PlanPanel } from "./DrawerPanels";
+import { parsePanel } from "../deepLink";
 import {
   controlClass, EventCard, explanationOf, guidanceOf, RawText,
   RunOverview, STATE_COPY, TechnicalEvent, type Panel,
@@ -25,11 +27,12 @@ export function RunScene({ mode, status, events, onCancel, cancelling, pollError
   onBack?: () => void;
 }) {
   const [panel, setPanel] = useState<Panel>(() => {
-    const q = new URLSearchParams(window.location.search);
-    const which = q.get("panel");
-    if (which === "aci" || which === "event") return { type: "event", seq: Number(q.get("seq") ?? 0) };
-    if (which === "loop" || which === "plan" || which === "technical") return { type: "technical" };
-    if (which === "report") return { type: "report" };
+    // 深链走白名单：非法 panel / seq 回退，不打开一个空抽屉。
+    const parsed = parsePanel(new URLSearchParams(window.location.search));
+    if (!parsed) return null;
+    if (parsed.type === "report") return { type: "report" };
+    if (parsed.type === "technical") return { type: "technical" };
+    if (parsed.type === "event" && parsed.seq > 0) return { type: "event", seq: parsed.seq };
     return null;
   });
   const replay = mode === "replay";
@@ -42,17 +45,10 @@ export function RunScene({ mode, status, events, onCancel, cancelling, pollError
   const openedStage = panel?.type === "stage" ? stages.find((stage) => stage.id === panel.id) : undefined;
   const finalReady = terminal && Boolean(status?.result);
   const verification = status?.result?.verification;
-  const conclusion = verificationConclusion(verification);
-  const badge = replay ? { label: "示例回放", tone: "warning" }
-    : !status ? { label: "连接中", tone: "neutral" }
-      : state === "cancelled" ? { label: "已取消", tone: "neutral" }
-        : state === "failed" ? {
-          label: verification?.status === "failed" || verification?.status === "blocked" ? conclusion.label : "运行已停止",
-          tone: verification?.status === "blocked" ? "warning" : "error",
-        }
-        : finalReady ? conclusion
-          : terminal ? { label: "运行结束，整理结果", tone: "neutral" }
-            : { label: state === "verifying" ? "独立核验中" : "正在运行", tone: "neutral" };
+  // 顶部结论只由这一处产出：当前验收 + 干净复跑 + 结束原因（评审稿 §3.3）。
+  // 不再各自用 verified / verification.status / state 拼一套「成功」。
+  const overall = overallConclusion(status, replay);
+  const badge = { label: overall.label, tone: overall.tone };
   const stageEvents = openedStage ? events.filter((event) => event.state === openedStage.id) : [];
   const title = panel?.type === "report" ? "结果与文件"
     : panel?.type === "event" ? "这一步的技术详情"
@@ -95,10 +91,29 @@ export function RunScene({ mode, status, events, onCancel, cancelling, pollError
 
         <main className="order-1 min-w-0 shrink-0 px-5 py-7 sm:px-8 lg:order-none lg:overflow-y-auto lg:px-10">
           <div className="mx-auto max-w-[920px]">
+            {(replay || finalReady) && (
+              <section aria-label="本次结论" className="mb-6 rounded-xl border border-rule bg-surface/40 px-5 py-4">
+                <h2 className={clsx("text-lg font-semibold", {
+                  "text-pass": overall.tone === "success", "text-reject": overall.tone === "error",
+                  "text-warn": overall.tone === "warning", "text-ink": overall.tone === "neutral",
+                })}>{overall.label}</h2>
+                <p className="mt-2 max-w-[70ch] text-sm leading-7 text-ink-mid">{overall.detail}</p>
+                {overall.gaps.length > 0 && (
+                  <div className="mt-3 border-t border-rule pt-3">
+                    <p className="text-xs font-medium text-warn">本次仍未验证 / 未记录</p>
+                    <ul className="mt-1 list-disc space-y-1 pl-4 text-xs leading-6 text-ink-mid">
+                      {overall.gaps.map((gap, i) => <li key={`${gap}:${i}`}>{gap}</li>)}
+                    </ul>
+                  </div>
+                )}
+              </section>
+            )}
             <RunOverview guidance={guidance} terminal={finalReady} onBack={onBack}
               onDetails={() => setPanel({ type: "technical" })} onReport={() => setPanel({ type: "report" })} />
             {(replay || finalReady) && <VerificationPanel verification={verification} replay={replay}
               runId={status?.run_id === status?.result?.run_id ? status?.run_id ?? null : null} />}
+            {(replay || finalReady) && <ReplayPanel result={status?.result ?? null}
+              runId={status?.run_id ?? null} isDemo={replay} />}
             <section aria-label="运行经过" className="pt-7">
               <div className="mb-6 flex items-baseline justify-between gap-4">
                 <h2 className="text-base font-semibold text-ink">运行经过</h2>
