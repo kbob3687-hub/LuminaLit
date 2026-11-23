@@ -1,4 +1,14 @@
-import type { PreflightResult, PreflightSettings, RunEvent, RunStatus, Target } from "./types";
+import type {
+  BundleResult,
+  EnvironmentManifest,
+  HealthDetails,
+  PreflightResult,
+  PreflightSettings,
+  RunEvent,
+  RunStatus,
+  Target,
+  VerificationResult,
+} from "./types";
 
 /** 契约 §4：基地址来自 VITE_API_BASE_URL，轮询间隔 1000ms。 */
 const BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
@@ -57,6 +67,14 @@ export function health() {
   return req<{ status: string }>("/api/health");
 }
 
+/**
+ * 评审稿 §11.3：`?details=true` 才返回逐项检查；默认 /api/health 仍是进程
+ * 存活探针。检查项只回脱敏状态，不含密钥、宿主路径或容器标识。
+ */
+export function healthDetails() {
+  return req<HealthDetails>("/api/health?details=true");
+}
+
 export function targets() {
   return req<Target[]>("/api/targets");
 }
@@ -73,9 +91,14 @@ export function getPreflight(preflightId: string) {
 }
 
 /** 只确认服务端冻结的计划；不得混入仓库、命令或更改后的设置。 */
+/**
+ * 幂等键：确认单的摘要由服务端冻结，天然适合同一确认的重试；
+ * 不能靠按钮变灰保证「重复点击只创建一个任务」（评审稿 §5.4 / §9.2）。
+ */
 export function confirmPreflight(preflight: Pick<PreflightResult, "preflight_id" | "confirmation_digest">) {
   return req<{ run_id: string; state: string }>("/api/runs", {
     method: "POST",
+    headers: { "Idempotency-Key": preflight.confirmation_digest },
     body: JSON.stringify({
       preflight_id: preflight.preflight_id,
       confirmation_digest: preflight.confirmation_digest,
@@ -83,10 +106,32 @@ export function confirmPreflight(preflight: Pick<PreflightResult, "preflight_id"
   });
 }
 
+/** 同一份输入在同一会话里重试必须复用同一个幂等键（不含用户输入原文）。 */
+function idempotencyKey(body: unknown): string {
+  const text = JSON.stringify(body);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  const digest = (h >>> 0).toString(16).padStart(8, "0");
+  const slot = `ph.idem.${digest}`;
+  try {
+    const existing = sessionStorage.getItem(slot);
+    if (existing) return existing;
+    const created = `run-${digest}-${Date.now().toString(36)}`;
+    sessionStorage.setItem(slot, created);
+    return created;
+  } catch {
+    return `run-${digest}`;
+  }
+}
+
 /** 自定义仓库探索运行，命令由模型分析；内置靶场必须先预检再确认。 */
 export function createRun(body: { repo_url: string; revision?: string; command?: string[] }) {
   return req<{ run_id: string; state: string }>("/api/runs", {
     method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey(body) },
     body: JSON.stringify(body),
   });
 }
@@ -123,4 +168,33 @@ export function getReport(runId: string) {
 
 export function getPatch(runId: string) {
   return getText(`/api/runs/${runId}/patch`);
+}
+
+/**
+ * 环境清单（environment.json）。404 有两种含义：run_id 不对，或收尾前
+ * 尚未落盘；后者是正常状态，界面显示「尚未采集」，不拿空对象冒充。
+ */
+export async function getEnvironment(runId: string): Promise<EnvironmentManifest> {
+  const res = await fetch(`${BASE}/api/runs/${runId}/environment`);
+  if (res.status === 404) throw await responseError(res);
+  if (!res.ok) throw await responseError(res);
+  return res.json() as Promise<EnvironmentManifest>;
+}
+
+/** 评审稿 §9.2：结构化验收结果；不从 report 文本反推。 */
+export function getVerification(runId: string) {
+  return req<VerificationResult>(`/api/runs/${runId}/verification`);
+}
+
+/**
+ * 复跑材料下载。字段（integrity / sha256 / 缺项）来自 result.bundle，
+ * 这里只给同源 URL；不完整时后端的 404/409 会带 bundle_incomplete /
+ * bundle_blocked，界面据此显示缺项，不提供误导性下载。
+ */
+export function bundleDownloadUrl(runId: string, bundle: BundleResult | null | undefined): string | null {
+  if (!bundle || bundle.integrity !== "complete" || !bundle.url) return null;
+  if (!/^[0-9a-f]{32}$/.test(runId)) return null;
+  // 只接受服务端给出的同源相对路径，拒绝绝对 URL、协议或 .. 逃逸。
+  if (!bundle.url.startsWith(`/api/runs/${runId}/`)) return null;
+  return `${BASE}${bundle.url}`;
 }

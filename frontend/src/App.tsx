@@ -7,9 +7,8 @@ import { RunScene } from "./components/RunScene";
 import { useRunPolling } from "./hooks/useRunPolling";
 import { useDemoRun } from "./hooks/useDemoRun";
 import { createRun, createPreflight, cancelRun, ApiError } from "./api";
+import { finiteNonNegative, parseRunId, parseScene, type Scene } from "./deepLink";
 import type { PreflightResult } from "./types";
-
-type Scene = "select" | "preflight" | "welcome" | "run";
 
 /** 截图模式下把所有过渡时长压成 0，避免无头渲染抓到半透明中间帧。 */
 const STILL = new URLSearchParams(window.location.search).get("still") === "1";
@@ -29,23 +28,19 @@ function readName(): string {
 }
 
 export default function App() {
-  const [scene, setScene] = useState<Scene>(() => {
-    const params = new URLSearchParams(window.location.search);
-    const requested = params.get("scene");
-    // 预检页必须持有真实确认单，不能通过 ?scene=preflight 伪造。
-    return requested === "run" || requested === "welcome"
-      ? requested
-      : params.get("run") ? "run" : "select";
-  });
+  const [scene, setScene] = useState<Scene>(() =>
+    // 深链走白名单：伪造的 preflight、非法 run 参数一律回退选择页。
+    parseScene(new URLSearchParams(window.location.search)),
+  );
   const sceneRef = useRef(scene);
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   /** 靶场名由用户点的那张卡决定。 */
   const [paper, setPaper] = useState({ name: "", id: "" });
   const [observer, setObserver] = useState(readName);
-  const [runId, setRunId] = useState<string | null>(() => {
-    // ?run=<id> 直接盯一个已存在的 run（调试/答辩演示用，不经过选择页）
-    return new URLSearchParams(window.location.search).get("run");
-  });
+  const [runId, setRunId] = useState<string | null>(() =>
+    // ?run=<id> 直接盯一个已存在的 run；非 32 位十六进制不进 API 路径。
+    parseRunId(new URLSearchParams(window.location.search)),
+  );
   const [creating, setCreating] = useState(false);
   const [pickError, setPickError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
@@ -57,6 +52,7 @@ export default function App() {
 
   /** 截图/演示直链：?scene=run / ?scene=welcome，?run=<id> 直接盯一个 run。 */
   const q = new URLSearchParams(window.location.search);
+  const linkedRun = parseRunId(q);
 
   useEffect(() => {
     mounted.current = true;
@@ -100,7 +96,7 @@ export default function App() {
    */
   const apiBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
   const wantReplay = q.get("demo") === "1" || import.meta.env.VITE_DEMO === "1";
-  const wantLive = q.get("live") === "1" || Boolean(q.get("run"));
+  const wantLive = q.get("live") === "1" || Boolean(linkedRun);
 
   /** null = 还在探测 */
   const [healthy, setHealthy] = useState<boolean | null>(null);
@@ -127,7 +123,7 @@ export default function App() {
   }, []);
 
   // 已有任务直链始终使用真实 API；探测失败才自动回退离线回放。
-  const mode: "live" | "replay" = q.get("run")
+  const mode: "live" | "replay" = linkedRun
     ? "live"
     : wantReplay
       ? "replay"
@@ -137,7 +133,7 @@ export default function App() {
   const demo = mode === "replay";
 
   const live = useRunPolling(mode === "live" ? runId : null);
-  const replay = useDemoRun(demo, Number(q.get("t") ?? 0));
+  const replay = useDemoRun(demo, finiteNonNegative(q.get("t")));
   const status = demo ? replay.status : live.status;
   const events = demo ? replay.events : live.events;
 
