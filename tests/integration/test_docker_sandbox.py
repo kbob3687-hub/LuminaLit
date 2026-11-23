@@ -449,3 +449,92 @@ def test_12_container_resource_limits_are_applied(session):
     assert "ALL" in host["CapDrop"], f"必须 CapDrop ALL，实际 {host['CapDrop']}"
     assert "no-new-privileges:true" in host["SecurityOpt"]
     assert data["Config"]["User"] == "1000:1000"
+
+
+# ------------------------------------------- 13/14. 干净复跑的会话隔离（R07 / §8.6）
+#
+# 评审稿 §8.6：复跑必须「创建新的工作目录和新的沙箱会话；不得复用之前容器的
+# 可写层、已安装环境或输出目录」。下面两条只审**可观测的隔离事实**，不审
+# 复跑调度、清单还原或指标一致性——那些属于 Harness/验证器实现，不在本文件
+# 的目录归属内。发现实现问题走 issue / PR 评论给队长，不直接改 docker_sandbox.py。
+
+
+def _fresh_run_dir(tmp_path: Path) -> Path:
+    """复跑用的全新目录：与上一次运行没有任何共享路径。"""
+    directory = tmp_path / uuid.uuid4().hex
+    workspace = directory / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / "main.py").write_text("print('original')\n", encoding="utf-8")
+    return directory
+
+
+def test_13_clean_replay_uses_new_directory_container_and_empty_artifacts(tmp_path):
+    """复跑不能看到旧容器的可写层标记、旧产物，且必须使用不同的容器。"""
+    from paperharness.sandbox.docker_sandbox import DockerSandboxSession
+
+    first_dir = _fresh_run_dir(tmp_path)
+    first = DockerSandboxSession(run_dir=first_dir, python_version="3.10")
+    first_id, first_container = _run_id_of(first), first._container_name
+    try:
+        seeded = first.execute(
+            ["sh", "-c",
+             "printf 'hacked' > /workspace/main.py; "
+             "mkdir -p /workspace/reports; printf 'stale' > /workspace/reports/out.txt; "
+             ": > /tmp/replay-writable-layer-marker"],
+            timeout_seconds=30,
+        )
+        assert seeded.exit_code == 0, seeded.stderr_tail
+    finally:
+        first.close()
+
+    second_dir = _fresh_run_dir(tmp_path)
+    assert second_dir != first_dir, "复跑必须使用新的工作目录"
+    second = DockerSandboxSession(run_dir=second_dir, python_version="3.10")
+    second_id = _run_id_of(second)
+    try:
+        assert second._container_name != first_container, "复跑必须创建新容器，不复用旧容器可写层"
+        assert second_id != first_id
+
+        marker = second.execute(["test", "-e", "/tmp/replay-writable-layer-marker"], timeout_seconds=30)
+        assert marker.exit_code != 0, "旧容器的可写层标记泄漏到了复跑会话"
+
+        stale = second.execute(["test", "-e", "/workspace/reports/out.txt"], timeout_seconds=30)
+        assert stale.exit_code != 0, "预期产物位置未清空，陈旧产物可能被当作本轮证据"
+
+        restored = second.execute(["cat", "/workspace/main.py"], timeout_seconds=30)
+        assert restored.exit_code == 0 and "original" in restored.stdout_tail
+        assert "hacked" not in restored.stdout_tail
+    finally:
+        second.close()
+
+    for run_id in (first_id, second_id):
+        assert _containers_by_label(run_id) == [], f"{run_id} 容器残留"
+        assert _networks_by_label(run_id) == [], f"{run_id} 网络残留"
+
+
+def test_14_same_run_dir_new_session_still_gets_a_fresh_container(tmp_path):
+    """即便复用同一个 run 目录，新会话也不能继承上一次的容器可写层。
+
+    这是 §8.6「不得复用之前容器的可写层」在共享目录场景下的补充判据：
+    目录相同不代表容器可以相同。
+    """
+    from paperharness.sandbox.docker_sandbox import DockerSandboxSession
+
+    directory = _fresh_run_dir(tmp_path)
+    first = DockerSandboxSession(run_dir=directory, python_version="3.10")
+    first_container = first._container_name
+    try:
+        seeded = first.execute(["sh", "-c", ": > /tmp/session-marker"], timeout_seconds=30)
+        assert seeded.exit_code == 0, seeded.stderr_tail
+    finally:
+        first.close()
+
+    second = DockerSandboxSession(run_dir=directory, python_version="3.10")
+    try:
+        assert second._container_name != first_container, "同一 run 目录的新会话仍复用了旧容器"
+        marker = second.execute(["test", "-e", "/tmp/session-marker"], timeout_seconds=30)
+        assert marker.exit_code != 0, "同一 run 目录的新会话继承了旧容器状态"
+    finally:
+        second.close()
+
+    assert _containers_by_label(_run_id_of(first)) == []
