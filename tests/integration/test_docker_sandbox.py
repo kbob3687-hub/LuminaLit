@@ -451,12 +451,35 @@ def test_12_container_resource_limits_are_applied(session):
     assert data["Config"]["User"] == "1000:1000"
 
 
-# ------------------------------------------- 13/14. 干净复跑的会话隔离（R07 / §8.6）
+# ------------------------------------------- 13/14/15. 干净复跑的会话隔离（R07 / §8.6）
 #
 # 评审稿 §8.6：复跑必须「创建新的工作目录和新的沙箱会话；不得复用之前容器的
 # 可写层、已安装环境或输出目录」。下面两条只审**可观测的隔离事实**，不审
 # 复跑调度、清单还原或指标一致性——那些属于 Harness/验证器实现，不在本文件
 # 的目录归属内。发现实现问题走 issue / PR 评论给队长，不直接改 docker_sandbox.py。
+#
+# 容器名按实现固定为 `paperharness-{run_dir.name}`（docker_sandbox.py:65）：
+# 同一 run 目录两次会话**必然同名**，所以「容器实例是否复用」只能比较实际
+# 容器 ID / 名称列表，不能拿命令行里的名字字符串当判据（PR #38 review）。
+
+
+def _live_containers(run_id: str, fmt: str) -> list[str]:
+    """按 label 查运行中容器，返回 ID 或名称（只用 docker CLI 的可观测输出）。"""
+    result = _docker_cli(
+        "ps",
+        "--filter", f"label=paperharness.run_id={run_id}",
+        "--format", fmt,
+        timeout=30,
+    )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _live_container_ids(run_id: str) -> list[str]:
+    return _live_containers(run_id, "{{.ID}}")
+
+
+def _live_container_names(run_id: str) -> list[str]:
+    return _live_containers(run_id, "{{.Names}}")
 
 
 def _fresh_run_dir(tmp_path: Path) -> Path:
@@ -474,16 +497,18 @@ def test_13_clean_replay_uses_new_directory_container_and_empty_artifacts(tmp_pa
 
     first_dir = _fresh_run_dir(tmp_path)
     first = DockerSandboxSession(run_dir=first_dir, python_version="3.10")
-    first_id, first_container = _run_id_of(first), first._container_name
+    first_id = _run_id_of(first)
     try:
         seeded = first.execute(
             ["sh", "-c",
-             "printf 'hacked' > /workspace/main.py; "
-             "mkdir -p /workspace/reports; printf 'stale' > /workspace/reports/out.txt; "
-             ": > /tmp/replay-writable-layer-marker"],
+             ("printf 'hacked' > /workspace/main.py; "
+              "mkdir -p /workspace/reports; printf 'stale' > /workspace/reports/out.txt; "
+              ": > /tmp/replay-writable-layer-marker")],
             timeout_seconds=30,
         )
         assert seeded.exit_code == 0, seeded.stderr_tail
+        first_ids = _live_container_ids(first_id)
+        assert first_ids, "首轮会话没有运行中的容器，先检查沙箱构造"
     finally:
         first.close()
 
@@ -492,7 +517,9 @@ def test_13_clean_replay_uses_new_directory_container_and_empty_artifacts(tmp_pa
     second = DockerSandboxSession(run_dir=second_dir, python_version="3.10")
     second_id = _run_id_of(second)
     try:
-        assert second._container_name != first_container, "复跑必须创建新容器，不复用旧容器可写层"
+        second_ids = _live_container_ids(second_id)
+        assert second_ids, "复跑会话没有运行中的容器"
+        assert set(first_ids).isdisjoint(second_ids), "复跑复用了旧容器实例（容器 ID 相同）"
         assert second_id != first_id
 
         marker = second.execute(["test", "-e", "/tmp/replay-writable-layer-marker"], timeout_seconds=30)
@@ -512,29 +539,71 @@ def test_13_clean_replay_uses_new_directory_container_and_empty_artifacts(tmp_pa
         assert _networks_by_label(run_id) == [], f"{run_id} 网络残留"
 
 
-def test_14_same_run_dir_new_session_still_gets_a_fresh_container(tmp_path):
-    """即便复用同一个 run 目录，新会话也不能继承上一次的容器可写层。
+def test_14_same_run_dir_new_session_gets_fresh_container_instance(tmp_path):
+    """同一 run 目录连续两次会话：容器名可以相同，但容器实例与可写层不得复用。
 
-    这是 §8.6「不得复用之前容器的可写层」在共享目录场景下的补充判据：
-    目录相同不代表容器可以相同。
+    容器名固定为 `paperharness-{run_dir.name}`，同目录必然同名——旧版断言
+    「名字必须不同」与实现矛盾，会确定性失败。这里改为按 label 查实际容器 ID，
+    保留 §8.6「不得复用之前容器的可写层」的业务断言。
     """
     from paperharness.sandbox.docker_sandbox import DockerSandboxSession
 
     directory = _fresh_run_dir(tmp_path)
     first = DockerSandboxSession(run_dir=directory, python_version="3.10")
-    first_container = first._container_name
+    run_id = _run_id_of(first)
     try:
         seeded = first.execute(["sh", "-c", ": > /tmp/session-marker"], timeout_seconds=30)
         assert seeded.exit_code == 0, seeded.stderr_tail
+        first_ids = _live_container_ids(run_id)
+        first_names = _live_container_names(run_id)
+        assert first_ids and first_names, "首轮会话没有运行中的容器"
     finally:
         first.close()
 
     second = DockerSandboxSession(run_dir=directory, python_version="3.10")
     try:
-        assert second._container_name != first_container, "同一 run 目录的新会话仍复用了旧容器"
+        second_ids = _live_container_ids(run_id)
+        second_names = _live_container_names(run_id)
+        assert second_ids, "第二轮会话没有运行中的容器"
+        # 名称相同是允许且符合实现的；它不能用来判断容器是否被复用。
+        assert second_names == first_names, "同一 run 目录的容器名按实现应保持固定"
+        assert set(first_ids).isdisjoint(second_ids), "同一 run 目录的新会话复用了旧容器实例"
         marker = second.execute(["test", "-e", "/tmp/session-marker"], timeout_seconds=30)
-        assert marker.exit_code != 0, "同一 run 目录的新会话继承了旧容器状态"
+        assert marker.exit_code != 0, "同一 run 目录的新会话继承了旧容器可写层"
     finally:
         second.close()
 
-    assert _containers_by_label(_run_id_of(first)) == []
+    assert _containers_by_label(run_id) == [], "会话关闭后不应残留容器"
+
+
+def test_15_consecutive_sessions_in_same_dir_never_inherit_state(tmp_path):
+    """同一目录连续三轮创建/关闭：名称固定、ID 两两不同、每轮都从零开始。"""
+    from paperharness.sandbox.docker_sandbox import DockerSandboxSession
+
+    directory = _fresh_run_dir(tmp_path)
+    seen_ids: list[str] = []
+    names: list[str] | None = None
+
+    for round_no in range(1, 4):
+        session = DockerSandboxSession(run_dir=directory, python_version="3.10")
+        run_id = _run_id_of(session)
+        try:
+            ids = _live_container_ids(run_id)
+            current_names = _live_container_names(run_id)
+            assert ids and current_names, f"第 {round_no} 轮没有运行中的容器"
+            if names is None:
+                names = current_names
+            else:
+                assert current_names == names, f"第 {round_no} 轮容器名发生了变化"
+            assert set(ids).isdisjoint(seen_ids), f"第 {round_no} 轮复用了此前的容器实例"
+
+            marker = session.execute(["test", "-e", "/tmp/session-marker"], timeout_seconds=30)
+            assert marker.exit_code != 0, f"第 {round_no} 轮继承了上一轮的容器可写层"
+            seeded = session.execute(["sh", "-c", ": > /tmp/session-marker"], timeout_seconds=30)
+            assert seeded.exit_code == 0, seeded.stderr_tail
+            seen_ids.extend(ids)
+        finally:
+            session.close()
+        assert _containers_by_label(run_id) == [], f"第 {round_no} 轮关闭后容器残留"
+
+    assert len(set(seen_ids)) == 3, f"三轮会话应对应 3 个不同容器实例，实际 {seen_ids}"
