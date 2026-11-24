@@ -5,17 +5,24 @@
 `check.py` 和预期产物 —— 等于让考生自己判卷。本模块把允许范围变成
 **执行前必须过的一道门**：
 
-* `ActionPolicy.for_plan()`：无需后端改动即可生效的默认策略，保护验收链。
+* `ActionPolicy.for_plan()`：无需后端改动即可生效的**默认文件保护**（验收链）。
 * `ActionPolicy.for_manifest()`：按受维护任务声明的动作与产物构造。
 * `build_aci_factory()`：符合 `HarnessRunner.aci_factory` 签名的工厂。
+
+**当前的接线边界**：`app/main.py` 仍传 `aci_factory=PaperACI`，且 `RunPlan`
+没有 `target_id`，`build_aci_factory()` 无法可靠匹配 manifest。因此在队长完成
+接线（见 Issue #40）之前，只有 `for_plan()` 的默认文件保护在生产路径生效；
+**按靶场 `allowed_actions` 限制尚未生效**，不能作为已完成能力宣称。
 
 只做「先验后做」的拒绝，不新增宿主 shell 工具，不改沙箱行为，不改契约。
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
 from paperharness.aci import errors
 
@@ -35,9 +42,14 @@ DEFAULT_ENV_NAMES = frozenset(
     {"CUDA_VISIBLE_DEVICES", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "TOKENIZERS_PARALLELISM"}
 )
 
-#: 会产生副作用的动作。观察类（读、搜、跑测试、结束本轮）始终允许：
-#: 模型必须先能看报错，才谈得上「修复越界」。
-SIDE_EFFECTS = frozenset({"replace_exact", "install_requirement", "set_environment"})
+#: 会产生副作用、因而必须按 manifest 授权的动作。
+#: `run_smoke_test` 会执行 `plan.command`——它会写产物、跑脚本、可能触发网络，
+#: 不是「只读观察」；不纳入授权就等于给了一个绕过 allowed_actions 的入口。
+#: 纯观察动作（read_file / search_text）和仅结束本轮决策的 finish_repair
+#: 始终允许：模型必须先能看报错，才谈得上「修复越界」。
+SIDE_EFFECTS = frozenset(
+    {"replace_exact", "install_requirement", "set_environment", "run_smoke_test"}
+)
 
 
 def _norm(path: str) -> str:
@@ -73,7 +85,10 @@ class ActionPolicy:
 
     @classmethod
     def for_plan(cls, plan) -> ActionPolicy:
-        """默认策略：所有合法动作可做，但验收链文件一律不可写。
+        """默认策略：合法动作都放行，但验收链文件一律不可写。
+
+        这里**只**落实默认文件保护，不读取 manifest 的 `allowed_actions`；
+        按靶场限制须队长完成工厂接线后才生效（见 Issue #40）。
 
         `expected_artifact` 是验收判据的目标产物；允许模型直接写它，就能
         用伪造产物换取「验证通过」。`check.py` 是服务端注入的断言脚本。
@@ -102,8 +117,32 @@ class ActionPolicy:
             protected_paths=frozenset(protected),
         )
 
-    def rejection(self, action) -> str | None:
-        """返回写死的失败 summary；None 表示允许执行。必须在副作用之前调用。"""
+    def _protected_real_paths(self, workspace: Path) -> frozenset[str]:
+        """把受保护的相对路径解析成真实文件路径，用于防符号链接别名绕过。
+
+        `path_guard.resolve()` 会把 `alias/check.py`（alias -> .）解析到
+        `workspace/check.py`；只做词法归一化是比不出来的。Windows 下用
+        normcase 抵消大小写差异。
+        """
+        base = Path(workspace).resolve(strict=False)
+        return frozenset(
+            os.path.normcase(str((base / rel).resolve(strict=False)))
+            for rel in self.protected_paths
+        )
+
+    def rejection(
+        self,
+        action,
+        *,
+        resolved: Path | None = None,
+        workspace: Path | None = None,
+    ) -> str | None:
+        """返回写死的失败 summary；None 表示允许执行。必须在副作用之前调用。
+
+        `resolved` / `workspace` 由 PaperACI 传入（即 `path_guard.resolve` 的
+        结果）。给了就按**真实路径**比较受保护文件，堵住符号链接别名；不给时
+        退回词法比较，便于策略本身被独立单测直接调用。
+        """
         name = getattr(action, "action", "")
         if name not in self.allowed_actions:
             return errors.action_not_allowed(name)
@@ -116,7 +155,11 @@ class ActionPolicy:
 
         if name == "replace_exact":
             rel = _norm(getattr(action, "path", ""))
-            if rel in self.protected_paths:
+            if resolved is not None and workspace is not None:
+                protected_hit = os.path.normcase(str(resolved)) in self._protected_real_paths(workspace)
+            else:
+                protected_hit = rel in self.protected_paths
+            if protected_hit:
                 return errors.protected_file(rel)
             if self.writable_prefixes is not None and not any(
                 rel == p or rel.startswith(p.rstrip("/") + "/") for p in self.writable_prefixes
@@ -135,8 +178,9 @@ def build_aci_factory(policy: ActionPolicy | None = None, targets: Iterable | No
     """返回 `(session, workspace, plan, timeout_seconds) -> ACI` 的工厂。
 
     `targets` 预留给按靶场选择策略：当前 `HarnessRunner` 的工厂签名不带
-    target_id，所以这里只记录映射、不做不可靠的猜测；接入点见 PR 说明。
-    不传 policy 时用 `for_plan(plan)`，即 R06 验收链保护立即生效。
+    target_id，所以这里只记录映射、不做不可靠的猜测；接入点见 Issue #40。
+    不传 policy 时用 `for_plan(plan)`，**只有默认验收链文件保护立即生效**，
+    按靶场 `allowed_actions` 限制仍需队长完成接线后才能宣称。
     """
     by_manifest = {getattr(m, "id", None): m for m in (targets or [])}
 

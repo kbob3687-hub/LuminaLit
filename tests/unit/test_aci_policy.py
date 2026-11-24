@@ -5,11 +5,14 @@
   2. 观察类动作（读、搜、跑测试）不被「修复越界」误伤。
 """
 
+import os
+import subprocess
 from types import SimpleNamespace
 
 import pytest
 
 from paperharness.aci import ActionPolicy, PaperACI, build_aci_factory
+from paperharness.aci.policy import SIDE_EFFECTS
 from paperharness.contracts.run import (
     InstallRequirementAction,
     ReadFileAction,
@@ -146,3 +149,107 @@ def test_unknown_action_still_uses_its_own_tag(session, workspace):
     aci = make_aci(session, workspace)
     obs = aci.execute(SimpleNamespace(action="rm_rf", path="/"))
     assert obs.ok is False and obs.summary == "unknown_action"
+
+
+# ---------------------------------------------------------------------------
+# 队长 review（PR #37）：符号链接别名、run_smoke_test 越权、生产路径接线边界
+# ---------------------------------------------------------------------------
+
+
+def _make_alias(workspace):
+    """在 workspace 里造一个指向 workspace 自身的目录别名。
+
+    Linux 用符号链接；Windows 无创建符号链接权限时退回 `mklink /J`（目录
+    联接，不需管理员），两者都会被 `Path.resolve()` 解析到同一个真实文件。
+    """
+    alias = workspace / "alias"
+    try:
+        alias.symlink_to(".", target_is_directory=True)
+        return alias
+    except (OSError, NotImplementedError):
+        pass
+    if os.name == "nt":
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(alias), str(workspace)],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return alias
+    pytest.skip("当前环境既不能创建符号链接，也不能创建目录联接")
+
+
+def test_symlink_alias_cannot_bypass_protected_file(session, workspace):
+    """仓库预置 `alias -> .` 后，alias/check.py 与 check.py 是同一个真实文件。
+
+    旧实现只比词法归一化后的相对路径，别名会被当成普通源码放行。这里断言
+    文件内容不变，且拒绝发生在任何命令执行之前。
+    """
+    _make_alias(workspace)
+
+    aci = make_aci(session, workspace)
+    before = (workspace / "check.py").read_bytes()
+    obs = aci.execute(
+        ReplaceExactAction(action="replace_exact", path="alias/check.py", old="#", new="X")
+    )
+    assert obs.ok is False
+    assert obs.summary.startswith("protected_file:"), obs.summary
+    assert (workspace / "check.py").read_bytes() == before, "符号链接别名改写了受保护文件"
+    assert session.commands == [], "拒绝必须发生在任何命令执行之前"
+
+
+def test_rejection_compares_resolved_real_path(workspace):
+    """策略本身按调用方解析出的真实路径判断，不依赖词法形态。"""
+    policy = ActionPolicy.for_plan(plan())
+    action = ReplaceExactAction(action="replace_exact", path="alias/check.py", old="#", new="X")
+    real = (workspace / "check.py").resolve(strict=False)
+
+    assert policy.rejection(action, resolved=real, workspace=workspace).startswith("protected_file:")
+    # 只给词法路径的旧调用方式看不出别名——这正是必须从 PaperACI 传入
+    # path_guard.resolve 结果的原因；生产路径不会走这条分支。
+    assert policy.rejection(action) is None
+
+
+def test_run_smoke_test_requires_manifest_authorization(session, workspace):
+    """run_smoke_test 会执行 plan.command，不是无副作用的观察动作。"""
+    from paperharness.contracts.run import RunSmokeTestAction
+
+    policy = ActionPolicy.for_manifest(manifest(["replace_exact"]), plan())
+    aci = make_aci(session, workspace, policy=policy)
+    obs = aci.execute(RunSmokeTestAction(action="run_smoke_test"))
+    assert obs.ok is False and obs.summary == "action_not_allowed:run_smoke_test"
+    assert session.commands == [], "被拒的冒烟测试不得执行 plan.command"
+
+
+def test_run_smoke_test_allowed_when_declared(session, workspace):
+    from paperharness.contracts.run import RunSmokeTestAction
+
+    policy = ActionPolicy.for_manifest(manifest(["run_smoke_test"]), plan())
+    aci = make_aci(session, workspace, policy=policy)
+    obs = aci.execute(RunSmokeTestAction(action="run_smoke_test"))
+    assert obs.ok is True
+    assert session.commands == [["python", "-I", "check.py"]]
+
+
+def test_for_plan_only_protects_files_not_manifest_scope():
+    """默认策略只做文件保护，不宣称按靶场 allowed_actions 已经生效。
+
+    app/main.py 仍是 aci_factory=PaperACI、RunPlan 没有 target_id，接线完成前
+    不能把 for_plan() 当成 manifest 权限的实现（见 Issue #40）。
+    """
+    policy = ActionPolicy.for_plan(plan())
+    assert policy.restricted_side_effects is None
+    assert "check.py" in policy.protected_paths
+    assert "reports/out.txt" in policy.protected_paths
+    assert "run_smoke_test" in SIDE_EFFECTS
+
+
+def test_production_factory_path_blocks_protected_write(session, workspace):
+    """模拟 app/main.py 当前使用的四参工厂路径：默认保护必须照常生效。"""
+    factory = build_aci_factory()
+    aci = factory(session, workspace, plan(), 300)
+    assert isinstance(aci, PaperACI)
+    obs = aci.execute(ReplaceExactAction(action="replace_exact", path="check.py", old="#", new="X"))
+    assert obs.ok is False and obs.summary.startswith("protected_file:")
+    assert (workspace / "check.py").read_text(encoding="utf-8").startswith("# server-owned validator")
+    assert session.commands == []

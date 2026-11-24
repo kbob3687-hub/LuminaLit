@@ -83,7 +83,18 @@ class PaperACI:
             return self._fail(name, errors.UNKNOWN_ACTION)
         # 执行权限是整条流水线的第 0 步：任何拒绝都必须发生在读文件、
         # 写文件、开网、改环境变量之前，不能「用一次非法写入换一次合法读」。
-        rejected = self.policy.rejection(action)
+        # replace_exact 先把路径解析到真实文件再交给策略：只比词法路径时，
+        # `alias/check.py`（alias -> .）能绕过 check.py 的保护。
+        resolved: Path | None = None
+        if name == "replace_exact":
+            raw = getattr(action, "path", "")
+            if isinstance(raw, str):
+                try:
+                    resolved = path_guard.resolve(self.workspace, raw)
+                except path_guard.PathEscape:
+                    # 越界仍由动作自己的 _guard 返回 path_escape，保持原标签。
+                    resolved = None
+        rejected = self.policy.rejection(action, resolved=resolved, workspace=self.workspace)
         if rejected is not None:
             return self._fail(name, rejected)
         return handler(action)
