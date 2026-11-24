@@ -14,6 +14,7 @@ import {
   type RunEvent,
   type RunResult,
   type RunState,
+  type VerificationResult,
 } from "./types";
 
 export const ACTIONS = [
@@ -961,19 +962,22 @@ export function explainFailure(category: string, events: RunEvent[]): FailureExp
 // ─────────────────────────────────────────────── 三层验收（L1 / L2 / L3）
 
 /**
- * 后端目前只下发 `verified: boolean`（`contracts/run.py:115`），没有分层结构。
- * 所以下面三层不是"后端给的"，是从**可核实的事件**推出来的，每一层都要能
- * 指出依据在哪：
+ * 三层验收只陈述**后端已经下发的证据**，不从 `verified` 布尔反推结论。
  *
- * - L1 只看 `test` 事件的 `exit_code`；
- * - L2 用 `verified` 反推：`runner._is_verified` 先判退出码、再判产物存在，
- *   所以 verified=true 必然蕴含产物已产出；而「exit 0 且 verified=false」
- *   剩下的唯一解释就是产物缺失；
- * - L3 只在「跑的是靶场注入的 check.py」时可推 —— 那种情况下 check.py 里的
- *   assert 就是指标判据，退出码 0 等价于阈值全部通过。
+ * #27 起后端会下发结构化的 `result.verification`（`contracts/verification.py`）。
+ * 关键的两条反例，之前的实现都判错了：
  *
- * 推不出来的层一律 `unknown`，caveat 写清缺什么。宁可在界面上写"后端未下发"，
- * 也不把「退出码 0」包装成「指标达标」——评委点开一眼就能看出哪个是假的。
+ * - `_execution_verification()` 先按执行结果构造 verification，独立验证器随后
+ *   可以覆盖 `verified`；而 `_is_verified(..., independent=True)` 会跳过产物
+ *   存在性检查。所以「exit 0 + 产物存在 + 独立指标验证失败」是合法状态，
+ *   `verified=false` **不蕴含**「产物缺失」。
+ * - `targets/paper-pysindy/check.py` 只写 `coefficients.json`，没有任何指标
+ *   断言；退出 0 只证明脚本跑完。`check.py` 不是天然的指标判据。
+ *
+ * 因此：L2 优先读 `verification.checks` 里的产物校验项或独立验证器的产物
+ * 哈希；L3 只在 `verification.level="target"` 且后端确实下发 metrics 时给结论。
+ * 其余一律 `unknown`，并写明「后端未下发」。宁可留白，也不把执行结果包装成
+ * 验收结论——评委点开一眼就能看出哪个是假的。
  */
 export interface AcceptanceLayer {
   id: "L1" | "L2" | "L3";
@@ -999,9 +1003,12 @@ export function planOf(events: RunEvent[]): Record<string, unknown> | null {
 }
 
 const L2_CAVEAT =
-  "后端只判产物路径 is_file()，不校验格式或内容合法；这一层目前是「存在性」门槛，不是「合格性」。";
+  "这一层只判「产物是否存在 / 能否被独立验证器安全读取」，不校验格式、结构或指标；后端未下发产物校验项时显示「无法确认」。";
 const L3_CAVEAT =
-  "目标阈值写在后端靶场注入的 check.py 里，不随事件下发；模型改不了它（ACI protected_file 拦截）。";
+  "check.py 退出 0 只证明脚本跑完，不等于指标达标；指标结论只认后端 verification.level=target 且下发的 metrics。";
+
+/** 后端 _execution_verification() 写死的产物校验项名称。 */
+const ARTIFACT_CHECK_NAME = "预期文件存在";
 
 /** stderr 里的 `NAME=数字` 形态，例如 `ARI=0.87`、`error_x=1.2e-03`。 */
 const MEASURED_VALUE = /([A-Za-z_][A-Za-z0-9_]{1,24})\s*=\s*(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)/g;
@@ -1046,7 +1053,16 @@ export function buildAcceptance(
   const attempt = typeof lastTest?.data?.attempt === "number" ? lastTest.data.attempt : null;
 
   const ended = state === "succeeded" || state === "failed" || state === "cancelled";
-  const verified = result?.verified === true;
+  // `verified` 只是执行侧布尔：独立验证器可以覆盖它，且 independent=True 时
+  // `_is_verified` 会跳过产物检查。因此 L2/L3 一律以结构化字段为准。
+  const verification: VerificationResult | null = result?.verification ?? null;
+  const artifactCheck =
+    verification?.checks?.find(
+      (c) => c.name === ARTIFACT_CHECK_NAME || /artifact|产物/i.test(c.name),
+    ) ?? null;
+  const verifierReadArtifact =
+    verification?.level === "target" && Boolean(verification.artifact_sha256);
+  const targetMetrics = verification?.level === "target" ? verification.metrics ?? [] : [];
   const attemptNote = attempt && attempt > 1 ? `（第 ${attempt} 次尝试）` : "";
   const layers: AcceptanceLayer[] = [];
 
@@ -1079,7 +1095,7 @@ export function buildAcceptance(
     });
   }
 
-  // ---- L2 产物合格
+  // ---- L2 产物合格：只认后端下发的产物校验证据，不从 verified 布尔反推
   if (!artifact) {
     layers.push({
       id: "L2",
@@ -1098,74 +1114,134 @@ export function buildAcceptance(
       evidence: [`expected_artifact=${artifact}`],
       caveat: L2_CAVEAT,
     });
-  } else if (verified) {
+  } else if (!verification) {
+    layers.push({
+      id: "L2",
+      title: "产物合格",
+      status: "unknown",
+      detail:
+        "后端未下发结构化验收结果（result.verification），无法确认产物是否通过校验；不从 verified 布尔反推失败原因。",
+      evidence: [
+        `expected_artifact=${artifact}`,
+        `verified=${result?.verified ?? "未下发"}`,
+        `exit_code=${exitCode ?? "未下发"}`,
+      ],
+      caveat: L2_CAVEAT,
+    });
+  } else if (artifactCheck) {
+    layers.push({
+      id: "L2",
+      title: "产物合格",
+      status: artifactCheck.passed ? "pass" : "fail",
+      detail: artifactCheck.passed
+        ? `后端「${artifactCheck.name}」检查通过：${artifact} 已产出。`
+        : `后端「${artifactCheck.name}」检查未通过：${artifactCheck.detail}`,
+      evidence: [
+        `verification.level=${verification.level}`,
+        `verification.status=${verification.status}`,
+        `${artifactCheck.name}=${artifactCheck.passed}`,
+      ],
+      caveat: L2_CAVEAT,
+    });
+  } else if (verifierReadArtifact) {
     layers.push({
       id: "L2",
       title: "产物合格",
       status: "pass",
-      detail: `${artifact} 已在 workspace 产出。`,
-      evidence: [`verified=true`, `expected_artifact=${artifact}`],
-      caveat: L2_CAVEAT,
-    });
-  } else if (exitCode === 0) {
-    layers.push({
-      id: "L2",
-      title: "产物合格",
-      status: "fail",
-      detail: `退出码为 0 但 verified=false：按 _is_verified 的判定顺序，此时唯一没满足的就是 ${artifact} 缺失。`,
-      evidence: [`exit_code=0`, `verified=false`, `expected_artifact=${artifact}`],
+      detail: "独立验证器已安全读取产物并计算哈希，产物存在且可读取。",
+      evidence: [
+        "verification.level=target",
+        `artifact_sha256=${verification.artifact_sha256?.slice(0, 16)}…`,
+      ],
       caveat: L2_CAVEAT,
     });
   } else {
     layers.push({
       id: "L2",
       title: "产物合格",
-      status: "not_reached",
-      detail: "测试阶段没通过，后端没有走到产物校验。",
-      evidence: [`expected_artifact=${artifact}`],
+      status: "unknown",
+      detail: "后端下发了验收结果，但没有产物校验项，无法确认产物是否通过校验。",
+      evidence: [
+        `verification.level=${verification.level}`,
+        `verification.status=${verification.status}`,
+      ],
       caveat: L2_CAVEAT,
     });
   }
 
-  // ---- L3 指标达标
-  if (!scripted) {
+  // ---- L3 指标达标：只认后端 level=target 且明确下发的 metrics
+  if (!verification) {
     layers.push({
       id: "L3",
       title: "指标达标",
       status: "unknown",
-      detail: "这次跑的不是靶场注入的 check.py，事件里没有任何指标判据。",
-      evidence: [],
-      caveat: "RunResult 只有 verified 布尔，没有 metric / target 字段；这里的空白是后端契约的空白。",
+      detail:
+        "后端未下发指标结论（result.verification 缺失）。check.py 退出 0 只证明脚本跑完，不等于指标达标。",
+      evidence: scripted
+        ? [
+            `command=${command.join(" ")}`,
+            `exit_code=${exitCode ?? "未下发"}`,
+            ...measuredValues(testErr).map((pair) => `原始 stderr 实测值（未经后端判定）：${pair}`),
+          ]
+        : [],
+      caveat: L3_CAVEAT,
     });
-  } else if (!lastTest) {
+  } else if (verification.level !== "target") {
     layers.push({
       id: "L3",
       title: "指标达标",
-      status: "not_reached",
-      detail: "还没跑到 check.py。",
-      evidence: [`command=${command.join(" ")}`],
+      status: "unknown",
+      detail:
+        `后端验收停留在 level=${verification.level}，未下发指标结论。` +
+        (scripted && exitCode === 0 ? "check.py 退出 0 只证明脚本跑完，不是指标判据。" : ""),
+      evidence: [
+        `verification.level=${verification.level}`,
+        `verification.status=${verification.status}`,
+        ...(scripted ? [`command=${command.join(" ")}`, `exit_code=${exitCode ?? "未下发"}`] : []),
+        ...tailLines(testErr).map((line) => `原始 stderr（未经后端指标判定）：${line}`),
+      ],
       caveat: L3_CAVEAT,
     });
-  } else if (exitCode === 0) {
+  } else if (
+    verification.status === "passed" &&
+    targetMetrics.length > 0 &&
+    targetMetrics.every((m) => m.passed)
+  ) {
     layers.push({
       id: "L3",
       title: "指标达标",
       status: "pass",
-      detail: "check.py 里的断言（含指标阈值）全部通过。",
-      evidence: [`command=${command.join(" ")}`, "exit_code=0"],
+      detail: `独立验证器下发的 ${targetMetrics.length} 项指标全部达标。`,
+      evidence: [
+        `rule_id=${verification.rule_id ?? "未下发"}`,
+        ...targetMetrics.map(
+          (m) => `${m.name}: 实测 ${m.observed} ${m.comparison} 阈值 ${m.threshold} · passed=true`,
+        ),
+      ],
       caveat: L3_CAVEAT,
     });
-  } else if (/AssertionError/.test(testErr)) {
-    const measured = measuredValues(testErr);
+  } else if (verification.status === "failed" || targetMetrics.some((m) => !m.passed)) {
     layers.push({
       id: "L3",
       title: "指标达标",
       status: "fail",
-      detail: "check.py 的指标断言没通过。",
+      detail: `独立指标验证未通过：${verification.summary || "后端未给出摘要"}`,
       evidence: [
-        ...measured.map((pair) => `实测 ${pair}`),
-        ...tailLines(testErr, 1).filter((line) => line.includes("AssertionError")),
+        `verification.status=${verification.status}`,
+        `failure_category=${verification.failure_category ?? "未下发"}`,
+        ...targetMetrics
+          .filter((m) => !m.passed)
+          .map((m) => `${m.name}: 实测 ${m.observed} ${m.comparison} 阈值 ${m.threshold} · passed=false`),
       ],
+      caveat: L3_CAVEAT,
+    });
+  } else if (verification.status === "blocked") {
+    layers.push({
+      id: "L3",
+      title: "指标达标",
+      status: "unknown",
+      detail: "独立指标验收被阻止，后端未给出指标结论。",
+      evidence: [`verification.status=blocked`, `summary=${verification.summary}`],
       caveat: L3_CAVEAT,
     });
   } else {
@@ -1173,8 +1249,8 @@ export function buildAcceptance(
       id: "L3",
       title: "指标达标",
       status: "unknown",
-      detail: "check.py 没跑到断言就退出了（导入失败 / 依赖缺失 / 语法错误），指标未被评估。",
-      evidence: tailLines(testErr),
+      detail: "后端下发了 target 级验收结果，但没有可判定的指标项，无法确认指标结论。",
+      evidence: [`verification.status=${verification.status}`, `metrics=${targetMetrics.length} 项`],
       caveat: L3_CAVEAT,
     });
   }
