@@ -65,3 +65,25 @@ export function finiteNonNegative(value: string | null): number {
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 && Number.isSafeInteger(n) ? n : 0;
 }
+
+/**
+ * 数据来源模式的唯一判定入口（PR #39 review）。
+ *
+ * 显式 `demo=1` 是「这是离线演示」的强声明，**优先于任何 run 深链**：
+ * `?demo=1&scene=result&run=<id>` 里的 run 只作为回放上下文，不能把页面
+ * 抢成 live —— 否则 ResultScene 的 isDemo=false，会拿预设数据去请求
+ * environment.json 并渲染真实下载入口。
+ *
+ * 没有 demo 时：合法的 run 深链 / live=1 走真实 API；只有健康检查明确
+ * 失败且没有任何 live 声明时才自动回退离线回放。
+ */
+export type RunMode = "live" | "replay";
+
+export function resolveRunMode(
+  q: URLSearchParams,
+  opts: { healthy: boolean | null; envDemo?: boolean },
+): RunMode {
+  if (q.get("demo") === "1" || opts.envDemo === true) return "replay";
+  if (q.get("live") === "1" || parseRunId(q)) return "live";
+  return opts.healthy === false ? "replay" : "live";
+}

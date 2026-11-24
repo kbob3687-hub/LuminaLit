@@ -8,7 +8,7 @@ import { ResultScene } from "./components/ResultScene";
 import { useRunPolling } from "./hooks/useRunPolling";
 import { useDemoRun } from "./hooks/useDemoRun";
 import { createRun, createPreflight, cancelRun, ApiError, healthDetails } from "./api";
-import { finiteNonNegative, parseRunId, parseScene, type Scene } from "./deepLink";
+import { finiteNonNegative, parseRunId, parseScene, resolveRunMode, type Scene } from "./deepLink";
 import type { HealthDetails, PreflightResult } from "./types";
 
 /** 截图模式下把所有过渡时长压成 0，避免无头渲染抓到半透明中间帧。 */
@@ -51,9 +51,8 @@ export default function App() {
   const cancelLock = useRef(false);
   const mounted = useRef(false);
 
-  /** 截图/演示直链：?scene=run / ?scene=welcome，?run=<id> 直接盯一个 run。 */
+  /** 截图/演示直链：?scene=run / ?scene=result，?run=<id> 作为运行上下文。 */
   const q = new URLSearchParams(window.location.search);
-  const linkedRun = parseRunId(q);
 
   useEffect(() => {
     mounted.current = true;
@@ -96,8 +95,6 @@ export default function App() {
    * 探测优先于配置：启动时打一次 /api/health（1.5s 超时）。
    */
   const apiBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
-  const wantReplay = q.get("demo") === "1" || import.meta.env.VITE_DEMO === "1";
-  const wantLive = q.get("live") === "1" || Boolean(linkedRun);
 
   /** null = 还在探测 */
   const [healthy, setHealthy] = useState<boolean | null>(null);
@@ -137,14 +134,11 @@ export default function App() {
     return () => { alive = false; };
   }, []);
 
-  // 已有任务直链始终使用真实 API；探测失败才自动回退离线回放。
-  const mode: "live" | "replay" = linkedRun
-    ? "live"
-    : wantReplay
-      ? "replay"
-      : wantLive || healthy !== false
-        ? "live"
-        : "replay";
+  // demo=1 优先于 run 深链；否则已有任务直链使用真实 API，探测失败才回退回放。
+  const mode: "live" | "replay" = resolveRunMode(q, {
+    healthy,
+    envDemo: import.meta.env.VITE_DEMO === "1",
+  });
   const demo = mode === "replay";
 
   const live = useRunPolling(mode === "live" ? runId : null);
