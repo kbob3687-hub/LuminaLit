@@ -108,8 +108,10 @@ class ActionPolicy:
         """
         declared = frozenset(getattr(manifest, "allowed_actions", []) or [])
         protected = {"check.py"}
-        for candidate in (getattr(manifest, "expected_artifact", None),
-                          getattr(plan, "expected_artifact", None)):
+        for candidate in (
+            getattr(manifest, "expected_artifact", None),
+            getattr(plan, "expected_artifact", None),
+        ):
             if candidate:
                 protected.add(_norm(candidate))
         return cls(
@@ -156,7 +158,9 @@ class ActionPolicy:
         if name == "replace_exact":
             rel = _norm(getattr(action, "path", ""))
             if resolved is not None and workspace is not None:
-                protected_hit = os.path.normcase(str(resolved)) in self._protected_real_paths(workspace)
+                protected_hit = os.path.normcase(str(resolved)) in self._protected_real_paths(
+                    workspace
+                )
             else:
                 protected_hit = rel in self.protected_paths
             if protected_hit:
@@ -167,9 +171,14 @@ class ActionPolicy:
                 return errors.change_not_allowed(rel)
         elif name == "install_requirement":
             requirement = getattr(action, "requirement", "")
-            if self.allowed_requirements is not None and requirement not in self.allowed_requirements:
+            if (
+                self.allowed_requirements is not None
+                and requirement not in self.allowed_requirements
+            ):
                 return errors.change_not_allowed(requirement)
-        elif name == "set_environment" and getattr(action, "name", "") not in self.allowed_env_names:
+        elif (
+            name == "set_environment" and getattr(action, "name", "") not in self.allowed_env_names
+        ):
             return errors.env_not_allowed(getattr(action, "name", ""))
         return None
 
@@ -191,7 +200,11 @@ def build_aci_factory(policy: ActionPolicy | None = None, targets: Iterable | No
         chosen = policy
         if chosen is None:
             manifest = by_manifest.get(getattr(plan, "target_id", None))
-            chosen = ActionPolicy.for_manifest(manifest, plan) if manifest else ActionPolicy.for_plan(plan)
+            chosen = (
+                ActionPolicy.for_manifest(manifest, plan)
+                if manifest
+                else ActionPolicy.for_plan(plan)
+            )
         return PaperACI(session, workspace, plan, timeout_seconds, policy=chosen)
 
     return factory

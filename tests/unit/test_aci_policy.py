@@ -65,20 +65,26 @@ def test_check_py_is_protected_and_unchanged(session, workspace, path):
 
 def test_expected_artifact_is_protected(session, workspace):
     aci = make_aci(session, workspace)
-    obs = aci.execute(ReplaceExactAction(action="replace_exact", path="reports/out.txt", old="old", new="faked"))
+    obs = aci.execute(
+        ReplaceExactAction(action="replace_exact", path="reports/out.txt", old="old", new="faked")
+    )
     assert obs.ok is False and obs.summary == "protected_file:reports/out.txt"
     assert (workspace / "reports" / "out.txt").read_text(encoding="utf-8") == "old"
 
 
 def test_reading_validator_is_allowed(session, workspace):
     aci = make_aci(session, workspace)
-    obs = aci.execute(ReadFileAction(action="read_file", path="check.py", start_line=1, line_count=5))
+    obs = aci.execute(
+        ReadFileAction(action="read_file", path="check.py", start_line=1, line_count=5)
+    )
     assert obs.ok is True
 
 
 def test_normal_source_file_is_writable(session, workspace):
     aci = make_aci(session, workspace)
-    obs = aci.execute(ReplaceExactAction(action="replace_exact", path="src/main.py", old="hello", new="world"))
+    obs = aci.execute(
+        ReplaceExactAction(action="replace_exact", path="src/main.py", old="hello", new="world")
+    )
     assert obs.ok is True
     assert "world" in (workspace / "src" / "main.py").read_text(encoding="utf-8")
 
@@ -86,7 +92,9 @@ def test_normal_source_file_is_writable(session, workspace):
 def test_path_escape_still_wins(session, workspace):
     """归一化不能把越界路径吞掉；仍由既有 path_guard 判 path_escape。"""
     aci = make_aci(session, workspace)
-    obs = aci.execute(ReplaceExactAction(action="replace_exact", path="../../etc/passwd", old="a", new="b"))
+    obs = aci.execute(
+        ReplaceExactAction(action="replace_exact", path="../../etc/passwd", old="a", new="b")
+    )
     assert obs.ok is False and obs.summary.startswith("path_escape:")
 
 
@@ -100,7 +108,9 @@ def test_manifest_restricts_side_effects_without_touching_network(session, works
     monkeypatch.setattr(session, "execute", lambda *a, **k: calls.append(("execute", a)))
     policy = ActionPolicy.for_manifest(manifest(["replace_exact"]), plan())
     aci = make_aci(session, workspace, policy=policy)
-    obs = aci.execute(InstallRequirementAction(action="install_requirement", requirement="numpy==1.26"))
+    obs = aci.execute(
+        InstallRequirementAction(action="install_requirement", requirement="numpy==1.26")
+    )
     assert obs.ok is False and obs.summary == "action_not_allowed:install_requirement"
     assert calls == [], "被拒的动作不得开网或执行命令"
 
@@ -108,7 +118,9 @@ def test_manifest_restricts_side_effects_without_touching_network(session, works
 def test_manifest_allows_declared_action(session, workspace):
     policy = ActionPolicy.for_manifest(manifest(["replace_exact"]), plan())
     aci = make_aci(session, workspace, policy=policy)
-    obs = aci.execute(ReplaceExactAction(action="replace_exact", path="src/main.py", old="hello", new="ok"))
+    obs = aci.execute(
+        ReplaceExactAction(action="replace_exact", path="src/main.py", old="hello", new="ok")
+    )
     assert obs.ok is True
 
 
@@ -117,24 +129,38 @@ def test_empty_allowed_actions_means_no_extra_restriction(session, workspace):
     policy = ActionPolicy.for_manifest(manifest([]), plan())
     aci = make_aci(session, workspace, policy=policy)
     assert aci.execute(ReadFileAction(action="read_file", path="check.py")).ok is True
-    assert aci.execute(ReplaceExactAction(action="replace_exact", path="src/main.py", old="hello", new="ok")).ok is True
+    assert (
+        aci.execute(
+            ReplaceExactAction(action="replace_exact", path="src/main.py", old="hello", new="ok")
+        ).ok
+        is True
+    )
 
 
 def test_env_and_requirement_scope(session, workspace):
     env_policy = ActionPolicy(allowed_env_names=frozenset({"OMP_NUM_THREADS"}))
     aci = make_aci(session, workspace, policy=env_policy)
-    assert aci.execute(SetEnvironmentAction(action="set_environment", name="PATH", value="/tmp")).summary == "env_not_allowed:PATH"
+    assert (
+        aci.execute(
+            SetEnvironmentAction(action="set_environment", name="PATH", value="/tmp")
+        ).summary
+        == "env_not_allowed:PATH"
+    )
 
     req_policy = ActionPolicy(allowed_requirements=frozenset({"numpy==1.26.4"}))
     aci = make_aci(session, workspace, policy=req_policy)
-    obs = aci.execute(InstallRequirementAction(action="install_requirement", requirement="requests"))
+    obs = aci.execute(
+        InstallRequirementAction(action="install_requirement", requirement="requests")
+    )
     assert obs.ok is False and obs.summary == "change_not_allowed:requests"
 
 
 def test_writable_prefixes(session, workspace):
     policy = ActionPolicy(writable_prefixes=("src",))
     aci = make_aci(session, workspace, policy=policy)
-    obs = aci.execute(ReplaceExactAction(action="replace_exact", path="notes.txt", old="a", new="b"))
+    obs = aci.execute(
+        ReplaceExactAction(action="replace_exact", path="notes.txt", old="a", new="b")
+    )
     assert obs.ok is False and obs.summary == "change_not_allowed:notes.txt"
 
 
@@ -142,7 +168,12 @@ def test_build_aci_factory_keeps_runner_signature(session, workspace):
     factory = build_aci_factory()
     aci = factory(session, workspace, plan(), 300)
     assert isinstance(aci, PaperACI)
-    assert aci.execute(ReplaceExactAction(action="replace_exact", path="check.py", old="#", new="X")).ok is False
+    assert (
+        aci.execute(
+            ReplaceExactAction(action="replace_exact", path="check.py", old="#", new="X")
+        ).ok
+        is False
+    )
 
 
 def test_unknown_action_still_uses_its_own_tag(session, workspace):
@@ -204,7 +235,9 @@ def test_rejection_compares_resolved_real_path(workspace):
     action = ReplaceExactAction(action="replace_exact", path="alias/check.py", old="#", new="X")
     real = (workspace / "check.py").resolve(strict=False)
 
-    assert policy.rejection(action, resolved=real, workspace=workspace).startswith("protected_file:")
+    assert policy.rejection(action, resolved=real, workspace=workspace).startswith(
+        "protected_file:"
+    )
     # 只给词法路径的旧调用方式看不出别名——这正是必须从 PaperACI 传入
     # path_guard.resolve 结果的原因；生产路径不会走这条分支。
     assert policy.rejection(action) is None
@@ -251,5 +284,7 @@ def test_production_factory_path_blocks_protected_write(session, workspace):
     assert isinstance(aci, PaperACI)
     obs = aci.execute(ReplaceExactAction(action="replace_exact", path="check.py", old="#", new="X"))
     assert obs.ok is False and obs.summary.startswith("protected_file:")
-    assert (workspace / "check.py").read_text(encoding="utf-8").startswith("# server-owned validator")
+    assert (
+        (workspace / "check.py").read_text(encoding="utf-8").startswith("# server-owned validator")
+    )
     assert session.commands == []

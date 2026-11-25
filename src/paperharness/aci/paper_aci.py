@@ -119,9 +119,7 @@ class PaperACI:
 
         start = action.start_line - 1
         chunk = lines.splitlines()[start : start + action.line_count]
-        body = "\n".join(
-            f"{start + offset + 1}: {line}" for offset, line in enumerate(chunk)
-        )
+        body = "\n".join(f"{start + offset + 1}: {line}" for offset, line in enumerate(chunk))
         return Observation(
             ok=True,
             action=action.action,
@@ -202,9 +200,7 @@ class PaperACI:
 
         timeout = max(self.timeout_seconds, INSTALL_TIMEOUT_FLOOR)
         with self._network(True):
-            result = self.session.execute(
-                ["python", "-m", "pip", "install", requirement], timeout
-            )
+            result = self.session.execute(["python", "-m", "pip", "install", requirement], timeout)
         return self._from_exec(action.action, result, f"install {requirement}")
 
     def _do_set_environment(self, action) -> Observation:
@@ -283,9 +279,7 @@ class PaperACI:
             return
         for current, dirs, files in os.walk(root):
             # 不跟随 workspace 内的目录符号链接：避免把宿主目录整棵读进来。
-            dirs[:] = [
-                name for name in dirs if not (Path(current) / name).is_symlink()
-            ]
+            dirs[:] = [name for name in dirs if not (Path(current) / name).is_symlink()]
             for name in files:
                 candidate = Path(current) / name
                 if candidate.is_file() and not candidate.is_symlink():
