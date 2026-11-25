@@ -56,12 +56,14 @@ function DownloadRow({ label, href, available, note }: { label: string; href: st
   );
 }
 
-export function ResultScene({ status, runId, onBack, onNewRun, onTechnical }: {
+export function ResultScene({ status, runId, onBack, onNewRun, onTechnical, isDemo = false }: {
   status: RunStatus | null;
   runId: string | null;
   onBack: () => void;
   onNewRun: () => void;
   onTechnical: () => void;
+  /** 离线回放：结论与下载都必须标成示例，不冒称真实运行（评审稿 §11.2）。 */
+  isDemo?: boolean;
 }) {
   const result = status?.result ?? null;
   const [env, setEnv] = useState<EnvironmentManifest | null>(null);
@@ -72,14 +74,14 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical }: {
     let cancelled = false;
     setEnv(null);
     setEnvError(false);
-    if (!runId || !RUN_ID_RE.test(runId)) return;
+    if (!runId || isDemo || !RUN_ID_RE.test(runId)) return;
     void getEnvironment(runId)
       .then((v) => { if (!cancelled) setEnv(v); })
       .catch(() => { if (!cancelled) setEnvError(true); });
     return () => { cancelled = true; };
-  }, [runId]);
+  }, [runId, isDemo]);
 
-  const overall = overallConclusion(status, false);
+  const overall = overallConclusion(status, isDemo);
   const verification = result?.verification ?? null;
   const replay = replayConclusion(result?.replay);
   const bundle = bundleConclusion(result?.bundle);
@@ -122,6 +124,11 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical }: {
         <header className="mb-2">
           <h1 className="text-3xl font-semibold tracking-tight text-ink">本次结果</h1>
           <p className="mt-2 text-sm leading-7 text-ink-mid">下面是本次运行实际记录的内容；未采集的字段显示为「未记录」，不会补造结果。</p>
+          {isDemo && (
+            <p role="status" className="mt-3 rounded-lg border border-warn/35 bg-warn/[.06] px-4 py-3 text-sm leading-7 text-warn">
+              这是离线预设回放，不代表本机执行或验证结果；下面的结论、证据与下载入口都只展示占位状态，不会生成真实文件。
+            </p>
+          )}
         </header>
 
         {/* 1. 结论及验证范围 */}
@@ -183,7 +190,7 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical }: {
               ))}
             </ul>
           ) : <Missing text="没有已记录的结构化检查项；不把日志里的一句 PASS 当作检查通过。" />}
-          {verification?.evidence_url && safeRun && (
+          {verification?.evidence_url && safeRun && !isDemo && (
             <a href={`${API_BASE}${verification.evidence_url}`} download className="mt-3 inline-block text-sm text-accent underline underline-offset-4">下载本次核验输入 JSON</a>
           )}
           <button type="button" onClick={onTechnical} className="mt-3 block cursor-pointer text-sm text-ink-mid underline underline-offset-4 hover:text-ink">查看全部技术事件与原始错误</button>
@@ -194,14 +201,14 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical }: {
           <p className={clsx("text-sm font-medium", replay.tone === "success" ? "text-pass" : replay.tone === "error" ? "text-reject" : replay.tone === "warning" ? "text-warn" : "text-ink-mid")}>{replay.label}</p>
           <p className="mt-1 text-xs leading-6 text-ink-mid">材料完整性：{bundle.label}（与复跑通过与否是两个独立结论）。</p>
         </Section>
-        <ReplayPanel result={result} runId={safeRun} />
+        <ReplayPanel result={result} runId={safeRun} isDemo={isDemo} />
 
         {/* 6. 下载报告、补丁、环境信息和复跑材料 */}
         <Section n={6} title="下载">
-          <DownloadRow label="结果报告" href={reportUrl} available={Boolean(reportUrl)} note="后端收尾时写入的 report.md 原文" />
-          <DownloadRow label="补丁" href={patchUrl} available={Boolean(patchUrl)} note="无改动时为空补丁，是正常结果" />
-          <DownloadRow label="环境信息" href={envUrl} available={Boolean(envUrl)} note="已采集的 Python、镜像、依赖与允许环境变量" />
-          <DownloadRow label="复跑材料" href={bundleUrl} available={Boolean(bundleUrl)} note={bundle.downloadable ? "完整性已通过，仅含声明范围内的相对路径" : "材料不完整或被阻止，不提供下载"} />
+          <DownloadRow label="结果报告" href={reportUrl} available={Boolean(reportUrl) && !isDemo} note="后端收尾时写入的 report.md 原文" />
+          <DownloadRow label="补丁" href={patchUrl} available={Boolean(patchUrl) && !isDemo} note="无改动时为空补丁，是正常结果" />
+          <DownloadRow label="环境信息" href={envUrl} available={Boolean(envUrl) && !isDemo} note="已采集的 Python、镜像、依赖与允许环境变量" />
+          <DownloadRow label="复跑材料" href={bundleUrl} available={Boolean(bundleUrl) && !isDemo} note={bundle.downloadable ? "完整性已通过，仅含声明范围内的相对路径" : "材料不完整或被阻止，不提供下载"} />
         </Section>
 
         {/* 7. 可执行的下一步 */}
