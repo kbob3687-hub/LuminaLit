@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import clsx from "clsx";
 import { ApiError, getEnvironment, getPatch, getReport } from "../api";
-import { failureText } from "../runModel";
-import type { EnvironmentManifest, RunStatus } from "../types";
+import { buildAcceptance, failureText } from "../runModel";
+import type { EnvironmentManifest, RunEvent, RunStatus } from "../types";
+import { AcceptancePanel } from "./AcceptancePanel";
 
 /**
  * 结果报告面板：把后端落盘的四个文件搬到界面上。
@@ -30,7 +31,15 @@ const TABS: { id: Tab; label: string; file: (rid: string) => string }[] = [
   { id: "json", label: "结果 JSON", file: (r) => `paperharness-${r.slice(0, 8)}-result.json` },
 ];
 
-export function ReportPanel({ runId, status }: { runId: string | null; status: RunStatus | null }) {
+export function ReportPanel({
+  runId,
+  status,
+  events,
+}: {
+  runId: string | null;
+  status: RunStatus | null;
+  events: RunEvent[];
+}) {
   // 演示/截图直链：?panel=report&tab=patch
   const [tab, setTab] = useState<Tab>(() => {
     const t = new URLSearchParams(window.location.search).get("tab");
@@ -75,6 +84,12 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
 
   // result.json 直接来自轮询拿到的 status，不用再请求
   const jsonText = useMemo(() => (result ? JSON.stringify(result, null, 2) : ""), [result]);
+
+  // 三层验收只看事件与终态，不依赖 report.md 是否已落盘：先出结论，再看原文。
+  const acceptance = useMemo(
+    () => buildAcceptance(status?.state, events, result),
+    [status?.state, events, result],
+  );
 
   const load = useCallback(
     async (which: Tab) => {
@@ -243,6 +258,11 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
       </div>
 
       {/* 文件内容：loading / err 都按当前 tab 取，切页不会串状态 */}
+
+      {/* 三层验收放在报告页签最上面：这是「这次运行到底证明了什么」的结论，
+          比 report.md 那几行 outcome=… 更该先被看到。不依赖文件是否落盘。 */}
+      {tab === "report" && <AcceptancePanel view={acceptance} />}
+
       {loading[tab] && (
         <div className="rounded-[9px] border border-rule px-3 py-6 text-center font-mono text-[11px] text-ink-muted">
           读取中…

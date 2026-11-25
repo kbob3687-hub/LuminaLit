@@ -5,6 +5,7 @@ import { labelOf, type RunEvent, type RunState, type RunStatus } from "../types"
 import { finiteNonNegative, parsePanel } from "../deepLink";
 import {
   aciTrace,
+  buildAcceptance,
   buildLoop,
   buildProgress,
   buildRows,
@@ -22,6 +23,7 @@ import { LoopStrip } from "./LoopStrip";
 import { ProgressBand } from "./ProgressBand";
 import { ReportPanel } from "./ReportPanel";
 import { Drawer } from "./Drawer";
+import { AcceptanceStrip } from "./AcceptancePanel";
 import { AciPanel, LoopPanel, PlanPanel, StagePanel } from "./DrawerPanels";
 
 /**
@@ -103,6 +105,11 @@ export function RunScene({
   const stages = useMemo(() => buildStages(events, status?.state), [events, status?.state]);
   const loop = useMemo(() => buildLoop(events, status?.state), [events, status?.state]);
   const rows = useMemo(() => buildRows(events), [events]);
+  // 三层验收（L1/L2/L3）：终态条用紧凑版，报告页签用详细版（见 ReportPanel）。
+  const acceptance = useMemo(
+    () => buildAcceptance(status?.state, events, status?.result ?? null),
+    [status?.state, status?.result, events],
+  );
   const runId = status?.run_id ?? null;
 
   /**
@@ -309,6 +316,7 @@ export function RunScene({
             >
               {isFailed ? "已判定不可复现" : state === "succeeded" ? "复现完成" : "已取消"}
             </span>
+            <AcceptanceStrip view={acceptance} />
             <span className="flex-1" />
             <button
               onClick={onBack}
@@ -670,7 +678,7 @@ export function RunScene({
           return <StagePanel stage={stage} events={events} state={state} />;
         })()}
         {panel?.type === "plan" && <PlanPanel status={status} events={events} />}
-        {panel?.type === "report" && <ReportPanel runId={runId} status={status} />}
+        {panel?.type === "report" && <ReportPanel runId={runId} status={status} events={events} />}
       </Drawer>
     </div>
   );

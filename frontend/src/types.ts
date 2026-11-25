@@ -21,6 +21,46 @@ export interface Target {
   expected_artifact: string | null;
 }
 
+/**
+ * `contracts/verification.py` 的结构化验收结果（#27 起随 result 下发）。
+ *
+ * 注意：`level` 是「检查类型」，不是已获得的等级；必须与 `status` 一起读。
+ * `level="execution"` 只表示程序跑过，绝不表示指标达标。历史 run 没有
+ * 这个字段，界面按「后端未下发」降级，不从 `verified` 布尔反推。
+ */
+export interface VerificationCheck {
+  name: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface MetricResult {
+  name: string;
+  observed: number;
+  threshold: number;
+  comparison: "lt";
+  passed: boolean;
+}
+
+export interface VerificationResult {
+  level: "none" | "execution" | "artifact" | "target";
+  status: "not_run" | "passed" | "failed" | "blocked";
+  summary: string;
+  checks: VerificationCheck[];
+  metrics: MetricResult[];
+  rule_id: string | null;
+  validator_digest: string | null;
+  artifact_sha256: string | null;
+  verifier_image_id: string | null;
+  checked_at: string | null;
+  code_under_test: string | null;
+  dataset: string | null;
+  source: string | null;
+  failure_category: string | null;
+  evidence_url: string | null;
+  limitations: string[];
+}
+
 export interface RunResult {
   run_id: string;
   outcome: "succeeded" | "failed" | "budget_exceeded" | "unrepairable" | "cancelled";
@@ -31,6 +71,8 @@ export interface RunResult {
   patch_url: string | null;
   environment_url: string | null;
   report_url: string;
+  /** 可选：#27 起下发的结构化验收结论；缺字段时界面不得自行推断结论。 */
+  verification?: VerificationResult | null;
 }
 
 export interface RunStatus {
@@ -87,6 +129,7 @@ export const FAILURE_LABELS = {
   path_escape: "路径越界",
   env_not_allowed: "环境变量不在白名单",
   invalid_argument: "参数越界",
+  protected_file: "验收链文件受保护",
 } as const;
 
 export type FailureLabel = keyof typeof FAILURE_LABELS;
@@ -108,6 +151,7 @@ const ACI_KINDS: ReadonlySet<string> = new Set([
   "requirement_not_allowed",
   "file_not_found",
   "invalid_argument",
+  "protected_file",
 ]);
 
 const SYSTEM_KINDS: ReadonlySet<string> = new Set([
