@@ -13,6 +13,7 @@ from paperharness.aci.errors import (
     UNKNOWN_ACTION,
 )
 from paperharness.aci.paper_aci import ALLOWED_ENV_NAMES, PaperACI
+from paperharness.aci.policy import ActionPolicy, build_aci_factory
 
 __all__ = [
     "ALLOWED_ENV_NAMES",
@@ -21,6 +22,8 @@ __all__ = [
     "REPLACE_NOT_UNIQUE",
     "REQUIREMENT_NOT_ALLOWED",
     "UNKNOWN_ACTION",
+    "ActionPolicy",
     "AgentComputerInterface",
     "PaperACI",
+    "build_aci_factory",
 ]
