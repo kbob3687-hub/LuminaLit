@@ -243,6 +243,27 @@ export interface RunStatus {
   schema_version?: number;
 }
 
+/**
+ * `GET /api/runs/{id}/environment` 的形状，对应
+ * `runner._build_environment_manifest()`。
+ *
+ * 全部字段都可选，因为历史 run 里确实缺：`base_image` 是 2026-11-18 之后才写的
+ * （PR #15），排队阶段就被取消的 run 更是一个空对象 `{}`。把必填写在类型上会
+ * 让界面拿 undefined 当字符串渲染，不如老实承认它可能没有。
+ *
+ * `environment` / `packages` 只有真的跑过沙箱会话才有。fake 沙箱不实现
+ * `get_environment` / `collect_packages`，这两个字段就不会出现——界面据此
+ * 说明"没有采集"，不拿空对象冒充"没有环境变量"。
+ */
+export interface EnvironmentManifest {
+  resolved_revision?: string | null;
+  python_version?: string;
+  base_image?: string;
+  command?: string[] | null;
+  environment?: Record<string, string>;
+  packages?: string[];
+}
+
 export interface RunEvent {
   run_id: string;
   sequence: number;
