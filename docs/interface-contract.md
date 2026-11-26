@@ -99,7 +99,11 @@ class AgentComputerInterface(Protocol):
     def execute(self, action: ToolAction) -> Observation: ...
 ```
 
-实现类构造参数：`PaperACI(session: SandboxSession, workspace: Path, plan: RunPlan, timeout_seconds: int)`。
+实现类构造参数：`PaperACI(session: SandboxSession, workspace: Path, plan: RunPlan, timeout_seconds: int, policy: ActionPolicy | None = None)`。
+
+Harness 的 ACI 工厂接收第五个参数 `ActionPolicy`。受维护任务从本次已确认的冻结 manifest 构造策略，探索任务使用默认文件保护；工厂必须应用收到的策略，不能重新查询可变任务列表。直接构造 PaperACI 时省略 policy 仍保留默认文件保护。
+
+独立验收结果 `VerificationResult.diagnostics` 为可选兼容字段（旧数据默认空列表），仅含固定的 `phase` / `code`，不记录 SDK 原始异常、宿主路径或连接地址。超时、取消、容器启动/响应/清理故障保持 `blocked`；响应所得指标只有在清理确认后才可作为通过证据。Docker 单次调用最多 5 秒且受剩余验收预算约束；截止或取消后仍允许最多 2 秒的容器清理尝试，清理不确定不得通过。
 
 Agent 只能拿到 `Observation`，永远拿不到 `SandboxSession`。动作 schema 校验在 Harness 层用 Pydantic 完成，ACI 收到的一定是合法 `ToolAction`；ACI 仍对未知动作返回 `ok=False, summary="unknown_action"` 兜底。
 
@@ -236,7 +240,7 @@ Agent 只能拿到 `Observation`，永远拿不到 `SandboxSession`。动作 sch
 - `revision` 必须是 40 位完整 commit。
 - `failure_class` 取值：`none`、`missing_dependency`、`version_conflict`、`hardcoded_path`、`cuda_only`、`deprecated_api`、`missing_private_data`、`requires_gpu`。
 - `repairable=false` 时 `expected_final` 必须是 `failed`。
-- `allowed_actions` 是评测时判定“修复方式是否越界”的依据。
+- `allowed_actions` 在 ACI 执行副作用前强制检查。空列表禁止模型改文件、安装依赖、设置环境及运行测试；read_file、search_text、finish_repair 始终可用。Harness 自己控制的确定性安装、重验不属于模型动作授权。check.py 与预期产物即使声明 replace_exact 也不可改写。
 - `GET /api/targets` 只暴露 `id`、`repo_url`、`command`、`expected_artifact`，不暴露答案字段。
 
 ### 5.1 靶场注入物（2026-11-17 新增，队长维护）

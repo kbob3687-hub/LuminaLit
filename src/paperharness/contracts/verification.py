@@ -32,6 +32,15 @@ class MetricResult(BaseModel):
     passed: bool
 
 
+class VerificationDiagnostic(BaseModel):
+    phase: Literal[
+        "rule", "client", "image", "create", "start", "wait", "response", "cleanup", "client_cleanup"
+    ]
+    code: Literal[
+        "api_timeout", "environment_error", "cancelled", "deadline_exceeded", "rule_changed"
+    ]
+
+
 class VerificationResult(BaseModel):
     level: Literal["none", "execution", "artifact", "target"] = "none"
     status: Literal["not_run", "passed", "failed", "blocked"] = "not_run"
@@ -49,3 +58,4 @@ class VerificationResult(BaseModel):
     failure_category: str | None = None
     evidence_url: str | None = None
     limitations: list[str] = Field(default_factory=list)
+    diagnostics: list[VerificationDiagnostic] = Field(default_factory=list, max_length=6)

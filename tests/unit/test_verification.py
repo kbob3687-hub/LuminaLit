@@ -406,7 +406,7 @@ class FakeClient:
         self.closed = False
 
     def step(self, stage):
-        assert 0 < self.api.timeout <= 2
+        assert 0 < self.api.timeout <= 5
         self.calls.append(stage)
         if stage in self.hooks:
             self.hooks[stage]()
@@ -619,7 +619,8 @@ def test_client_initialization_time_counts_and_owned_client_closes(monkeypatch):
     client = FakeClient()
     monkeypatch.setattr(v.time, "monotonic", lambda: now[0])
 
-    def slow_client():
+    def slow_client(timeout_seconds):
+        assert timeout_seconds == 2  # initialization is clipped to the total budget
         now[0] += 10
         return client
 
@@ -635,7 +636,82 @@ def test_client_initialization_time_counts_and_owned_client_closes(monkeypatch):
 def test_client_factory_uses_finite_api_timeout(monkeypatch):
     fake = SimpleNamespace(from_env=lambda **kwargs: kwargs)
     monkeypatch.setitem(sys.modules, "docker", fake)
-    assert v._new_client() == {"timeout": 2}
+    assert v._new_client() == {"timeout": 5}
+    assert v._new_client(0.75) == {"timeout": 0.75}
+
+
+def test_rpc_can_take_over_two_seconds_without_resetting_total_budget(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(v.time, "monotonic", lambda: now[0])
+    client = FakeClient()
+    budgets = []
+
+    def delayed_lookup():
+        budgets.append(client.api.timeout)
+        if client.api.timeout < 3:
+            raise TimeoutError("Docker response needs three seconds")
+        now[0] += 3
+
+    client.hooks["image"] = delayed_lookup
+    client.hooks["create"] = lambda: budgets.append(client.api.timeout)
+    result = verify(client, timeout=4)
+    assert result.status == "passed"
+    assert budgets == [4, 1]  # no fresh budget after a slow Docker call
+    assert result.diagnostics == []
+    assert client.api.timeout == 60  # external client restored
+
+
+@pytest.mark.parametrize("stage,phase", [
+    ("image", "image"), ("create", "create"), ("start", "start"),
+    ("reload", "wait"), ("logs", "response"),
+])
+def test_api_timeout_records_phase_without_retry_or_exception_leak(stage, phase):
+    client = FakeClient()
+
+    def timeout():
+        raise TimeoutError("SECRET Docker endpoint and host path")
+
+    client.hooks[stage] = timeout
+    result = verify(client)
+    assert result.status == "blocked" and result.failure_category == "verification_error"
+    assert [item.model_dump() for item in result.diagnostics] == [
+        {"phase": phase, "code": "api_timeout"},
+    ]
+    assert client.calls.count(stage) == 1
+    assert "SECRET" not in result.model_dump_json()
+    assert client.api.removals == ([] if stage == "image" else [
+        client.container.id if stage != "create" else client.kwargs["name"]
+    ])
+
+
+def test_cleanup_failure_preserves_original_failure_diagnostic():
+    client = FakeClient()
+    client.fail = "start"
+    client.cleanup_error = True
+    result = verify(client)
+    assert result.status == "blocked" and result.metrics == []
+    assert [item.phase for item in result.diagnostics] == ["start", "cleanup"]
+    assert "SECRET" not in result.model_dump_json()
+
+
+def test_wrapped_sdk_initialization_timeout_is_sanitized(monkeypatch):
+    requests = pytest.importorskip("requests")
+
+    def unavailable(timeout_seconds):
+        try:
+            raise requests.exceptions.ReadTimeout("SECRET named pipe endpoint")
+        except requests.exceptions.ReadTimeout as exc:
+            raise RuntimeError("SECRET SDK version negotiation") from exc
+
+    monkeypatch.setattr(v, "_new_client", unavailable)
+    result = v.verify_artifact(
+        GOOD, v.verification_spec(), timeout_seconds=20, cancelled=lambda: False,
+    )
+    assert result.status == "blocked" and result.failure_category == "verification_error"
+    assert [item.model_dump() for item in result.diagnostics] == [
+        {"phase": "client", "code": "api_timeout"},
+    ]
+    assert "SECRET" not in result.model_dump_json()
 
 
 @pytest.mark.parametrize(
@@ -758,7 +834,7 @@ def test_cleanup_failure_overrides_every_other_outcome(mode, monkeypatch):
 
 def test_client_close_failure_blocks_otherwise_successful_verification(monkeypatch):
     client = FakeClient()
-    monkeypatch.setattr(v, "_new_client", lambda: client)
+    monkeypatch.setattr(v, "_new_client", lambda timeout_seconds: client)
 
     def close_error():
         raise RuntimeError("SECRET")

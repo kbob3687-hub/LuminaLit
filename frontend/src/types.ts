@@ -72,6 +72,11 @@ export interface VerificationResult {
   failure_category: string | null;
   evidence_url: string | null;
   limitations: string[];
+  /** 旧结果无此字段；仅含固定阶段/代码，不包含宿主路径或原始异常。 */
+  diagnostics?: Array<{
+    phase: "rule" | "client" | "image" | "create" | "start" | "wait" | "response" | "cleanup" | "client_cleanup";
+    code: "api_timeout" | "environment_error" | "cancelled" | "deadline_exceeded" | "rule_changed";
+  }>;
 }
 
 /**

@@ -21,6 +21,7 @@ from typing import Any
 from paperharness.contracts.verification import (
     MetricResult,
     VerificationCheck,
+    VerificationDiagnostic,
     VerificationResult,
     VerificationSpec,
 )
@@ -28,7 +29,10 @@ from paperharness.contracts.verification import (
 _VALIDATOR = Path(__file__).with_name("pysindy_validator.py")
 _MAX_ARTIFACT = 32 * 1024
 _MAX_RESPONSE = 4096
-_API_TIMEOUT = 2
+# Docker Desktop API latency can exceed 2s under host pressure. This is a single
+# RPC ceiling, always clipped to the remaining verification budget, never a retry.
+_API_TIMEOUT = 5
+_CLEANUP_TIMEOUT = 2  # bounded grace for removal even after cancellation/deadline
 _IMAGE = "paperharness/base-py3.10"
 _REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _LIMITATIONS = [
@@ -304,10 +308,27 @@ def _checkpoint(deadline: float, cancelled: Callable[[], bool]) -> None:
         raise _Blocked("verification_timeout")
 
 
-def _new_client() -> Any:
+def _new_client(timeout_seconds: float = _API_TIMEOUT) -> Any:
     import docker
 
-    return docker.from_env(timeout=_API_TIMEOUT)
+    return docker.from_env(timeout=timeout_seconds)
+
+
+def _fault_code(exc: Exception) -> str:
+    try:
+        from requests.exceptions import Timeout
+    except ImportError:  # Docker and requests are optional dependencies.
+        timeout_types = (TimeoutError,)
+    else:
+        timeout_types = (TimeoutError, Timeout)
+    # Docker SDK wraps connection/version failures; inspect only exception types.
+    for _ in range(4):
+        if isinstance(exc, timeout_types):
+            return "api_timeout"
+        exc = exc.__cause__ or exc.__context__
+        if exc is None:
+            break
+    return "environment_error"
 
 
 def _bounded_response(client: Any, container_id: str, checkpoint: Callable[[], None]) -> bytes:
@@ -446,7 +467,19 @@ def verify_artifact(
     client_ready = False
     container = None
     attempted_create = False
+    phase = "rule"
     name = f"paperharness-verifier-{uuid.uuid4().hex}"
+
+    def diagnose(code, at=None):
+        # Store only fixed phase/code values, never SDK exception text or host paths.
+        result.diagnostics.append(VerificationDiagnostic(phase=at or phase, code=code))
+
+    def diagnose_block(reason):
+        diagnose({
+            "verification_cancelled": "cancelled",
+            "verification_timeout": "deadline_exceeded",
+            "verification_rule_changed": "rule_changed",
+        }[reason])
 
     def checkpoint():
         _checkpoint(deadline, cancelled)
@@ -477,10 +510,12 @@ def verify_artifact(
             )
         else:
             if client is None:
-                client = _new_client()
+                phase = "client"
+                client = _new_client(min(_API_TIMEOUT, max(0.001, deadline - time.monotonic())))
             client_ready = True
             original_timeout = client.api.timeout
             checkpoint()
+            phase = "image"
             image = client.images.get(_IMAGE)  # Local lookup only; never pull or use run().
             checkpoint()
             image_id = image.id
@@ -507,6 +542,7 @@ def verify_artifact(
                 "paperharness.parent_pid": str(os.getpid()),
             }
             checkpoint()
+            phase = "create"
             attempted_create = True
             container = client.containers.create(
                 image=image_id,
@@ -533,8 +569,10 @@ def verify_artifact(
                 log_config={"type": "json-file", "config": {"max-size": "8k", "max-file": "1"}},
             )
             checkpoint()
+            phase = "start"
             container.start()
             checkpoint()
+            phase = "wait"
             while True:
                 container.reload()
                 checkpoint()
@@ -548,23 +586,27 @@ def verify_artifact(
                 # Poll only while the independent process is running; API calls are finite.
                 time.sleep(min(0.05, max(0, deadline - time.monotonic())))
                 checkpoint()
+            phase = "response"
             response = _bounded_response(client, container.id, checkpoint)
             _apply_response(result, _response_result(response))
             checkpoint()
     except _Blocked as exc:
         reason = exc.reason
-    except Exception:  # noqa: BLE001 - SDK faults become blocked evidence, not metric failures.
+        diagnose_block(reason)
+    except Exception as exc:  # noqa: BLE001 - SDK faults become blocked evidence, not metric failures.
         reason = "verification_error"
+        diagnose(_fault_code(exc))
         try:
             _checkpoint(deadline, cancelled)
         except _Blocked as exc:
             reason = exc.reason
+            diagnose_block(reason)
         except Exception:  # noqa: BLE001 - Cancellation lookup failure still blocks verification.
             reason = "verification_error"
     finally:
         if client_ready:
             try:
-                client.api.timeout = _API_TIMEOUT
+                client.api.timeout = _CLEANUP_TIMEOUT
                 if attempted_create:
                     try:
                         # A create response may be lost AFTER creation: recover by our unique name.
@@ -574,23 +616,28 @@ def verify_artifact(
                     except Exception as exc:
                         if getattr(exc, "status_code", None) != 404:
                             raise
-            except Exception:  # noqa: BLE001 - Uncertain cleanup or cancellation must block success.
+            except Exception as exc:  # noqa: BLE001 - Uncertain cleanup must block success.
                 reason = "verification_error"
+                diagnose(_fault_code(exc), "cleanup")
             finally:
                 try:
                     if owns_client:
                         client.close()
                     elif original_timeout is not None:
                         client.api.timeout = original_timeout
-                except Exception:  # noqa: BLE001 - Client cleanup failure must block success.
+                except Exception as exc:  # noqa: BLE001 - Client cleanup failure must block success.
                     reason = "verification_error"
+                    diagnose(_fault_code(exc), "client_cleanup")
         if reason is None:
+            phase = "cleanup"
             try:
                 _checkpoint(deadline, cancelled)
             except _Blocked as exc:
                 reason = exc.reason
-            except Exception:  # noqa: BLE001 - Uncertain cleanup or cancellation must block success.
+                diagnose_block(reason)
+            except Exception as exc:  # noqa: BLE001 - Uncertain cancellation must block success.
                 reason = "verification_error"
+                diagnose(_fault_code(exc), "cleanup")
         result.checked_at = datetime.now(UTC)
     if reason:
         result.status = "blocked"
@@ -603,4 +650,13 @@ def verify_artifact(
         }[reason]
         result.checks = []
         result.metrics = []
+        if result.diagnostics:
+            last = result.diagnostics[-1]
+            phases = {
+                "rule": "规则检查", "client": "连接 Docker", "image": "本地镜像检查",
+                "create": "创建验证容器", "start": "启动验证容器", "wait": "等待验证容器",
+                "response": "读取验证响应", "cleanup": "清理验证容器",
+                "client_cleanup": "释放 Docker 连接",
+            }
+            result.summary += f" 阶段：{phases[last.phase]}（{last.code}）。"
     return result
