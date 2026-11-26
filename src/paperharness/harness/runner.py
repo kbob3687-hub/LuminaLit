@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from paperharness.aci.paper_aci import is_safe_environment_value
+from paperharness.aci.policy import ActionPolicy
 from paperharness.aci.requirement_guard import RequirementNotAllowed, validate
 from paperharness.agent.classifier import UNREPAIRABLE, FailureContext, classify_by_rules
 from paperharness.contracts.bundle import BundleItem, BundleResult, RepairManifest
@@ -395,7 +396,7 @@ class HarnessRunner:
         llm,
         sandbox_factory: Callable[[RunRequest, Path], SandboxSession],
         cloner: Callable[[RunRequest, Path], str] = git_clone,
-        aci_factory: Callable[[SandboxSession, Path, RunPlan, int], object] | None = None,
+        aci_factory: Callable[[SandboxSession, Path, RunPlan, int, ActionPolicy], object] | None = None,
         targets: list[TargetManifest] | None = None,
         verifier: Callable[..., VerificationResult] = verify_artifact,
     ):
@@ -1371,7 +1372,11 @@ class HarnessRunner:
         模型不拥有控制流：循环、重验、认输全在本方法。
         """
         session.set_network(False)
-        aci = self.aci_factory(session, workspace, plan, request.timeout_seconds)
+        # target is the confirmed snapshot, not a fresh lookup in self.targets.
+        policy = (
+            ActionPolicy.for_manifest(target, plan) if target else ActionPolicy.for_plan(plan)
+        )
+        aci = self.aci_factory(session, workspace, plan, request.timeout_seconds, policy)
         history: list[Observation] = []
         category: str | None = None
         outcome = "budget_exceeded"

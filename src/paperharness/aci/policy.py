@@ -9,18 +9,15 @@
 * `ActionPolicy.for_manifest()`：按受维护任务声明的动作与产物构造。
 * `build_aci_factory()`：符合 `HarnessRunner.aci_factory` 签名的工厂。
 
-**当前的接线边界**：`app/main.py` 仍传 `aci_factory=PaperACI`，且 `RunPlan`
-没有 `target_id`，`build_aci_factory()` 无法可靠匹配 manifest。因此在队长完成
-接线（见 Issue #40）之前，只有 `for_plan()` 的默认文件保护在生产路径生效；
-**按靶场 `allowed_actions` 限制尚未生效**，不能作为已完成能力宣称。
+HarnessRunner 从本次运行的冻结 manifest 构造策略，并显式传入 ACI 工厂；
+不从 RunPlan 猜任务，也不在执行时重新读取可变的任务列表。
 
-只做「先验后做」的拒绝，不新增宿主 shell 工具，不改沙箱行为，不改契约。
+只做「先验后做」的拒绝，不新增宿主 shell 工具，不改沙箱行为。
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -87,8 +84,8 @@ class ActionPolicy:
     def for_plan(cls, plan) -> ActionPolicy:
         """默认策略：合法动作都放行，但验收链文件一律不可写。
 
-        这里**只**落实默认文件保护，不读取 manifest 的 `allowed_actions`；
-        按靶场限制须队长完成工厂接线后才生效（见 Issue #40）。
+        用于没有受维护 manifest 的探索任务；受维护任务由 runner 使用
+        `for_manifest()` 构造权限。
 
         `expected_artifact` 是验收判据的目标产物；允许模型直接写它，就能
         用伪造产物换取「验证通过」。`check.py` 是服务端注入的断言脚本。
@@ -103,8 +100,8 @@ class ActionPolicy:
     def for_manifest(cls, manifest, plan=None) -> ActionPolicy:
         """按受维护任务构造：声明的动作集合约束副作用，产物纳入保护。
 
-        `allowed_actions` 为空表示「不额外声明修复限制」（例如一次通过的
-        靶场），不是「禁止一切动作」—— 否则模型连读日志都做不到。
+        空列表禁止模型发起所有有副作用的动作；只读观察与结束修复始终可用。
+        Harness 自己控制的安装和重验不属于模型动作授权。
         """
         declared = frozenset(getattr(manifest, "allowed_actions", []) or [])
         protected = {"check.py"}
@@ -115,7 +112,7 @@ class ActionPolicy:
             if candidate:
                 protected.add(_norm(candidate))
         return cls(
-            restricted_side_effects=declared or None,
+            restricted_side_effects=declared,
             protected_paths=frozenset(protected),
         )
 
@@ -183,28 +180,16 @@ class ActionPolicy:
         return None
 
 
-def build_aci_factory(policy: ActionPolicy | None = None, targets: Iterable | None = None):
-    """返回 `(session, workspace, plan, timeout_seconds) -> ACI` 的工厂。
+def build_aci_factory(policy: ActionPolicy | None = None):
+    """工厂接受 runner 显式传入的第五参数 execution_policy。
 
-    `targets` 预留给按靶场选择策略：当前 `HarnessRunner` 的工厂签名不带
-    target_id，所以这里只记录映射、不做不可靠的猜测；接入点见 Issue #40。
-    不传 policy 时用 `for_plan(plan)`，**只有默认验收链文件保护立即生效**，
-    按靶场 `allowed_actions` 限制仍需队长完成接线后才能宣称。
+    policy 仅是脱离 runner 直接构造 ACI 时的默认值，不能覆盖运行授权。
     """
-    by_manifest = {getattr(m, "id", None): m for m in (targets or [])}
-
-    def factory(session, workspace, plan, timeout_seconds):
+    def factory(session, workspace, plan, timeout_seconds, execution_policy=None):
         # 延迟导入，避免 aci/__init__.py 的循环导入。
         from paperharness.aci.paper_aci import PaperACI
 
-        chosen = policy
-        if chosen is None:
-            manifest = by_manifest.get(getattr(plan, "target_id", None))
-            chosen = (
-                ActionPolicy.for_manifest(manifest, plan)
-                if manifest
-                else ActionPolicy.for_plan(plan)
-            )
+        chosen = execution_policy or policy or ActionPolicy.for_plan(plan)
         return PaperACI(session, workspace, plan, timeout_seconds, policy=chosen)
 
     return factory

@@ -85,9 +85,7 @@ class PaperACI:
         self.workspace = Path(workspace).resolve(strict=False)
         self.plan = plan
         self.timeout_seconds = timeout_seconds
-        # 评审稿 §4.1 / R06：执行权限与验收链保护。不传策略时用 for_plan，
-        # 保证即便 app 层仍是 `aci_factory=PaperACI`，check.py 与预期产物
-        # 也立刻不可写。policy 是可选参数，HarnessRunner 的工厂签名不用改。
+        # runner 显式传入冻结任务策略；直接构造时也保护 check.py 与预期产物。
         self.policy = policy if policy is not None else ActionPolicy.for_plan(plan)
         # ACI 自己维护网络状态。**不向会话查询**：契约 §1.2 写死沙箱不暴露状态
         # 查询接口，`getattr(session, "network_enabled", True)` 在真沙箱上永远拿到

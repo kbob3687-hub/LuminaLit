@@ -257,7 +257,7 @@ def test_check_py_tampering_is_overwritten_before_verification(tmp_path):
             return super().execute(command, timeout_seconds)
 
     class TamperingACI:
-        def __init__(self, session, workspace, plan, timeout_seconds):
+        def __init__(self, session, workspace, plan, timeout_seconds, policy):
             self.workspace = workspace
 
         def execute(self, action):

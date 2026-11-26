@@ -5,7 +5,8 @@
 - failure_class 取值八种
 - repairable=false 时 expected_final 必须是 failed（对称地，repairable=true 必须 succeeded，
   否则评测预期自相矛盾）
-- allowed_actions 只能取 contracts/run.py 冻结的动作名，它是评测判定修复越界的依据
+- allowed_actions 只能取冻结动作名；执行前约束模型副作用动作。空列表禁止副作用，
+  只读观察和 finish_repair 始终允许；Harness 的确定性安装和重验不受此列表控制
 - GET /api/targets 只暴露 public_view 的四个字段，答案字段不出网
 """
 

@@ -2,7 +2,7 @@
 
 全部用 FakeSandboxSession，不依赖 Docker。重点断言两件事：
   1. 拒绝发生在任何副作用之前（不写文件、不开网、不改环境变量）；
-  2. 观察类动作（读、搜、跑测试）不被「修复越界」误伤。
+  2. 只读动作（读、搜）与结束修复可用，执行测试仍须授权。
 """
 
 import os
@@ -14,10 +14,12 @@ import pytest
 from paperharness.aci import ActionPolicy, PaperACI, build_aci_factory
 from paperharness.aci.policy import SIDE_EFFECTS
 from paperharness.contracts.run import (
+    FinishRepairAction,
     InstallRequirementAction,
     ReadFileAction,
     ReplaceExactAction,
     RunPlan,
+    RunSmokeTestAction,
     SetEnvironmentAction,
 )
 from paperharness.sandbox.fake import FakeSandboxSession
@@ -124,17 +126,25 @@ def test_manifest_allows_declared_action(session, workspace):
     assert obs.ok is True
 
 
-def test_empty_allowed_actions_means_no_extra_restriction(session, workspace):
-    """一次通过的靶场声明空列表，不表示禁止模型读日志或跑测试。"""
+@pytest.mark.parametrize("action", [
+    ReplaceExactAction(action="replace_exact", path="src/main.py", old="hello", new="ok"),
+    InstallRequirementAction(action="install_requirement", requirement="numpy==1.26"),
+    SetEnvironmentAction(action="set_environment", name="OMP_NUM_THREADS", value="2"),
+    RunSmokeTestAction(action="run_smoke_test"),
+])
+def test_empty_allowed_actions_denies_side_effects_but_allows_reading(
+    session, workspace, monkeypatch, action,
+):
+    network_calls = []
+    monkeypatch.setattr(session, "set_network", lambda value: network_calls.append(value))
     policy = ActionPolicy.for_manifest(manifest([]), plan())
     aci = make_aci(session, workspace, policy=policy)
     assert aci.execute(ReadFileAction(action="read_file", path="check.py")).ok is True
-    assert (
-        aci.execute(
-            ReplaceExactAction(action="replace_exact", path="src/main.py", old="hello", new="ok")
-        ).ok
-        is True
-    )
+    assert aci.execute(FinishRepairAction(action="finish_repair", summary="done")).ok
+    obs = aci.execute(action)
+    assert not obs.ok and obs.summary == f"action_not_allowed:{action.action}"
+    assert session.commands == [] and session.environment == {} and network_calls == []
+    assert "hello" in (workspace / "src/main.py").read_text(encoding="utf-8")
 
 
 def test_env_and_requirement_scope(session, workspace):
@@ -174,6 +184,24 @@ def test_build_aci_factory_keeps_runner_signature(session, workspace):
         ).ok
         is False
     )
+
+
+def test_factory_default_cannot_weaken_confirmed_policy(session, workspace):
+    factory = build_aci_factory(ActionPolicy())
+    aci = factory(session, workspace, plan(), 300, ActionPolicy.for_manifest(manifest([]), plan()))
+    obs = aci.execute(
+        ReplaceExactAction(action="replace_exact", path="src/main.py", old="hello", new="ok")
+    )
+    assert obs.summary == "action_not_allowed:replace_exact"
+    assert "hello" in (workspace / "src/main.py").read_text(encoding="utf-8")
+    # 同一个工厂的下一次运行按新的授权执行，不泄漏前次权限。
+    aci = factory(
+        session, workspace, plan(), 300,
+        ActionPolicy.for_manifest(manifest(["replace_exact"]), plan()),
+    )
+    assert aci.execute(
+        ReplaceExactAction(action="replace_exact", path="src/main.py", old="hello", new="ok")
+    ).ok
 
 
 def test_unknown_action_still_uses_its_own_tag(session, workspace):
@@ -265,11 +293,7 @@ def test_run_smoke_test_allowed_when_declared(session, workspace):
 
 
 def test_for_plan_only_protects_files_not_manifest_scope():
-    """默认策略只做文件保护，不宣称按靶场 allowed_actions 已经生效。
-
-    app/main.py 仍是 aci_factory=PaperACI、RunPlan 没有 target_id，接线完成前
-    不能把 for_plan() 当成 manifest 权限的实现（见 Issue #40）。
-    """
+    """探索任务的默认策略与受维护任务权限分开。"""
     policy = ActionPolicy.for_plan(plan())
     assert policy.restricted_side_effects is None
     assert "check.py" in policy.protected_paths
@@ -278,7 +302,7 @@ def test_for_plan_only_protects_files_not_manifest_scope():
 
 
 def test_production_factory_path_blocks_protected_write(session, workspace):
-    """模拟 app/main.py 当前使用的四参工厂路径：默认保护必须照常生效。"""
+    """直接构造 ACI 时，默认文件保护仍生效。"""
     factory = build_aci_factory()
     aci = factory(session, workspace, plan(), 300)
     assert isinstance(aci, PaperACI)

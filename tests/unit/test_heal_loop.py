@@ -17,7 +17,7 @@ from paperharness.sandbox.fake import FakeSandboxSession
 class FakeACI:
     """契约第 2 节协议的最小假实现：记录动作并全部回 ok。"""
 
-    def __init__(self, session, workspace, plan, timeout_seconds):
+    def __init__(self, session, workspace, plan, timeout_seconds, policy):
         self.actions = []
 
     def execute(self, action):
@@ -51,8 +51,8 @@ def make_heal_runner(tmp_path, results, actions, max_repairs=3):
         llm=FakeLLM(actions=actions),
         sandbox_factory=factory,
         cloner=lambda request, run_dir: "fake-commit",
-        aci_factory=lambda session, workspace, plan, timeout: FakeACI(
-            session, workspace, plan, timeout
+        aci_factory=lambda session, workspace, plan, timeout, policy: FakeACI(
+            session, workspace, plan, timeout, policy
         ),
     )
     return runner, store

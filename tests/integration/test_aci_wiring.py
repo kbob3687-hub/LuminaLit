@@ -19,11 +19,13 @@ from paperharness.contracts.run import (
     ExecResult,
     FinishRepairAction,
     ReadFileAction,
+    ReplaceExactAction,
     RunRequest,
 )
 from paperharness.harness.runner import HarnessRunner
 from paperharness.harness.store import RunStore
 from paperharness.sandbox.fake import FakeSandboxSession
+from paperharness.targets.manifest import TargetManifest
 
 
 def failing(exit_code: int = 1, stderr: str = "ModuleNotFoundError: numpy") -> ExecResult:
@@ -179,3 +181,94 @@ def test_aci_rejection_reaches_model_as_observation(store):
     first = observed[0]
     assert first.ok is False
     assert first.summary == "path_escape:../../etc/passwd"
+
+
+@pytest.mark.parametrize("allowed,live_allowed,can_write", [
+    ([], ["replace_exact"], False),
+    (["install_requirement"], ["replace_exact"], False),
+    (["replace_exact"], [], True),
+])
+def test_app_executes_confirmed_permissions_after_live_manifest_changes(
+    tmp_path, monkeypatch, allowed, live_allowed, can_write,
+):
+    """从真实组装入口经体检/确认到执行边界，不能只测策略构造。"""
+    from fastapi.testclient import TestClient
+
+    from paperharness.app import main
+
+    source = tmp_path / "target"
+    source.mkdir()
+    (source / "check.py").write_text("print('check')\n", encoding="utf-8")
+    target = TargetManifest(
+        id="policy-target", repo_url="https://github.com/example/repo", revision="d" * 40,
+        python_version="3.10", command=["python", "-I", "check.py"],
+        failure_class="missing_dependency", repairable=True,
+        allowed_actions=allowed, expected_final="succeeded", source_dir=source,
+    )
+    histories = []
+
+    class RecordingModel(FakeLLM):
+        def propose_action(self, history):
+            histories.append(list(history))
+            return super().propose_action(history)
+
+    model = RecordingModel(actions=[
+        ReadFileAction(action="read_file", path="main.py"),
+        ReplaceExactAction(
+            action="replace_exact", path="main.py", old="import numpy", new="import math",
+        ),
+        FinishRepairAction(action="finish_repair", summary="done"),
+    ])
+    monkeypatch.setattr(main, "load_targets", lambda root: [target])
+    monkeypatch.setattr(main, "_build_llm", lambda: model)
+    monkeypatch.setenv("PAPERHARNESS_TARGETS", str(source))
+    app, worker = main.build_app(tmp_path / "runs", backend="fake")
+    runner = worker.runner
+    runner.cloner = make_cloner
+    sessions = []
+
+    def sandbox(request, run_dir):
+        session = FakeSandboxSession(
+            results=[failing(), failing()], workspace=run_dir / "workspace",
+        )
+        sessions.append(session)
+        return session
+
+    runner.sandbox_factory = sandbox
+    with TestClient(app) as client:
+        view_response = client.post("/api/preflights", json={
+            "target_id": target.id, "max_repairs": 1,
+        })
+        assert view_response.status_code == 201, view_response.text
+        view = view_response.json()
+        # 改动发生在确认之前；运行仍必须使用体检时冻结的权限。
+        target.allowed_actions[:] = live_allowed
+        confirmed = client.post("/api/runs", json={
+            key: view[key] for key in ("preflight_id", "confirmation_digest")
+        })
+        assert confirmed.status_code == 202, confirmed.text
+        run_id = confirmed.json()["run_id"]
+        worker.queue.join()
+        result = worker.store.read_result(run_id)
+        assert result is not None and result.outcome != "internal_error"
+        workspace = worker.store.run_dir(run_id) / "workspace"
+        assert (workspace / "main.py").read_text(encoding="utf-8") == (
+            "import math\n" if can_write else "import numpy\n"
+        )
+        events = [json.loads(row) for row in (
+            worker.store.run_dir(run_id) / "events.jsonl"
+        ).read_text(encoding="utf-8").splitlines()]
+        action_event = next(row for row in events if row["kind"] == "replace_exact")
+        assert action_event["data"]["ok"] is can_write
+        if not can_write:
+            assert action_event["message"] == "action_not_allowed:replace_exact"
+            assert any(
+                not obs.ok and obs.summary == "action_not_allowed:replace_exact"
+                for history in histories for obs in history
+            )
+        assert [row["kind"] for row in events if row["state"] == "repairing"][:3] == [
+            "read_file", "replace_exact", "finish_repair",
+        ]
+        # 只允许 Harness 初试/重验；ACI 不得偷偷增加命令、网络或环境副作用。
+        assert sessions[0].commands == [target.command, target.command]
+        assert sessions[0].environment == {}
