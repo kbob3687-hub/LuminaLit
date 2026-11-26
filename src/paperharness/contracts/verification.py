@@ -1,19 +1,26 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class VerificationSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    rule_id: Literal["pysindy-linear-v1"] = "pysindy-linear-v1"
+    rule_id: Literal["pysindy-linear-v1", "sindy-lorenz-v1"] = "pysindy-linear-v1"
     validator_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     artifact: Literal["coefficients.json"] = "coefficients.json"
-    threshold: Literal[0.0001] = 0.0001
+    threshold: Literal[0.0001, 0.001] = 0.0001
     code_under_test: str = "已安装的 PySINDy 包，不是检出的仓库源码"
     dataset: str = "解析合成数据：x(t)=exp(-2t)、y(t)=exp(t)，t∈[0,1]，1001 点"
     source: str = "维护者定义的最小线性系统任务；系数参考值来自解析方程，不是论文实验指标"
+
+    @model_validator(mode="after")
+    def _fixed_threshold(self):
+        expected = 0.001 if self.rule_id == "sindy-lorenz-v1" else 0.0001
+        if self.threshold != expected:
+            raise ValueError("verification threshold must match the maintained rule")
+        return self
 
 
 class VerificationCheck(BaseModel):

@@ -1,5 +1,8 @@
 # 真实论文复现样例（两个候选）
 
+> 历史候选调研。下述 PySINDy / UMAP 最小检查是发布包试跑，不代表执行检出源码或
+> 复现论文原实验。当前源码实验、固定判据和验收入口见 [Lorenz 实验说明](lorenz-case.md)。
+
 README 的「待补」里有一条：**2 个真实论文靶场替换**。内置 8 个靶场是自建仓库，失败类型可控，但代码不是真论文代码——评委大概率会问「你们真跑过论文吗」。这份文档给两个**已在本机实测跑通**的候选，以及把它们变成靶场之前必须处理的约束。
 
 配套脚本：`scripts/papers/verify_pysindy.py`、`scripts/papers/verify_umap.py`、`scripts/papers/requirements.txt`。

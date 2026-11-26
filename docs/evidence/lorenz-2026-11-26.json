@@ -1,0 +1,186 @@
+{
+  "schema_version": 1,
+  "recorded_date": "2026-11-26",
+  "run_id": "df4f3af66b2449379cf7e374da4b3793",
+  "scope": "PySINDy checked-out source, Lorenz low-noise coefficient identification subexperiment",
+  "source_revision": "4c32d2603cbf1aa476efae72bc78436cb1e6fc75",
+  "rule_id": "sindy-lorenz-v1",
+  "threshold": 0.001,
+  "original_metrics": [
+    {
+      "name": "x方程最大系数误差",
+      "observed": 1.6198172048120796e-07,
+      "threshold": 0.001,
+      "comparison": "lt",
+      "passed": true
+    },
+    {
+      "name": "y方程最大系数误差",
+      "observed": 4.2492834495533316e-07,
+      "threshold": 0.001,
+      "comparison": "lt",
+      "passed": true
+    },
+    {
+      "name": "z方程最大系数误差",
+      "observed": 3.339405685309771e-06,
+      "threshold": 0.001,
+      "comparison": "lt",
+      "passed": true
+    }
+  ],
+  "replay_metrics": [
+    {
+      "name": "x方程最大系数误差",
+      "observed": 1.6198172048120796e-07,
+      "threshold": 0.001,
+      "comparison": "lt",
+      "passed": true
+    },
+    {
+      "name": "y方程最大系数误差",
+      "observed": 4.2492834495533316e-07,
+      "threshold": 0.001,
+      "comparison": "lt",
+      "passed": true
+    },
+    {
+      "name": "z方程最大系数误差",
+      "observed": 3.339405685309771e-06,
+      "threshold": 0.001,
+      "comparison": "lt",
+      "passed": true
+    }
+  ],
+  "original_artifact_sha256": "278fb2d7e3575ea210bc4f3cea846f4b871427350b9f341fd878e78ca78b0165",
+  "replay_artifact_sha256": "278fb2d7e3575ea210bc4f3cea846f4b871427350b9f341fd878e78ca78b0165",
+  "replay_status": "passed",
+  "bundle_integrity": "complete",
+  "bundle_sha256": "aea4f65600b1569a45029707074b15dd5edff9636deb30f8587879f6192e9fb2",
+  "image_id": "sha256:c4367f55a44bfe5ff54f3c138e7db2c3b9cbdb4aaeef311aed4cecca345156d4",
+  "dependency_profile": "Pinned scientific dependencies preinstalled; no pysindy wheel",
+  "elapsed_seconds": 154.61,
+  "agent_calls": 0,
+  "negative_control": {
+    "mutation": "Add 1 to row y, column x of the accepted coefficient matrix",
+    "status": "failed",
+    "failure_category": "metric_not_met",
+    "metrics": [
+      {
+        "name": "x方程最大系数误差",
+        "observed": 1.6198172048120796e-07,
+        "threshold": 0.001,
+        "comparison": "lt",
+        "passed": true
+      },
+      {
+        "name": "y方程最大系数误差",
+        "observed": 0.999999575071655,
+        "threshold": 0.001,
+        "comparison": "lt",
+        "passed": false
+      },
+      {
+        "name": "z方程最大系数误差",
+        "observed": 3.339405685309771e-06,
+        "threshold": 0.001,
+        "comparison": "lt",
+        "passed": true
+      }
+    ]
+  },
+  "experiment": {
+    "experiment": "SINDy Lorenz measured-derivative low-noise subexperiment",
+    "upstream_notebook": "examples/3_original_paper.ipynb",
+    "upstream_notebook_sha256": "6c0abe2d2673b7d67a3814417262d4058a07b9f9ca4ebb70d8efed6fe939caba",
+    "executed_source_sha256": {
+      "pysindy/__init__.py": "877e8a34ea36ad335107096a3a816f8c8938793904bfad05fbee4c218a59cd4a",
+      "pysindy/pysindy.py": "b39b03a5fb9276628670bdf0d8f6d974b9386f614c5f96d53ab536b8fe00e5b1",
+      "pysindy/optimizers/stlsq.py": "2bcb5c5389534fd01b2b931960fb2ebd9cc17edcd9a7e3c2dff665ff31214c40",
+      "pysindy/feature_library/polynomial_library.py": "d0372a790717fede6f950306777fb9998e63f6642f6fad67642759266716d0b5",
+      "pysindy/utils/odes.py": "f0ea8d578bcf6b806edd0fb9c4e7b00088596804d640d4e3a3a5bbb981c27e5b"
+    },
+    "data_sha256": "3b74fbc924ab5d9fc0201d68542e52b76922423a2292e5b4617e75ce9adce3db",
+    "samples": 100000,
+    "dt": 0.001,
+    "initial_condition": [
+      -8,
+      8,
+      27
+    ],
+    "derivative_noise_std": 0.0001,
+    "seed": 1000,
+    "polynomial_degree": 5,
+    "optimizer_threshold": 0.05,
+    "features": [
+      "1",
+      "x0",
+      "x1",
+      "x2",
+      "x0^2",
+      "x0 x1",
+      "x0 x2",
+      "x1^2",
+      "x1 x2",
+      "x2^2",
+      "x0^3",
+      "x0^2 x1",
+      "x0^2 x2",
+      "x0 x1^2",
+      "x0 x1 x2",
+      "x0 x2^2",
+      "x1^3",
+      "x1^2 x2",
+      "x1 x2^2",
+      "x2^3",
+      "x0^4",
+      "x0^3 x1",
+      "x0^3 x2",
+      "x0^2 x1^2",
+      "x0^2 x1 x2",
+      "x0^2 x2^2",
+      "x0 x1^3",
+      "x0 x1^2 x2",
+      "x0 x1 x2^2",
+      "x0 x2^3",
+      "x1^4",
+      "x1^3 x2",
+      "x1^2 x2^2",
+      "x1 x2^3",
+      "x2^4",
+      "x0^5",
+      "x0^4 x1",
+      "x0^4 x2",
+      "x0^3 x1^2",
+      "x0^3 x1 x2",
+      "x0^3 x2^2",
+      "x0^2 x1^3",
+      "x0^2 x1^2 x2",
+      "x0^2 x1 x2^2",
+      "x0^2 x2^3",
+      "x0 x1^4",
+      "x0 x1^3 x2",
+      "x0 x1^2 x2^2",
+      "x0 x1 x2^3",
+      "x0 x2^4",
+      "x1^5",
+      "x1^4 x2",
+      "x1^3 x2^2",
+      "x1^2 x2^3",
+      "x1 x2^4",
+      "x2^5"
+    ],
+    "adaptations": [
+      "Only first derivative-noise level; no forward simulation or plot recreation.",
+      "RNG reset before Lorenz fitting, independently of preceding notebook sections.",
+      "Upstream example uses (-8,8,27); original paper Figure 1 uses (-8,7,27)."
+    ]
+  },
+  "limitations": [
+    "Single host, separate fresh containers; cross-machine handoff not verified.",
+    "No AI repair demonstrated by this deterministic case.",
+    "Not all paper experiments, not all noise levels, no forward-simulation figure recreation.",
+    "Coefficient validation alone does not authenticate the producer or training process.",
+    "Recorded duration is a single observation with a preinstalled image, not a benchmark."
+  ]
+}

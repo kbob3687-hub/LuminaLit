@@ -731,7 +731,7 @@ def test_worker_uses_frozen_snapshot_despite_configuration_changes_and_expiry(
     assert session.commands == [INSTALL_COMMAND, view["plan"]["command"]]
     for execution in session.executions:
         assert execution["check"] == CHECK_BYTES
-        assert execution["requirements"] == REPO_REQUIREMENTS + REQUIREMENTS_BYTES.decode()
+        assert execution["requirements"] == REQUIREMENTS_BYTES.decode() + REPO_REQUIREMENTS
         assert execution["timeout_seconds"] == 73
     assert session.closed
     assert json.loads(harness.store.read_text(run_id, "run_plan.json")) == view["plan"]

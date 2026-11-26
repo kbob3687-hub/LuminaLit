@@ -83,7 +83,7 @@ class PreflightService:
             raise PreflightError("target_not_found", "未找到受维护任务，请刷新任务列表。", 404)
         try:
             frozen = FrozenTarget.capture(target)
-            verification = verification_spec() if target.verification_rule else None
+            verification = verification_spec(target.verification_rule) if target.verification_rule else None
             run_request = RunRequest(
                 repo_url=target.repo_url,
                 revision=target.revision,
@@ -118,7 +118,7 @@ class PreflightService:
                 name="验证范围", status="warning",
                 detail=(
                     "运行成功后，在独立、断网、只读容器检查系数 JSON；"
-                    "两个方程各自的最大系数误差须 < 0.0001。指标失败不自动调参。"
+                    f"各方程的最大系数误差须 < {verification.threshold:g}。指标失败不自动调参。"
                     if verification else
                     "当前以退出状态和指定产物是否存在判定试跑结果；不含独立指标验收。"
                 ),
@@ -130,6 +130,12 @@ class PreflightService:
                 source="静态体检边界",
             ),
         ]
+        if target.checkout_paths:
+            checks.append(PreflightCheck(
+                name="源码检出范围", status="passed",
+                detail="固定提交按路径检出：" + "、".join(target.checkout_paths),
+                source="受维护任务配置；路径已冻结，不下载其余仓库文件。",
+            ))
         for name, encoded in frozen.files.items():
             file_hash = hashlib.sha256(base64.b64decode(encoded)).hexdigest()
             checks.append(PreflightCheck(
@@ -146,7 +152,9 @@ class PreflightService:
                 "暂未提供独立指标验收和干净环境复跑；试跑通过不等于完整复现论文。"
             ),
         ]
-        if target.command[:2] == ["python", "-I"] and "check.py" in frozen.files:
+        if target.command[:2] == ["python", "-I"] and "check.py" in frozen.files and (
+            target.verification_rule != "sindy-lorenz-v1"
+        ):
             limitations.append("该任务使用隔离模式运行维护者脚本，可能测试已安装包而非检出的仓库源码。")
         if request.max_repairs:
             limitations.append("发生失败时可能调用已配置模型，发送报错和读取的代码片段，并产生模型费用。")

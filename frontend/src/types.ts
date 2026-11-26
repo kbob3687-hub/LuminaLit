@@ -31,10 +31,10 @@ export interface PreflightSettings {
 
 /** 固定验证规则来自服务端确认单，不能由前端修改。 */
 export interface VerificationSpec {
-  rule_id: "pysindy-linear-v1";
+  rule_id: "pysindy-linear-v1" | "sindy-lorenz-v1";
   validator_digest: string;
   artifact: "coefficients.json";
-  threshold: 0.0001;
+  threshold: 0.0001 | 0.001;
   code_under_test: string;
   dataset: string;
   source: string;

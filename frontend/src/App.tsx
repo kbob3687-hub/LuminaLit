@@ -165,7 +165,7 @@ export default function App() {
       if (demo) {
         welcome();
       } else if (p.id !== "custom") {
-        const result = await createPreflight({ target_id: p.id });
+        const result = await createPreflight({ target_id: p.id, ...p.preflight });
         if (!mounted.current) return;
         setPreflight(result);
         showScene("preflight");

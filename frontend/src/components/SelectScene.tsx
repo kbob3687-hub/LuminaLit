@@ -7,6 +7,7 @@ import { HealthBanner } from "./HealthBanner";
 
 /** 截图模式：关闭入场动画，避免无头渲染抓到半透明中间帧。 */
 const STILL = new URLSearchParams(window.location.search).get("still") === "1";
+const CASE_PREVIEW = new URLSearchParams(window.location.search).get("case_preview") === "1";
 const FADE_IN = (delay = 0) =>
   STILL
     ? { initial: false as const, animate: { opacity: 1, y: 0 } }
@@ -37,6 +38,7 @@ export interface PaperOption {
   revision?: string;
   /** 设计上的终点：能修好 / 本来就不可复现。 */
   expect?: "succeeded" | "failed";
+  preflight?: { timeout_seconds: number; max_repairs: number };
 }
 
 interface Props {
@@ -65,12 +67,14 @@ function toOption(t: Target): PaperOption {
     revision: meta?.revision,
     desc: meta?.blurb,
     expect: meta?.expect,
+    preflight: meta?.preflight,
     tech: `python ${t.command.join(" ")} → ${t.expected_artifact ?? "无产物"}`,
   };
 }
 
 /** 真实仓库排后面，其余保持后端顺序。 */
 function rank(o: PaperOption) {
+  if (o.id === "paper-lorenz") return -1;
   return o.id.startsWith("paper-") ? 1 : 0;
 }
 
@@ -104,6 +108,7 @@ export function SelectScene({ onPick, disabled, busy, error, demo, observer, onO
   }, []);
 
   const list = options ?? FALLBACK;
+  const lorenz = options?.find(option => option.id === "paper-lorenz");
   const shown = localError ?? error ?? null;
 
   /** 把输入框内容当作 repo_url 提交（契约 §4.1 的唯一必填字段）。 */
@@ -135,7 +140,7 @@ export function SelectScene({ onPick, disabled, busy, error, demo, observer, onO
           {...FADE_IN(0)}
           className="mb-14 flex flex-wrap items-baseline justify-between gap-4 font-mono text-[11px] tracking-[.28em] text-accent uppercase"
         >
-          <span>PaperHarness</span>
+          <span className="tracking-normal normal-case">LuminaLit · 科研代码复现与交接</span>
 
           <div className="flex items-baseline gap-5 tracking-[.08em]">
             {/* 观测者：欢迎页显示的名字，跟着浏览器走，不写死一个人 */}
@@ -163,14 +168,22 @@ export function SelectScene({ onPick, disabled, busy, error, demo, observer, onO
           {...FADE_IN(0.06)}
           className="mb-5 max-w-[17ch] text-[clamp(36px,4.5vw,58px)] leading-[1.2] font-semibold tracking-[-.035em]"
         >
-          <span className="block">从一个仓库，</span><span className="block">开始可信复现</span>
+          <span className="block">修好的科研代码，</span><span className="block">换个环境还能跑吗？</span>
         </motion.h1>
 
         <motion.p {...FADE_IN(0.12)} className="mb-10 max-w-[56ch] text-[14px] leading-[1.9] text-ink-mid">
-          让执行过程可见，让结论有据可查。隔离运行、受控修复、独立验证，再用一次干净复跑检验结果。
+          接手论文仓库，查看运行问题与修复记录，按固定标准检查结果，再把复跑材料交给同学。
         </motion.p>
 
-        <motion.div {...FADE_IN(0.16)} className="mb-8">
+        {lorenz && <section aria-label="推荐科研实验" className="mb-9 rounded-xl border border-rule-hi bg-surface px-5 py-5 sm:px-6">
+          <h2 className="text-lg font-semibold text-ink">先复跑一个具体实验</h2>
+          <p className="mt-2 max-w-[65ch] text-sm leading-7 text-ink-mid">SINDy 从数据中识别 Lorenz 方程。执行固定版本的仓库源码，检查三个方程的系数，再创建全新容器复跑。</p>
+          <p className="mt-2 text-xs leading-6 text-ink-muted">低噪声系数识别子实验；数据本地生成，仅需 CPU，固定参数、不调用模型。首次下载与安装可能较慢。</p>
+          <button type="button" onClick={() => onPick(lorenz)} disabled={disabled} className="mt-4 cursor-pointer rounded-lg bg-accent px-5 py-2.5 text-sm font-semibold text-white hover:brightness-110 disabled:opacity-50">{demo ? "查看离线回放" : "查看 Lorenz 实验与验收标准"}</button>
+        </section>}
+
+        {CASE_PREVIEW && <p role="status" className="mb-8 text-sm leading-7 text-ink-mid">当前是 Lorenz 实验专用预览，支持真实运行、独立验收和干净复跑。</p>}
+        {!CASE_PREVIEW && <motion.div {...FADE_IN(0.16)} className="mb-8">
           <label htmlFor="repo-input" className="mb-3 block text-base font-medium">运行自己的仓库</label>
           <form onSubmit={(event) => { event.preventDefault(); submit(); }}
             className="flex flex-col gap-3 rounded-xl border border-accent/30 bg-surface/80 p-2 shadow-[0_0_45px_-18px_rgb(108_143_255_/_0.35)] transition-colors focus-within:border-accent sm:flex-row sm:items-stretch">
@@ -191,7 +204,7 @@ export function SelectScene({ onPick, disabled, busy, error, demo, observer, onO
           <p id="repo-help" className="mt-3 max-w-[80ch] text-xs leading-6 text-ink-mid">
             {demo ? "当前为离线演示：不会下载你填写的仓库，也不会创建真实任务。" : "自定义仓库暂不提供运行前体检；提交后立即下载代码，由模型分析计划并尝试运行，可能发送代码片段并产生模型费用。"}
           </p>
-        </motion.div>
+        </motion.div>}
 
         {shown && <p role="alert" className="mb-5 rounded-lg border border-reject/40 bg-reject/[.07] px-4 py-3 text-sm leading-6 text-ink">{shown}</p>}
         {busy && <p role="status" className="mb-5 text-sm text-ink-mid">正在提交请求，请稍候…</p>}

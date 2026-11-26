@@ -155,7 +155,7 @@ export function VerificationSpecPanel({ spec }: { spec: VerificationSpec }) {
       <p className="mt-2 text-sm leading-7 text-ink-mid">运行后由独立校验器核对指标；以下规则已随确认单固定，不可编辑。目前尚未执行核验。</p>
       <Scope source={spec.source} dataset={spec.dataset} code_under_test={spec.code_under_test} />
       <dl className="mt-4 space-y-3 text-sm leading-6">
-        <div><dt className="text-ink-mid">固定判定条件</dt><dd className="mt-1 text-ink">系数矩阵的两行分别计算最大绝对误差；两项都必须严格小于 <span className="font-mono tabular-nums">{spec.threshold.toExponential()}</span>，等于阈值不通过。</dd></div>
+        <div><dt className="text-ink-mid">固定判定条件</dt><dd className="mt-1 text-ink">{spec.rule_id === "sindy-lorenz-v1" ? "三个方程各 56 个系数" : "两个方程各 6 个系数"}，逐行计算最大绝对误差；每行都必须严格小于 <span className="font-mono tabular-nums">{spec.threshold.toExponential()}</span>，等于阈值不通过。</dd></div>
         <div><dt className="text-ink-mid">核验产物</dt><dd className="font-mono text-xs text-ink">{spec.artifact}</dd></div>
         <div><dt className="text-ink-mid">规则 ID</dt><dd className="break-all text-ink">{spec.rule_id}</dd></div>
       </dl>

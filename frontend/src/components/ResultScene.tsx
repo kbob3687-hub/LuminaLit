@@ -4,6 +4,7 @@ import { bundleConclusion, overallConclusion, replayConclusion, verificationEvid
 import { bundleDownloadUrl, getEnvironment } from "../api";
 import { BundleDownload } from "./BundleDownload";
 import { ReplayPanel } from "./ReplayPanel";
+import { ExperimentEvidence } from "./ExperimentEvidence";
 import type { EnvironmentManifest, RunStatus } from "../types";
 
 /**
@@ -132,6 +133,8 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical, isDe
             </p>
           )}
         </header>
+
+        {!isDemo && <ExperimentEvidence result={result} />}
 
         {/* 1. 结论及验证范围 */}
         <Section n={1} title="结论及验证范围">

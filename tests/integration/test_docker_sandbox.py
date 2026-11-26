@@ -58,6 +58,8 @@ def _docker_cli(*args: str, timeout: int = 20) -> subprocess.CompletedProcess:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
     )
 

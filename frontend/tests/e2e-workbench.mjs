@@ -32,11 +32,12 @@ async function fixture(overrides = {}, options = {}) {
     requests.push({ path: url.pathname, method: request.method() });
     const json = body => route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
     if (url.pathname === "/api/health") return json({ status: "ok", checks: [] });
-    if (url.pathname === "/api/targets") return json([{ id: "e2e-example", repo_url: "https://github.com/paperharness-demo/fixture", command: ["python", "check.py"], expected_artifact: "coefficients.json" }]);
+    if (url.pathname === "/api/targets") return json([{ id: options.lorenz ? "paper-lorenz" : "e2e-example", repo_url: "https://github.com/paperharness-demo/fixture", command: ["python", "check.py"], expected_artifact: "coefficients.json" }]);
     if (url.pathname === "/api/preflights") return json({ preflight_id: preflightId, target_id: "e2e-example", repo_url: "https://github.com/paperharness-demo/fixture",
       created_at: new Date().toISOString(), expires_at: new Date(Date.now()+600000).toISOString(), confirmation_digest: digest,
       plan: { resolved_revision: "d".repeat(40), python_version: "3.10", command: ["python", "check.py"], expected_artifact: "coefficients.json", source: "target_manifest" },
-      timeout_seconds: 120, max_repairs: 0, checks: [], limitations: ["工程测试夹具"], run_id: null });
+      timeout_seconds: 120, max_repairs: 0, checks: [], limitations: ["工程测试夹具"], run_id: null,
+      ...(options.lorenz ? { verification: { rule_id: "sindy-lorenz-v1", artifact: "coefficients.json", threshold: 0.001, validator_digest: digest, source: "Lorenz 子实验", dataset: "100000 点", code_under_test: "检出源码" } } : {}) });
     if (url.pathname === "/api/runs" && request.method() === "POST") return json({ run_id: id, state: "queued" });
     if (url.pathname === `/api/runs/${id}`) return json(status);
     if (url.pathname.endsWith("/events")) return json((options.events ?? []).filter(e => e.sequence > Number(url.searchParams.get("after") ?? 0)));
@@ -59,6 +60,34 @@ try {
     await new Promise(resolve => setTimeout(resolve, 200));
   }
   browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "msedge", headless: true });
+  await check("Lorenz 推荐实验先展示固定三方程标准，确认前不执行", async () => {
+    const f = await fixture({}, { lorenz: true, mobile: true });
+    await f.page.goto(`${base}/?live=1&still=1&case_preview=1`);
+    assert.equal(await f.page.getByLabel("运行自己的仓库").count(), 0);
+    await f.page.getByRole("button", { name: "查看 Lorenz 实验与验收标准" }).click();
+    await f.page.getByText("三个方程各 56 个系数", { exact: false }).waitFor();
+    assert.equal(f.requests.filter(r => r.method === "POST" && r.path === "/api/runs").length, 0);
+    assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    assert.deepEqual(f.errors, []);
+    await f.context.close();
+  });
+  await check("Lorenz 结果保留实测值，复跑失败不冒充通过", async () => {
+    const scientific = { ...verification, rule_id: "sindy-lorenz-v1", metrics: [
+      { name: "x方程最大系数误差", observed: 0.00001, threshold: 0.001, comparison: "lt", passed: true },
+      { name: "y方程最大系数误差", observed: 0.00002, threshold: 0.001, comparison: "lt", passed: true },
+      { name: "z方程最大系数误差", observed: 0.00003, threshold: 0.001, comparison: "lt", passed: true },
+    ] };
+    const f = await fixture({ verification: scientific, replay: { status: "failed" }, bundle: { integrity: "incomplete", url: null } }, { mobile: true });
+    await f.page.goto(`${base}/?run=${id}&scene=result&still=1`);
+    const evidence = f.page.getByRole("region", { name: "Lorenz 实验结果" });
+    await evidence.getByText("从数据中重新识别 Lorenz 方程").waitFor();
+    assert.match(await evidence.innerText(), /干净复跑未通过/);
+    assert.match(await evidence.innerText(), /3\.0000e-5/);
+    assert.match(await evidence.innerText(), /跨机器交接需另行验证/);
+    assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    assert.deepEqual(f.errors, []);
+    await f.context.close();
+  });
   await check("四视图：示例 → 确认 → 运行 → 结果，确认前不创建任务", async () => {
     const f = await fixture();
     await f.page.goto(`${base}/?live=1&still=1`);

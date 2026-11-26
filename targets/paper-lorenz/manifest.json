@@ -1,0 +1,15 @@
+{
+  "id": "paper-lorenz",
+  "repo_url": "https://github.com/dynamicslab/pysindy",
+  "revision": "4c32d2603cbf1aa476efae72bc78436cb1e6fc75",
+  "python_version": "3.10",
+  "command": ["python", "-I", "check.py"],
+  "expected_artifact": "coefficients.json",
+  "verification_rule": "sindy-lorenz-v1",
+  "checkout_paths": ["pysindy", "examples/3_original_paper.ipynb", "requirements.txt", ".gitignore", "LICENSE", "check.py", "coefficients.json", "experiment.json"],
+  "failure_class": "none",
+  "repairable": true,
+  "allowed_actions": [],
+  "expected_final": "succeeded",
+  "notes": "执行 PySINDy v1.7.5 检出源码，复现原始 SINDy 论文 Lorenz 实验的低噪声系数识别子任务。固定五阶库、100000 个采样点、导数噪声 1e-4；三行全部 56 个系数的最大误差均须 < 1e-3。维护者适配脚本，不执行完整 notebook 或论文全部实验。"
+}

@@ -19,9 +19,16 @@ export interface TargetMeta {
   blurb: string;
   /** 靶场设计上预期的终点：能修好 / 本来就不可复现。 */
   expect: "succeeded" | "failed";
+  preflight?: { timeout_seconds: number; max_repairs: number };
 }
 
 export const TARGET_META: Record<string, TargetMeta> = {
+  "paper-lorenz": {
+    revision: "4c32d2603cbf1aa476efae72bc78436cb1e6fc75",
+    blurb: "SINDy 论文 Lorenz 系数识别子实验：运行检出源码，独立检查三个方程，再在全新容器复跑。",
+    expect: "succeeded",
+    preflight: { timeout_seconds: 900, max_repairs: 0 },
+  },
   "clean-example": {
     revision: "a99b2b41ab223a91bace2c86d43ff9bb9548c3a1",
     blurb: "依赖齐全，命令直接跑通。零修复一次成功。",
@@ -64,12 +71,12 @@ export const TARGET_META: Record<string, TargetMeta> = {
   },
   "paper-pysindy": {
     revision: "c4421fcec275c8f4cc5c1e93bebb961b212067ae",
-    blurb: "arXiv:2004.08424 真实仓库，clone 较大。",
+    blurb: "PySINDy 发布包的最小合成任务；不执行检出源码，也不是论文实验。",
     expect: "succeeded",
   },
   "paper-umap": {
     revision: "27f4b2a096a0341371e0707a7261b2e61f3c9151",
-    blurb: "arXiv:1802.03426 真实仓库，clone 较大。",
+    blurb: "UMAP 发布包的合成数据试跑；不代表原论文实验复现。",
     expect: "succeeded",
   },
 };

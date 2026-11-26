@@ -27,6 +27,7 @@ from paperharness.contracts.verification import (
 )
 
 _VALIDATOR = Path(__file__).with_name("pysindy_validator.py")
+_LORENZ_VALIDATOR = Path(__file__).with_name("lorenz_validator.py")
 _MAX_ARTIFACT = 32 * 1024
 _MAX_RESPONSE = 4096
 # Docker Desktop API latency can exceed 2s under host pressure. This is a single
@@ -51,9 +52,45 @@ class ArtifactRejected(ValueError):
         super().__init__(message)
 
 
-def verification_spec() -> VerificationSpec:
+def verification_spec(rule_id: str = "pysindy-linear-v1") -> VerificationSpec:
     """Static preflight only: fingerprint the actual deployed, trusted script bytes."""
+    if rule_id == "sindy-lorenz-v1":
+        return VerificationSpec(
+            rule_id="sindy-lorenz-v1", threshold=1e-3,
+            validator_digest=hashlib.sha256(_LORENZ_VALIDATOR.read_bytes()).hexdigest(),
+            code_under_test=(
+                "PySINDy v1.7.5 检出源码（4c32d2603cbf1aa476efae72bc78436cb1e6fc75）；"
+                "维护者适配脚本导入仓库内 SINDy / STLSQ / PolynomialLibrary / lorenz，"
+                "拒绝已安装包回退。"
+            ),
+            dataset=(
+                "Lorenz 解析方程生成 100000 点；dt=0.001，初值 (-8,8,27)，"
+                "LSODA rtol/atol=1e-12；导数噪声标准差 1e-4，随机种子 1000。"
+            ),
+            source=(
+                "Brunton 等 2016 SINDy 论文 Fig.1 的 Lorenz 方程系数；"
+                "执行设置取 PySINDy examples/3_original_paper.ipynb 的低噪声子实验。"
+                "初值依上游示例，区别于原图的 (-8,7,27)；误差阈值由维护者预先设定。"
+            ),
+        )
+    if rule_id != "pysindy-linear-v1":
+        raise ValueError("unknown maintained verification rule")
     return VerificationSpec(validator_digest=hashlib.sha256(_VALIDATOR.read_bytes()).hexdigest())
+
+
+def _metric_names(rule_id: str) -> tuple[str, ...]:
+    return (*_METRIC_NAMES, "z方程最大系数误差") if rule_id == "sindy-lorenz-v1" else _METRIC_NAMES
+
+
+def _limitations(rule_id: str) -> list[str]:
+    if rule_id == "sindy-lorenz-v1":
+        return [
+            "验收只复算输出系数，不单独认证产物来源；源码导入与数据摘要由生产脚本记录。",
+            "仅复现上游 Lorenz 低噪声系数识别子任务，未执行整本 notebook、前向轨迹或全部论文实验。",
+            "采用上游示例初值 (-8,8,27)，与原论文 Fig.1 初值不同；随机种子在本子任务开始时重置。",
+            "本指标验收不包含干净复跑；复跑结论须另查 replay，不代表跨机器验证。",
+        ]
+    return list(_LIMITATIONS)
 
 
 def _artifact_name(spec: VerificationSpec) -> str:
@@ -367,7 +404,7 @@ def _bounded_response(client: Any, container_id: str, checkpoint: Callable[[], N
     return bytes(output)
 
 
-def _response_result(raw: bytes) -> dict[str, Any]:
+def _response_result(raw: bytes, spec: VerificationSpec | None = None) -> dict[str, Any]:
     # Only this fixed, bounded trusted-verifier response is decoded on the host.
     if len(raw) > _MAX_RESPONSE:
         raise ValueError("oversized verifier response")
@@ -399,14 +436,16 @@ def _response_result(raw: bytes) -> dict[str, Any]:
         ):
             raise ValueError("inconsistent verifier response")
     else:
-        if len(errors) != 2 or any(
+        names = _metric_names(spec.rule_id if spec else "pysindy-linear-v1")
+        threshold = spec.threshold if spec else 1e-4
+        if len(errors) != len(names) or any(
             type(value) not in (int, float)
             or not math.isfinite(value)
-            or not 0 <= value <= 1_000_002
+            or not 0 <= value <= 1_000_100
             for value in errors
         ):
             raise ValueError("invalid verifier metrics")
-        passed = all(value < 1e-4 for value in errors)
+        passed = all(value < threshold for value in errors)
         if data["status"] != ("passed" if passed else "failed") or data["failure_category"] != (
             None if passed else "metric_not_met"
         ):
@@ -415,6 +454,8 @@ def _response_result(raw: bytes) -> dict[str, Any]:
 
 
 def _apply_response(result: VerificationResult, data: dict[str, Any]) -> None:
+    lorenz = result.rule_id == "sindy-lorenz-v1"
+    rows, columns, threshold = (3, 56, 1e-3) if lorenz else (2, 6, 1e-4)
     result.status = data["status"]
     result.failure_category = data["failure_category"]
     result.summary = (
@@ -424,19 +465,19 @@ def _apply_response(result: VerificationResult, data: dict[str, Any]) -> None:
         VerificationCheck(
             name="产物结构",
             passed=data["schema_valid"],
-            detail="严格 JSON 协议：版本 1、两行六列有限系数，无额外字段。",
+            detail=f"严格 JSON 协议：版本 1、{rows} 行 {columns} 列有限系数，无额外字段。",
         ),
         VerificationCheck(
             name="系数指标",
             passed=result.status == "passed",
-            detail="按完整系数行重算最大绝对误差；两行均须严格小于 1e-4。",
+            detail=f"按完整系数行重算最大绝对误差；{rows} 行均须严格小于 {threshold:g}。",
         ),
     ]
     result.metrics = [
         MetricResult(
-            name=name, observed=value, threshold=1e-4, comparison="lt", passed=value < 1e-4
+            name=name, observed=value, threshold=threshold, comparison="lt", passed=value < threshold
         )
-        for name, value in zip(_METRIC_NAMES, data["errors"])
+        for name, value in zip(_metric_names(result.rule_id or "pysindy-linear-v1"), data["errors"])
     ]
 
 
@@ -459,7 +500,7 @@ def verify_artifact(
         code_under_test=spec.code_under_test,
         dataset=spec.dataset,
         source=spec.source,
-        limitations=list(_LIMITATIONS),
+        limitations=_limitations(spec.rule_id),
     )
     reason = None
     owns_client = client is None
@@ -489,12 +530,10 @@ def verify_artifact(
     try:
         checkpoint()
         # Read ONCE: the digest check and -c command use exactly the same immutable bytes.
-        script = _VALIDATOR.read_bytes()
+        script = (_LORENZ_VALIDATOR if spec.rule_id == "sindy-lorenz-v1" else _VALIDATOR).read_bytes()
         if (
             hashlib.sha256(script).hexdigest() != spec.validator_digest
-            or spec.rule_id != "pysindy-linear-v1"
-            or spec.artifact != "coefficients.json"
-            or spec.threshold != 1e-4
+            or spec != verification_spec(spec.rule_id)
         ):
             raise _Blocked("verification_rule_changed")
         checkpoint()
@@ -588,7 +627,7 @@ def verify_artifact(
                 checkpoint()
             phase = "response"
             response = _bounded_response(client, container.id, checkpoint)
-            _apply_response(result, _response_result(response))
+            _apply_response(result, _response_result(response, spec))
             checkpoint()
     except _Blocked as exc:
         reason = exc.reason

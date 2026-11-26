@@ -248,9 +248,35 @@ Agent 只能拿到 `Observation`，永远拿不到 `SandboxSession`。动作 sch
 `targets/<id>/` 目录除 `manifest.json` 外可放两个 Harness 注入物，PREPARING 阶段（clone 之后）由 Harness 拷进 workspace，**仓库本身一个字不动**：
 
 - `check.py`：确定性断言脚本（我们写死，模型无权创建或修改——验证不能让考生自己判卷）。PASS 写 `expected_artifact` 声明的产物文件，任何断言失败非 0 退出。
-- `requirements.txt`：靶场依赖清单，pin 死验证过的版本。仓库自带 `requirements.txt` 时追加合并（pip 重复行无害）。
+- `requirements.txt`：靶场依赖清单，pin 死验证过的版本。与仓库原清单合并，维护者 pins 在前以避免 pip 预先下载随后被丢弃的最新版；保留原仓库全部约束，冲突仍应安装失败。
 
 配套约定：`POST /api/runs` 的 `repo_url` 命中某靶场且用户未显式给 `command` 时，运行计划来自该靶场 manifest（`RunPlan.source="target_manifest"`，设计 4.2 第 1 步），不问模型；用户显式指定的 `command`/`expected_artifact`/`python_version` 优先。论文类靶场的 command 用 `python -I check.py`（隔离模式）：既防止仓库源码目录 shadow import，也强制依赖走注入清单。
+
+### 5.2 固定科学验收规则（2026-11-26 增量，待双方 review）
+
+`verification_rule` 可选，当前只接受以下两个维护者规则。命令均固定为
+`["python", "-I", "check.py"]`，Python 3.10，产物为 `coefficients.json`。
+
+| rule_id | 系数矩阵 | 每行最大绝对误差 | 被测代码 |
+|---|---|---|---|
+| pysindy-linear-v1 | 2×6 | 严格 < 0.0001 | 安装好的 PySINDy 包 |
+| sindy-lorenz-v1 | 3×56 | 严格 < 0.001 | 固定提交的 PySINDy 仓库源码 |
+
+`VerificationSpec.rule_id` 与 `threshold` 必须成对固定；前端不得调整阈值。
+体检按目标选择规则、冻结实际校验器 SHA-256，执行前再次逐字段核对。
+独立校验器只有标准库，在断网只读容器中检查产物；生产脚本不负责给自己判通过。
+
+Lorenz 的维护者适配脚本在 `-I` 启动后显式加入唯一的检出源码目录，并检查关键对象
+源码路径，拒绝 wheel 回退。它调用上游源码执行一个论文关联子实验，不能将
+发布包最小任务、完整 notebook 执行和完整论文复现混为一谈。范围见 `docs/lorenz-case.md`。
+
+新增规则不改变 `RunResult` / `ReplayResult` 形状。旧线性规则默认值保持兼容，
+未知规则、错误行数、伪造成功字段和被修改的规则必须拒绝。
+
+维护者可声明 `checkout_paths`（1–16 个普通相对路径，禁止模式字符、路径逃逸或
+`.git`）。该字段只在目标 manifest 中出现，随确认单冻结；不接受普通运行请求指定。
+默认 Git cloner 对此使用固定提交的 partial clone / sparse checkout，复跑沿用相同路径。
+默认完整检出保持原行为。更改 manifest 结构后，旧未执行确认单应重新体检。
 
 ## 6. 归属与 review 规则
 

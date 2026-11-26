@@ -87,7 +87,7 @@ def test_injected_requirements_start_on_new_line(tmp_path):
     )
     runner._inject_target_files(run_id, workspace, target)
     assert (workspace / "requirements.txt").read_text(encoding="utf-8") == (
-        "numpy==1.26.4\nscipy==1.12.0\n"
+        "scipy==1.12.0\nnumpy==1.26.4"
     )
 
 
@@ -482,9 +482,51 @@ def test_declared_install_preserves_original_execute_error(tmp_path):
     assert session.set_network.call_args_list == [((True,),), ((False,),)]
 
 
+def test_fixed_sparse_clone_keeps_commit_and_explicit_http_transport(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "init" in cmd:
+            Path(cmd[-1]).mkdir(parents=True)
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout="a" * 40 if "rev-parse" in cmd else "", stderr="",
+        )
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", fake_run)
+    revision = "a" * 40
+    actual = runner_mod._clone_once(
+        "https://github.com/owner/repo", revision, tmp_path / "workspace",
+        {"PAPERHARNESS_GIT_HTTP_VERSION": "HTTP/2"}, ["pysindy", "examples/case.ipynb"],
+    )
+    assert actual == revision
+    fetch = next(cmd for cmd in calls if "fetch" in cmd)
+    assert "--filter=blob:none" in fetch and fetch[-1] == revision
+    assert "http.version=HTTP/2" in fetch
+    sparse = next(cmd for cmd in calls if "sparse-checkout" in cmd)
+    assert sparse[-3:] == ["--", "/pysindy", "/examples/case.ipynb"]
+    checkout = next(cmd for cmd in calls if "checkout" in cmd)
+    assert "http.version=HTTP/2" in checkout
+    assert checkout[-1] == "FETCH_HEAD"
+
+
+def test_invalid_http_transport_fails_before_removing_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    marker = workspace / "keep.txt"
+    marker.write_text("keep")
+    with pytest.raises(ValueError, match="HTTP"):
+        runner_mod._clone_once(
+            "https://github.com/owner/repo", "a" * 40, workspace,
+            {"PAPERHARNESS_GIT_HTTP_VERSION": "arbitrary"},
+        )
+    assert marker.read_text() == "keep"
+
+
 def test_git_clone_uses_shallow_http11_env_and_mirror_fallback(tmp_path, monkeypatch):
     """git_clone 使用浅克隆 + HTTP/1.1 + 非交互环境变量，直连两次失败后切镜像并脱敏错误。"""
     monkeypatch.setenv("PAPERHARNESS_GIT_MIRROR", "https://ghfast.top/")
+    monkeypatch.delenv("PAPERHARNESS_GIT_HTTP_VERSION", raising=False)
     calls: list[tuple[list[str], dict | None]] = []
 
     def fake_run(cmd, check=False, capture_output=False, text=False, timeout=None, env=None):

@@ -172,7 +172,11 @@ def _clone_once(
     revision: str | None,
     workspace: Path,
     git_env: dict[str, str],
+    checkout_paths: list[str] | None = None,
 ) -> str:
+    http_version = git_env.get("PAPERHARNESS_GIT_HTTP_VERSION", "HTTP/1.1")
+    if http_version not in {"HTTP/1.1", "HTTP/2"}:
+        raise ValueError("PAPERHARNESS_GIT_HTTP_VERSION must be HTTP/1.1 or HTTP/2")
     if workspace.exists():
         _rmtree_force(workspace)
     workspace.parent.mkdir(parents=True, exist_ok=True)
@@ -203,18 +207,28 @@ def _clone_once(
             timeout=30,
             env=git_env,
         )
+        if checkout_paths:
+            for key, value in (
+                ("remote.origin.promisor", "true"),
+                ("remote.origin.partialclonefilter", "blob:none"),
+            ):
+                subprocess.run(
+                    ["git", "-C", str(workspace), "config", key, value],
+                    check=True, capture_output=True, text=True, timeout=30, env=git_env,
+                )
         subprocess.run(
             [
                 "git",
                 "-C",
                 str(workspace),
                 "-c",
-                "http.version=HTTP/1.1",
+                f"http.version={http_version}",
                 "fetch",
                 "--depth",
                 "1",
                 "--no-tags",
                 "--no-recurse-submodules",
+                *(["--filter=blob:none"] if checkout_paths else []),
                 "origin",
                 revision,
             ],
@@ -224,8 +238,16 @@ def _clone_once(
             timeout=CLONE_TIMEOUT_SECONDS,
             env=git_env,
         )
+        if checkout_paths:
+            subprocess.run(
+                ["git", "-C", str(workspace), "sparse-checkout", "set", "--no-cone", "--",
+                 *("/" + path for path in checkout_paths)],
+                check=True, capture_output=True, text=True, timeout=30, env=git_env,
+            )
         subprocess.run(
-            ["git", "-C", str(workspace), "checkout", "-q", "FETCH_HEAD"],
+            ["git", "-C", str(workspace),
+             *(["-c", f"http.version={http_version}"] if checkout_paths else []),
+             "checkout", "-q", "FETCH_HEAD"],
             check=True,
             capture_output=True,
             text=True,
@@ -238,7 +260,7 @@ def _clone_once(
                 [
                     "git",
                     "-c",
-                    "http.version=HTTP/1.1",
+                    f"http.version={http_version}",
                     "-c",
                     "core.autocrlf=false",
                     "clone",
@@ -265,7 +287,7 @@ def _clone_once(
                 [
                     "git",
                     "-c",
-                    "http.version=HTTP/1.1",
+                    f"http.version={http_version}",
                     "-c",
                     "core.autocrlf=false",
                     "clone",
@@ -293,7 +315,7 @@ def _clone_once(
             [
                 "git",
                 "-c",
-                "http.version=HTTP/1.1",
+                f"http.version={http_version}",
                 "-c",
                 "core.autocrlf=false",
                 "clone",
@@ -327,7 +349,9 @@ def _clone_once(
     return head.stdout.strip()
 
 
-def git_clone(request: RunRequest, run_dir: Path) -> str:
+def git_clone(
+    request: RunRequest, run_dir: Path, *, checkout_paths: list[str] | None = None,
+) -> str:
     """默认 cloner：宿主机 clone 仓库（契约 1.1：沙箱不做任何 git 网络操作）。"""
     # 防御纵深：即使绕过 API 的 schema 校验，也绝不允许本地路径/file:///
     # ssh:// 源——git clone 支持本地目录，会把宿主机任意目录搬进容器挂载区。
@@ -350,7 +374,7 @@ def git_clone(request: RunRequest, run_dir: Path) -> str:
     last_error: Exception | None = None
     for clone_url in candidates:
         try:
-            return _clone_once(clone_url, request.revision, workspace, git_env)
+            return _clone_once(clone_url, request.revision, workspace, git_env, checkout_paths)
         except _CloneSizeExceeded as exc:
             raise RuntimeError(str(exc)) from exc
         except subprocess.CalledProcessError as exc:
@@ -505,6 +529,13 @@ class HarnessRunner:
 
     # ------------------------------------------------------------ 内置靶场
 
+    def _clone_repository(
+        self, request: RunRequest, run_dir: Path, target: TargetManifest | None = None,
+    ) -> str:
+        if self.cloner is git_clone and target and target.checkout_paths:
+            return git_clone(request, run_dir, checkout_paths=target.checkout_paths)
+        return self.cloner(request, run_dir)
+
     def _match_target(self, request: RunRequest) -> TargetManifest | None:
         """按 (repo_url, revision) 匹配内置靶场；未指定 revision 时回退到无故障或首个候选。"""
         candidates = [target for target in self.targets if target.repo_url == request.repo_url]
@@ -523,7 +554,7 @@ class HarnessRunner:
     def _inject_target_files(self, run_id: str, workspace: Path, target: TargetManifest) -> None:
         """靶场注入物：check.py 与 requirements.txt 拷进 workspace，仓库本身一个字不动。
 
-        仓库自带 requirements.txt 时追加（pip 重复行无害）。check.py 是我们
+        仓库自带 requirements.txt 时合并且保留全部约束，维护者 pins 在前。check.py 是我们
         写死的确定性断言，模型无权创建或修改——验证不能让考生自己判卷。
         """
         if target.source_dir is None:
@@ -540,8 +571,11 @@ class HarnessRunner:
             existing = (
                 workspace_req.read_text(encoding="utf-8") if workspace_req.exists() else ""
             )
-            separator = "\n" if existing and not existing.endswith("\n") else ""
-            workspace_req.write_text(existing + separator + extra, encoding="utf-8")
+            # pip 23 eagerly downloads candidates as requirements are encountered.
+            # Pins first avoid downloading a discarded newest wheel before seeing
+            # the maintained version; retain upstream constraints, even conflicts.
+            separator = "\n" if extra and not extra.endswith("\n") else ""
+            workspace_req.write_text(extra + separator + existing, encoding="utf-8")
             injected.append("requirements.txt")
         if injected:
             self.store.append_event(
@@ -598,7 +632,7 @@ class HarnessRunner:
                     verification_rule = confirmation.view.verification
                     if bool(target.verification_rule) != bool(verification_rule):
                         raise ValueError("confirmed verification rule missing")
-                    if verification_rule and verification_rule != verification_spec():
+                    if verification_rule and verification_rule != verification_spec(target.verification_rule):
                         raise ValueError("confirmed verification rule changed; recheck required")
                 except (OSError, ValueError) as exc:
                     return self._fail(
@@ -607,7 +641,7 @@ class HarnessRunner:
                     )
             self.store.write_status(run_id, RunState.PREPARING, {})
             try:
-                resolved_revision = self.cloner(request, run_dir)
+                resolved_revision = self._clone_repository(request, run_dir, target)
             except Exception as exc:  # noqa: BLE001
                 return self._fail(
                     run_id,
@@ -698,7 +732,7 @@ class HarnessRunner:
                 and plan.resolved_revision == target.revision
                 and plan.python_version == target.python_version
             ):
-                verification_rule = verification_spec()
+                verification_rule = verification_spec(target.verification_rule)
             self._check_cancel(run_id)
             self.store.write_text(run_id, "run_plan.json", plan.model_dump_json(indent=2))
             self.store.append_event(
@@ -877,6 +911,7 @@ class HarnessRunner:
                         deadline,
                         cancel,
                         replay_result,
+                        target=target,
                     )
                 if verified and replay_result.status is not ReplayStatus.PASSED:
                     outcome = "failed"
@@ -1172,6 +1207,8 @@ class HarnessRunner:
         deadline: float,
         cancel: threading.Event,
         result: ReplayResult,
+        *,
+        target: TargetManifest | None = None,
     ) -> ReplayResult:
         run_dir = self.store.run_dir(run_id)
         assert result.session_id is not None
@@ -1186,7 +1223,7 @@ class HarnessRunner:
         replay_session = None
         try:
             try:
-                resolved_revision = self.cloner(request, replay_root)
+                resolved_revision = self._clone_repository(request, replay_root, target)
             except (_RunCancelled, TimeBudgetExceeded):
                 raise
             except Exception as exc:
