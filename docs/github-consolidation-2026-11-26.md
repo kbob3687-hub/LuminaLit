@@ -1,6 +1,6 @@
 # GitHub 收敛记录（2026-11-26）
 
-本次整理将 14 个开放 PR 收敛为一个面向 main 的整合 PR。旧分支保留，原始工作区 `feat/repair-manifest` 及其未提交文件不作覆盖。旧 PR 以“已被整合 PR 替代”关闭，不冒充已独立合入 main。
+本次整理已将 14 个开放 PR 收敛为一个面向 main 的整合草稿 [#41](https://github.com/kbob3687-hub/LuminaLit/pull/41)。14 个旧 PR 均已按被替代关闭，并在原说明顶部注明去向。旧分支保留，原始工作区 `feat/repair-manifest` 及其未提交文件不作覆盖，不冒充旧 PR 已独立合入 main。
 
 ## 保留内容
 
@@ -38,3 +38,13 @@
 整合 PR 经过自动化回归后提交评审，不自动合入 main。README 要求契约修改“需两人 review”；自动化测试不替代该评审。
 
 Docker 复跑测试使用本地 Git 工程夹具与脚本模型；浏览器测试使用固定 API 响应。它们验证工程行为，不作为真实模型修复或科研论文结论的证据。测试结果及具体跳过原因记录在整合 PR 描述中。
+
+## 本轮回归与当前阻塞
+
+- 后端回归（不含分别执行的三个 Docker 模块）：595 passed、16 skipped；Ruff 通过。
+- 前端测试：16 passed；浏览器契约：14 个场景通过；TypeScript + Vite 构建通过，仍有主包体积提醒。
+- 加强后的沙箱和离线 ACI 验收：23 passed、1 skipped（Windows 符号链接权限）。
+- 真实 Docker 独立验收/复跑材料链首轮为 4 failed、1 passed；一次独立诊断通过；完整回归后单独复测为 1 passed、1 failed、3 errors。
+- 已捕获验证器 container.reload 的命名管道读取超时（2 秒），及 SDK 初始化获取 daemon API 版本超时（5 秒）。故障缩小到 Windows Docker API 响应层，宿主/负载/超时策略的完整原因未定，尚未修复；未用放宽数值标准、自动重试或 skip 掩盖失败。
+
+#41 因此保留草稿，不合入 main。#40 的 P0 首项记录该阻塞及任务权限接线；#17 保留仓库可达性需求；#30 待 #41 验收合入后自动关闭。
