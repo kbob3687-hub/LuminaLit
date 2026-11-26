@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -45,8 +46,29 @@ ALLOWED_ENV_NAMES = frozenset(
         "TOKENIZERS_PARALLELISM",
     }
 )
-# pip 装包通常比跑一次 smoke test 慢，单独给下限（设计稿 §5.4 提案 4）。
-INSTALL_TIMEOUT_FLOOR = 120
+_ENV_VALUE_PATTERNS = {
+    "CUDA_VISIBLE_DEVICES": re.compile(r"(?:-1|[0-9]{1,3}(?:,[0-9]{1,3})*)"),
+    "OMP_NUM_THREADS": re.compile(r"[1-9][0-9]{0,3}"),
+    "MKL_NUM_THREADS": re.compile(r"[1-9][0-9]{0,3}"),
+    "TOKENIZERS_PARALLELISM": re.compile(r"(?:true|false|0|1)"),
+}
+
+
+def is_safe_environment_value(name: str, value: object) -> bool:
+    pattern = _ENV_VALUE_PATTERNS.get(name)
+    return (
+        pattern is not None
+        and isinstance(value, str)
+        and len(value) <= 64
+        and pattern.fullmatch(value) is not None
+    )
+
+
+# install 不单独设超时下限。runner 每个动作前会把 aci.timeout_seconds 覆写成
+# step_timeout（剩余墙钟预算），它是 TimeBudgetExceeded 收敛的唯一抓手；
+# 若在这里用 max(step_timeout, 120) 把预算抬回去，临近 deadline 时一次 pip
+# install 可跑满 120s 并绕过总墙钟。与 run_smoke_test 保持同一口径。
+# 设计稿 §5.4「提案 4」的下限仍标着「待确认」，在确认前不落地。
 
 
 class PaperACI:
@@ -128,6 +150,11 @@ class PaperACI:
         )
 
     def _do_search_text(self, action) -> Observation:
+        # 契约 §2.2「最多 50 条」：Pydantic 只挡上界（le=50），下界和绕过
+        # schema 的构造都靠这里兜住；否则 max_results=0 会恒返回 "0 matches"。
+        if not 1 <= action.max_results <= 50:
+            return self._fail(action.action, errors.invalid_argument("max_results"))
+
         target = self._guard(action)
         if isinstance(target, Observation):
             return target
@@ -198,15 +225,18 @@ class PaperACI:
             # 校验失败**不能开网**：这是「拒绝时无副作用」的落点之一。
             return self._fail(action.action, errors.REQUIREMENT_NOT_ALLOWED)
 
-        timeout = max(self.timeout_seconds, INSTALL_TIMEOUT_FLOOR)
         with self._network(True):
-            result = self.session.execute(["python", "-m", "pip", "install", requirement], timeout)
+            result = self.session.execute(
+                ["python", "-m", "pip", "install", requirement], self.timeout_seconds
+            )
         return self._from_exec(action.action, result, f"install {requirement}")
 
     def _do_set_environment(self, action) -> Observation:
         # 白名单与策略共用同一份判定（rejection 已先跑过一次，这里不重复开洞）。
         if action.name not in self.policy.allowed_env_names:
             return self._fail(action.action, errors.env_not_allowed(action.name))
+        if not is_safe_environment_value(action.name, action.value):
+            return self._fail(action.action, errors.invalid_argument("environment_value"))
         self.session.set_environment(action.name, action.value)
         return Observation(
             ok=True,

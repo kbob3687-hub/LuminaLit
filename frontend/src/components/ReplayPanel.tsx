@@ -1,13 +1,14 @@
 import clsx from "clsx";
-import { bundleConclusion, replayConclusion } from "../runModel";
+import { bundleConclusion, replayConclusion, verificationConclusion } from "../runModel";
 import { bundleDownloadUrl } from "../api";
+import { BundleDownload } from "./BundleDownload";
 import type { BundleResult, ReplayResult, RunResult, VerificationResult } from "../types";
 
 /**
  * 评审稿 §3.3 / §7.4 / §8.6 / §10.3：干净环境复跑与材料交付。
  *
- * 严格只消费 `status.result` 里已经落盘的字段。本轮后端尚未实现复跑
- * （Issue #30 开放），`replay` / `bundle` 缺省时显示「后端未下发」，绝不
+ * 严格只消费 `status.result` 里已经落盘的字段。历史记录中
+ * `replay` / `bundle` 缺省时显示「未记录」，绝不
  * 拿 `verified`、`state` 或「运行成功」推导出一个复跑结论。
  *
  * 不展示容器 ID、宿主机路径、镜像标签或任何凭据；只展示内容摘要。
@@ -40,7 +41,7 @@ function VerificationRow({ label, v }: { label: string; v: VerificationResult | 
   return (
     <tr className="border-b border-rule align-top">
       <th scope="row" className="py-2 pr-3 text-left text-sm font-normal text-ink">{label}</th>
-      <td className="py-2 pr-3 text-sm text-ink-mid">{v ? `${v.level} / ${v.status}` : "未记录"}</td>
+      <td className="py-2 pr-3 text-sm text-ink-mid">{v ? verificationConclusion(v).label : "未记录"}</td>
       <td className="py-2 pr-3 font-mono text-xs text-ink-mid break-all">{v?.rule_id ?? "未记录"}</td>
       <td className="py-2 font-mono text-xs text-ink-mid break-all">{v?.artifact_sha256 ?? "未记录"}</td>
     </tr>
@@ -50,6 +51,8 @@ function VerificationRow({ label, v }: { label: string; v: VerificationResult | 
 function Material({ bundle, runId }: { bundle: BundleResult | null | undefined; runId: string | null }) {
   const conclusion = bundleConclusion(bundle);
   const url = bundleDownloadUrl(runId, bundle);
+  const missing = bundle?.missing?.length ? bundle.missing
+    : bundle?.items?.filter(item => item.status !== "included").map(item => ({ path: item.path, reason: item.reason ?? "材料未包含" })) ?? [];
   return (
     <div className="mt-6 border-t border-rule pt-5">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -68,11 +71,11 @@ function Material({ bundle, runId }: { bundle: BundleResult | null | undefined; 
             <div><dt className="text-xs text-ink-mid">清单摘要</dt><dd><Digest value={bundle.manifest_digest} /></dd></div>
             <div><dt className="text-xs text-ink-mid">压缩包 SHA-256</dt><dd><Digest value={bundle.sha256} /></dd></div>
           </dl>
-          {bundle.missing && bundle.missing.length > 0 && (
+          {missing.length > 0 && (
             <div className="mt-3">
               <p className="text-xs text-warn">未包含的内容（完整性按缺项判定，不静默遗漏）：</p>
               <ul className="mt-1 list-disc space-y-1 pl-4 text-sm leading-6 text-ink-mid">
-                {bundle.missing.map((m, i) => <li key={`${m.path}:${i}`} className="[overflow-wrap:anywhere]">{m.path} —— {m.reason}</li>)}
+                {missing.map((m, i) => <li key={`${m.path}:${i}`} className="[overflow-wrap:anywhere]">{m.path} —— {m.reason}</li>)}
               </ul>
             </div>
           )}
@@ -90,9 +93,7 @@ function Material({ bundle, runId }: { bundle: BundleResult | null | undefined; 
         </>
       )}
       {url ? (
-        <a href={url} download className="mt-3 inline-block rounded text-sm text-accent underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent">
-          下载复跑材料（完整性已通过）
-        </a>
+        <BundleDownload runId={runId} bundle={bundle} />
       ) : (
         <p className="mt-3 text-xs leading-6 text-ink-muted">下载入口在后端给出完整性通过的材料清单后才会出现。</p>
       )}
@@ -136,7 +137,7 @@ export function ReplayPanel({ result, runId, isDemo }: {
       ) : (
         <>
           <dl className="mt-4 space-y-3">
-            <Field label="复跑状态" value={`${replay.status}${replay.reason ? `（${replay.reason}）` : ""}`} />
+            <Field label="复跑状态" value={conclusion.label} />
             <Field label="新会话标识" value={replay.session_id} />
             <Field label="开始 / 结束" value={[replay.started_at, replay.finished_at].filter(Boolean).join(" → ") || null} />
             <Field label="原始代码版本" value={replay.base_revision} />
@@ -162,6 +163,15 @@ export function ReplayPanel({ result, runId, isDemo }: {
               </tbody>
             </table>
           </div>
+          {replayVerification?.metrics && replayVerification.metrics.length > 0 && (
+            <ul aria-label="复跑实测指标" className="mt-3 space-y-2 text-sm leading-6">
+              {replayVerification.metrics.map((metric, i) => (
+                <li key={`${metric.name}:${i}`} className={metric.passed ? "text-pass" : "text-reject"}>
+                  {metric.name}：{metric.observed}（要求 &lt; {metric.threshold}）
+                </li>
+              ))}
+            </ul>
+          )}
           {replay.checks && replay.checks.length > 0 && (
             <ul className="mt-3 divide-y divide-rule border-y border-rule text-sm leading-6">
               {replay.checks.map((c, i) => (

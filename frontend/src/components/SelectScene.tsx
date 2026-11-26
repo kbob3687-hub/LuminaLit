@@ -129,11 +129,11 @@ export function SelectScene({ onPick, disabled, busy, error, demo, observer, onO
   };
 
   return (
-    <main className="run-workspace h-full overflow-y-auto px-5 py-8 sm:px-8">
-      <div className="mx-auto w-full max-w-[1020px]">
+    <main className="run-workspace h-full overflow-y-auto px-5 py-8 sm:px-8 sm:pt-[10vh]">
+      <div className="mx-auto w-full max-w-[840px]">
         <motion.div
           {...FADE_IN(0)}
-          className="mb-6 flex flex-wrap items-baseline justify-between gap-4 font-mono text-[11px] tracking-[.28em] text-accent uppercase"
+          className="mb-14 flex flex-wrap items-baseline justify-between gap-4 font-mono text-[11px] tracking-[.28em] text-accent uppercase"
         >
           <span>PaperHarness</span>
 
@@ -161,19 +161,19 @@ export function SelectScene({ onPick, disabled, busy, error, demo, observer, onO
 
         <motion.h1
           {...FADE_IN(0.06)}
-          className="mb-3 text-[clamp(30px,3.6vw,44px)] leading-[1.12] font-semibold tracking-[-.02em]"
+          className="mb-5 max-w-[17ch] text-[clamp(36px,4.5vw,58px)] leading-[1.2] font-semibold tracking-[-.035em]"
         >
-          从代码仓库开始，查清一次试跑
+          <span className="block">从一个仓库，</span><span className="block">开始可信复现</span>
         </motion.h1>
 
-        <motion.p {...FADE_IN(0.12)} className="mb-8 max-w-[52ch] text-[14px] leading-[1.7] text-ink-mid">
-          在隔离容器中执行代码，记录失败、修复和产物。跑通一段程序，不等于已经复现整篇论文的结论。
+        <motion.p {...FADE_IN(0.12)} className="mb-10 max-w-[56ch] text-[14px] leading-[1.9] text-ink-mid">
+          让执行过程可见，让结论有据可查。隔离运行、受控修复、独立验证，再用一次干净复跑检验结果。
         </motion.p>
 
         <motion.div {...FADE_IN(0.16)} className="mb-8">
           <label htmlFor="repo-input" className="mb-3 block text-base font-medium">运行自己的仓库</label>
           <form onSubmit={(event) => { event.preventDefault(); submit(); }}
-            className="flex flex-col gap-3 border-b border-rule pb-3 transition-colors focus-within:border-accent sm:flex-row sm:items-stretch">
+            className="flex flex-col gap-3 rounded-xl border border-accent/30 bg-surface/80 p-2 shadow-[0_0_45px_-18px_rgb(108_143_255_/_0.35)] transition-colors focus-within:border-accent sm:flex-row sm:items-stretch">
             <input
               id="repo-input"
               placeholder="https://github.com/owner/repo"
@@ -181,10 +181,10 @@ export function SelectScene({ onPick, disabled, busy, error, demo, observer, onO
               spellCheck={false}
               disabled={disabled}
               onInput={() => setLocalError(null)}
-              className="min-w-0 flex-1 border-0 bg-transparent py-[13px] font-mono text-[13px] text-ink outline-none placeholder:text-ink-muted disabled:opacity-50"
+              className="min-w-0 flex-1 border-0 bg-transparent px-3 py-[13px] font-mono text-[13px] text-ink outline-none placeholder:text-ink-muted disabled:opacity-50"
             />
             <button type="submit" disabled={disabled}
-              className="shrink-0 cursor-pointer rounded-[7px] bg-accent px-6 py-[10px] text-[13.5px] font-semibold text-white transition-colors hover:bg-accent/85 disabled:opacity-50">
+              className="shrink-0 cursor-pointer rounded-lg bg-linear-to-br from-accent to-[#5272e7] px-6 py-[10px] text-[13.5px] font-semibold text-white transition-colors hover:brightness-110 disabled:opacity-50">
               {demo ? "查看离线回放" : "开始探索运行"}
             </button>
           </form>
@@ -196,21 +196,24 @@ export function SelectScene({ onPick, disabled, busy, error, demo, observer, onO
         {shown && <p role="alert" className="mb-5 rounded-lg border border-reject/40 bg-reject/[.07] px-4 py-3 text-sm leading-6 text-ink">{shown}</p>}
         {busy && <p role="status" className="mb-5 text-sm text-ink-mid">正在提交请求，请稍候…</p>}
 
-        <motion.div {...FADE_IN(0.2)} className="mb-4">
-          <h2 className="text-base font-medium">先用内置示例了解流程</h2>
+        <details className="mb-6 border-y border-rule py-5">
+          <summary className="cursor-pointer text-sm font-medium text-ink-mid">先用内置示例了解流程 <span className="ml-2 font-mono text-xs text-ink-muted">{list.length} 个案例</span></summary>
+        <div className="my-4">
           <p className="mt-2 text-xs leading-6 text-ink-mid">
             {demo ? "选择示例查看预录过程，不会执行代码。" : "点击示例先查看静态体检，再确认执行。它们是小型运行案例，不代表完整论文复现。"}
           </p>
-        </motion.div>
-        <div className="mb-6 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+        </div>
+        <div className="grid gap-2.5 sm:grid-cols-2">
           {list.map((p, i) => (
             <TargetCard key={p.id} option={p} index={i} onPick={onPick} disabled={disabled} />
           ))}
         </div>
+        </details>
 
-        <div className="mb-4">
+        <details className="mb-4 text-xs text-ink-muted">
+          <summary className="mb-4 cursor-pointer">运行条件与服务状态</summary>
           <HealthBanner details={health ?? null} error={healthError ?? null} />
-        </div>
+        </details>
 
       </div>
     </main>

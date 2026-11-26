@@ -1,0 +1,286 @@
+{
+  "date": "2026-11-26",
+  "repository": "kbob3687-hub/LuminaLit",
+  "original_workspace": "E:/java/LuminaLit",
+  "original_branch": "feat/repair-manifest",
+  "original_head": "378dad84ad9ed6bbf51a93375444189991f8951f",
+  "integration_workspace": "E:/java/LuminaLit-workbench-integration",
+  "integration_branch": "codex/workbench-integration",
+  "integration_head": "0721d12e32038596d4501c8034776c47269f75f7",
+  "remote_mutations": [],
+  "new_commits_created": false,
+  "sources": [
+    {
+      "source": "original uncommitted backend",
+      "base": "378dad8",
+      "scope": "repair manifest, independent verification, replay outcomes, ZIP integrity"
+    },
+    {
+      "source": "PRs #32–#36",
+      "ref": "origin/feat/frontend-v02-health",
+      "head": "0721d12",
+      "scope": "workbench views, replay/result panels, health fallback"
+    },
+    {
+      "source": "PR #39 plus replay isolation tests",
+      "ref": "origin/test/replay-session-isolation",
+      "head": "ef16bde",
+      "scope": "frontend snapshot and tests/integration/test_docker_sandbox.py"
+    },
+    {
+      "source": "origin/main #24",
+      "head": "5084127",
+      "scope": "selected ACI remaining-budget and search-limit fixes; main branch ancestry has not been merged"
+    }
+  ],
+  "pr_inventory": [
+    {
+      "number": 39,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/39",
+      "state": "closed",
+      "merged": true,
+      "base": "test/replay-session-isolation",
+      "head": "fix/frontend-demo-result-label",
+      "head_sha": "1a20525d3b10e0993634321c2a508af24b9b0a48"
+    },
+    {
+      "number": 38,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/38",
+      "state": "closed",
+      "merged": true,
+      "base": "feat/aci-execution-policy",
+      "head": "test/replay-session-isolation",
+      "head_sha": "a032d4fe808ce05ec7e0bf9fd72554340a50840a"
+    },
+    {
+      "number": 37,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/37",
+      "state": "closed",
+      "merged": true,
+      "base": "feat/frontend-v02-health",
+      "head": "feat/aci-execution-policy",
+      "head_sha": "42f768ac21f556b4b302e3c727593b6f5a464749"
+    },
+    {
+      "number": 36,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/36",
+      "state": "open",
+      "merged": false,
+      "base": "feat/frontend-v02-result",
+      "head": "feat/frontend-v02-health",
+      "head_sha": "0721d12e32038596d4501c8034776c47269f75f7"
+    },
+    {
+      "number": 35,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/35",
+      "state": "open",
+      "merged": false,
+      "base": "feat/frontend-v02-replay",
+      "head": "feat/frontend-v02-result",
+      "head_sha": "0d7b4b59dd3669b369eb29bb4cc3020899b24fc9"
+    },
+    {
+      "number": 34,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/34",
+      "state": "open",
+      "merged": false,
+      "base": "feat/frontend-v02-api-deeplink",
+      "head": "feat/frontend-v02-replay",
+      "head_sha": "d3e18b4496e8c183baa3c9a2e2b003f10ee76212"
+    },
+    {
+      "number": 33,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/33",
+      "state": "open",
+      "merged": false,
+      "base": "feat/frontend-v02-contract",
+      "head": "feat/frontend-v02-api-deeplink",
+      "head_sha": "fac0c9ac17d7930b378c4d70a5a8f12faa01b3d1"
+    },
+    {
+      "number": 32,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/32",
+      "state": "open",
+      "merged": false,
+      "base": "feat/run-guidance",
+      "head": "feat/frontend-v02-contract",
+      "head_sha": "1e51935258391d03c3614a350239dfc8aaa4bbeb"
+    },
+    {
+      "number": 31,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/31",
+      "state": "open",
+      "merged": false,
+      "base": "fix/frontend-acceptance-panel",
+      "head": "feat/frontend-action-steps",
+      "head_sha": "6c1db3395e09bdcb4d7439cdce28cf804fd6be7f"
+    },
+    {
+      "number": 29,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/29",
+      "state": "closed",
+      "merged": true,
+      "base": "fix/frontend-followups",
+      "head": "fix/frontend-acceptance-panel",
+      "head_sha": "cc321b8e363f03aa67823f01e237347cb33d3400"
+    },
+    {
+      "number": 28,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/28",
+      "state": "closed",
+      "merged": true,
+      "base": "test/sandbox-contract-coverage",
+      "head": "fix/aci-acceptance-guard",
+      "head_sha": "864c270562dd42eee37c86520ed1683a549ea177"
+    },
+    {
+      "number": 27,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/27",
+      "state": "open",
+      "merged": false,
+      "base": "main",
+      "head": "feat/run-guidance",
+      "head_sha": "378dad84ad9ed6bbf51a93375444189991f8951f"
+    },
+    {
+      "number": 26,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/26",
+      "state": "open",
+      "merged": false,
+      "base": "fix/frontend-contract-cleanup",
+      "head": "fix/frontend-followups",
+      "head_sha": "97216da4434b3be61685b49e2d4f85f93d72fdbb"
+    },
+    {
+      "number": 25,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/25",
+      "state": "open",
+      "merged": false,
+      "base": "fix/aci-budget-and-guards",
+      "head": "test/sandbox-contract-coverage",
+      "head_sha": "c55bef6abb997d550d1cde4b00166642b04f87c9"
+    },
+    {
+      "number": 24,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/24",
+      "state": "closed",
+      "merged": true,
+      "base": "main",
+      "head": "fix/aci-budget-and-guards",
+      "head_sha": "a6b88ca99935b087d15cf1e9ca31bdcf4c86145c"
+    },
+    {
+      "number": 23,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/23",
+      "state": "open",
+      "merged": false,
+      "base": "fix/polling-deeplink",
+      "head": "fix/frontend-contract-cleanup",
+      "head_sha": "3603115f18142ca3805b83d9914e05dd1ac9aac8"
+    },
+    {
+      "number": 22,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/22",
+      "state": "open",
+      "merged": false,
+      "base": "fix/failure-categories",
+      "head": "fix/polling-deeplink",
+      "head_sha": "abe6bbc3e92ff47f08127cc4aa4aea397d91bea3"
+    },
+    {
+      "number": 21,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/21",
+      "state": "open",
+      "merged": false,
+      "base": "fix/flowgraph-event-driven",
+      "head": "fix/failure-categories",
+      "head_sha": "539f25572da831d220a2cb8f3c32a9f4116116ff"
+    },
+    {
+      "number": 20,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/20",
+      "state": "open",
+      "merged": false,
+      "base": "feat/frontend",
+      "head": "fix/flowgraph-event-driven",
+      "head_sha": "da5f62872133e514d61e9deec0a5a9fa0efb739d"
+    },
+    {
+      "number": 19,
+      "url": "https://github.com/kbob3687-hub/LuminaLit/pull/19",
+      "state": "open",
+      "merged": false,
+      "base": "main",
+      "head": "feat/frontend",
+      "head_sha": "8808661a433b489bd5fd9e38272c87fe7b881f0d"
+    }
+  ],
+  "decisions": [
+    "Use #32-#36 contracts and evidence panels with the user-approved #31 topology, particles and action flow. RunScene routes to one combined RunConsole implementation.",
+    "Merged PRs #37–#39 were merged into feature branches, not main.",
+    "Preserve the original workspace and its unrelated files; integration stays in an isolated worktree.",
+    "No GitHub PR was merged, closed, retargeted, or commented on."
+  ],
+  "integration_changes": [
+    "Consume RunResult.replay/bundle without upgrading verified to complete success.",
+    "Display real metric values in result and replay panels.",
+    "Handle blocked/incomplete bundle items and 409 corruption in-page; only successful ZIP responses trigger download.",
+    "Restrict evidence and bundle links to the current run's exact endpoints.",
+    "Use the same overall conclusion in run, result, and report views.",
+    "Label installed packages as an environment snapshot rather than dependency changes.",
+    "Remove unsupported parent_run_id copy and preserve explicit demo behavior.",
+    "Restore FlowGraph, ActionRowItem and ParticleField from #31 (6c1db33), extending topology with independent verification, clean replay and result report.",
+    "Use full event counts, structured validation outcomes, keyboard activation, focus restoration and reduced-motion support. Restore the cool-blue palette and compact homepage."
+  ],
+  "checks": [
+    {
+      "name": "Python regression excluding separately executed Docker modules",
+      "result": "595 passed, 16 skipped"
+    },
+    {
+      "name": "Real Docker sandbox and independent verifier",
+      "result": "18 passed, 1 skipped"
+    },
+    {
+      "name": "Real Docker frozen-material replay and ZIP download",
+      "result": "2 passed",
+      "notes": "Local Git fixtures and scripted model; not real LLM or paper reproduction evidence."
+    },
+    {
+      "name": "Frontend unit tests",
+      "result": "13 passed"
+    },
+    {
+      "name": "Browser contract scenarios",
+      "result": "13 passed",
+      "notes": "Playwright with system Edge and fixed API fixtures; not backend scientific validation."
+    },
+    {
+      "name": "TypeScript + Vite build",
+      "result": "passed"
+    },
+    {
+      "name": "Ruff src/tests and Git whitespace checks",
+      "result": "passed"
+    }
+  ],
+  "retained_failures": [
+    "Initial real Docker fixture had CRLF normalization noise; fixture now writes LF and configures checkout explicitly.",
+    "An earlier unchanged-case replay returned verification_error (blocked); final repeated Docker run passed both cases. No claim of stability across all trials.",
+    "Actual PySINDy public-repository run 9992c6f834094278a2366f7a5f6e4b72 failed in clone with RPC/curl connection termination and early EOF; numerical verification did not run."
+  ],
+  "remaining": [
+    "Review and reconcile branch ancestry with origin/main before a production merge; do not blindly merge both UI chains.",
+    "Per-target allowed_actions production wiring remains an existing #40 follow-up; default protected-file policy is present.",
+    "Detailed backend health checks and all proposed budget/finalization fields are not implemented here; UI retains honest fallbacks.",
+    "Real LLM repair acceptance, scientific flagship case, and public deployment remain separate milestones."
+  ],
+  "preview": {
+    "frontend": "http://127.0.0.1:5187",
+    "api": "http://127.0.0.1:8013",
+    "sandbox": "docker",
+    "agent": "fake",
+    "api_running_at_visual_handoff": false,
+    "visual_preview": "http://127.0.0.1:5187/?demo=1&scene=run"
+  }
+}

@@ -60,6 +60,13 @@ async function responseError(res: Response): Promise<ApiError> {
   }
   if (!code && res.status === 429) code = "queue_full";
   if (!message && code === "queue_full") message = "当前等待任务较多，请稍后重试。";
+  const bundleErrors: Record<string, string> = {
+    bundle_corrupted: "材料包校验失败，文件可能已被修改或截断。本次未下载，请重新运行生成材料。",
+    bundle_incomplete: "复跑材料尚不完整，暂时无法下载。已有报告与验证证据仍可查看。",
+    bundle_blocked: "材料导出受阻，请查看材料清单中的原因。已有验证证据仍然保留。",
+    bundle_not_ready: "材料包尚未生成，请稍后重试。",
+  };
+  if (!message && code) message = bundleErrors[code];
   return new ApiError(message || code || `HTTP ${res.status}`, res.status, code);
 }
 
@@ -194,7 +201,19 @@ export function getVerification(runId: string) {
 export function bundleDownloadUrl(runId: string | null | undefined, bundle: BundleResult | null | undefined): string | null {
   if (!bundle || bundle.integrity !== "complete" || !bundle.url) return null;
   if (!runId || !/^[0-9a-f]{32}$/.test(runId)) return null;
-  // 只接受服务端给出的同源相对路径，拒绝绝对 URL、协议或 .. 逃逸。
-  if (!bundle.url.startsWith(`/api/runs/${runId}/`)) return null;
+  // 只允许本次运行的固定下载端点，包括拒绝同前缀下的 ../ 或查询参数。
+  if (bundle.url !== `/api/runs/${runId}/bundle`) return null;
   return `${BASE}${bundle.url}`;
+}
+
+/** 先检查 HTTP 结果，再保存二进制文件；409 JSON 不能被另存为 ZIP。 */
+export async function fetchBundle(runId: string | null, bundle: BundleResult | null | undefined, signal?: AbortSignal): Promise<Blob> {
+  const url = bundleDownloadUrl(runId, bundle);
+  if (!url) throw new Error("当前没有完整且可下载的复跑材料。");
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw await responseError(res);
+  if (res.headers.get("Content-Type")?.split(";")[0].trim() !== "application/zip") {
+    throw new Error("服务返回的不是 ZIP 材料包，本次未下载，请稍后重试。");
+  }
+  return res.blob();
 }

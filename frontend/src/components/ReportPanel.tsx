@@ -3,6 +3,8 @@ import clsx from "clsx";
 import { ApiError, getPatch, getReport } from "../api";
 import type { RunStatus } from "../types";
 import { VerificationPanel } from "./VerificationPanel";
+import { ReplayPanel } from "./ReplayPanel";
+import { overallConclusion } from "../runModel";
 import { guidanceOf } from "./RunSceneParts";
 import { parseTab, type TabId } from "../deepLink";
 
@@ -35,7 +37,8 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
   const result = status?.result ?? null;
   const terminal = Boolean(status && ["succeeded", "failed", "cancelled"].includes(status.state));
   const guidance = status ? guidanceOf(status, false) : undefined;
-  const tone = guidance?.tone ?? "neutral";
+  const conclusion = overallConclusion(status, false);
+  const tone = terminal && result ? conclusion.tone : guidance?.tone ?? "neutral";
   // result.json 直接来自轮询，不重新请求或改写结果字段。
   const jsonText = result ? JSON.stringify(result, null, 2) : "";
 
@@ -55,7 +58,7 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
           tone === "success" ? "text-pass" : tone === "error" ? "text-reject"
             : tone === "warning" ? "text-warn" : "text-ink",
         )}>
-          {guidance?.title ?? (terminal ? (result ? "运行已结束" : "正在整理运行报告") : "运行结果将在结束后生成")}
+          {terminal && result ? conclusion.label : guidance?.title ?? "运行结果将在结束后生成"}
         </h3>
         {guidance?.detail && (
           <p className="mt-2 text-[13px] leading-relaxed text-ink-mid">{guidance.detail}</p>
@@ -81,6 +84,7 @@ export function ReportPanel({ runId, status }: { runId: string | null; status: R
       </div>
 
       {result && <VerificationPanel verification={result.verification} runId={runId === result.run_id ? runId : null} />}
+      {result && <ReplayPanel result={result} runId={runId === result.run_id ? runId : null} />}
 
       <details
         open={filesOpen}

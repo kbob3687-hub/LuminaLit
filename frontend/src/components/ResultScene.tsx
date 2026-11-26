@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import clsx from "clsx";
-import { bundleConclusion, overallConclusion, replayConclusion, VERIFICATION_TYPES } from "../runModel";
+import { bundleConclusion, overallConclusion, replayConclusion, verificationEvidencePath, VERIFICATION_TYPES } from "../runModel";
 import { bundleDownloadUrl, getEnvironment } from "../api";
+import { BundleDownload } from "./BundleDownload";
 import { ReplayPanel } from "./ReplayPanel";
 import type { EnvironmentManifest, RunStatus } from "../types";
 
@@ -56,12 +57,14 @@ function DownloadRow({ label, href, available, note }: { label: string; href: st
   );
 }
 
-export function ResultScene({ status, runId, onBack, onNewRun, onTechnical }: {
+export function ResultScene({ status, runId, onBack, onNewRun, onTechnical, isDemo = false }: {
   status: RunStatus | null;
   runId: string | null;
   onBack: () => void;
   onNewRun: () => void;
   onTechnical: () => void;
+  /** 离线回放：结论与下载都必须标成示例，不冒称真实运行（评审稿 §11.2）。 */
+  isDemo?: boolean;
 }) {
   const result = status?.result ?? null;
   const [env, setEnv] = useState<EnvironmentManifest | null>(null);
@@ -72,14 +75,14 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical }: {
     let cancelled = false;
     setEnv(null);
     setEnvError(false);
-    if (!runId || !RUN_ID_RE.test(runId)) return;
+    if (!runId || isDemo || !RUN_ID_RE.test(runId)) return;
     void getEnvironment(runId)
       .then((v) => { if (!cancelled) setEnv(v); })
       .catch(() => { if (!cancelled) setEnvError(true); });
     return () => { cancelled = true; };
-  }, [runId]);
+  }, [runId, isDemo]);
 
-  const overall = overallConclusion(status, false);
+  const overall = overallConclusion(status, isDemo);
   const verification = result?.verification ?? null;
   const replay = replayConclusion(result?.replay);
   const bundle = bundleConclusion(result?.bundle);
@@ -89,6 +92,7 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical }: {
   const patchUrl = safeRun && result?.patch_url ? `${API_BASE}/api/runs/${safeRun}/patch` : null;
   const envUrl = safeRun && (env || result?.environment_url) ? `${API_BASE}/api/runs/${safeRun}/environment` : null;
   const bundleUrl = bundleDownloadUrl(safeRun, result?.bundle);
+  const evidencePath = verificationEvidencePath(safeRun, verification?.evidence_url);
 
   const copyConfig = async () => {
     if (!result) return;
@@ -122,6 +126,11 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical }: {
         <header className="mb-2">
           <h1 className="text-3xl font-semibold tracking-tight text-ink">本次结果</h1>
           <p className="mt-2 text-sm leading-7 text-ink-mid">下面是本次运行实际记录的内容；未采集的字段显示为「未记录」，不会补造结果。</p>
+          {isDemo && (
+            <p role="status" className="mt-3 rounded-lg border border-warn/35 bg-warn/[.06] px-4 py-3 text-sm leading-7 text-warn">
+              这是离线预设回放，不代表本机执行或验证结果；下面的结论、证据与下载入口都只展示占位状态，不会生成真实文件。
+            </p>
+          )}
         </header>
 
         {/* 1. 结论及验证范围 */}
@@ -153,7 +162,7 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical }: {
             <>
               <Row label="结束原因" value={result.outcome} tone={result.outcome === "succeeded" ? "pass" : "error"} />
               <Row label="失败类别" value={result.failure_category ?? verification?.failure_category ?? "无（或后端未记录）"} />
-              <Row label="修复轮次" value={String(result.attempts)} />
+              <Row label="运行尝试次数" value={String(result.attempts)} />
               <p className="mt-3 text-sm leading-7 text-ink-mid">{verification?.summary ?? guidance?.detail ?? "后端没有下发可读的运行说明；可查看技术详情里的原始事件。"}</p>
             </>
           ) : <Missing text="结果尚未落盘，暂时无法说明原始失败或原仓库状态。" />}
@@ -162,7 +171,7 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical }: {
         {/* 3. 修改了什么：代码 / 依赖 / 允许的环境变量分开列 */}
         <Section n={3} title="修改了什么">
           <Row label="代码变更" value={result?.patch_url ? "已生成补丁（可在下方下载）" : "无补丁或后端未记录"} />
-          <Row label="依赖变化" value={env?.packages?.length ? `${env.packages.length} 项已采集` : envError ? "环境清单尚未生成" : "未采集"} />
+          <Row label="已安装依赖" value={env?.packages?.length ? `${env.packages.length} 项已采集（完整环境清单，非修复增量）` : envError ? "环境清单尚未生成" : "未采集"} />
           <Row label="允许的环境变量" value={env?.environment ? `${Object.keys(env.environment).length} 项已采集` : "未采集"} />
           <Row label="产物与源码变更" value={result?.bundle ? "在材料清单中分开记录" : "未记录"} />
           <p className="mt-3 text-xs leading-6 text-ink-muted">环境清单只显示脱敏后的变量名与包信息；密钥、代理凭据和宿主路径不会进入结果或下载材料。</p>
@@ -170,6 +179,15 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical }: {
 
         {/* 4. 哪些检查通过 / 失败 / 未执行，以及证据 */}
         <Section n={4} title="检查项与证据">
+          {verification && verification.metrics.length > 0 && (
+            <div className="mb-4" aria-label="本次实测指标">
+              {verification.metrics.map((metric, i) => (
+                <Row key={`${metric.name}:${i}`} label={metric.name}
+                  value={`${metric.observed}（要求 < ${metric.threshold}）`}
+                  tone={metric.passed ? "pass" : "error"} />
+              ))}
+            </div>
+          )}
           {verification && verification.checks.length > 0 ? (
             <ul className="divide-y divide-rule border-y border-rule">
               {verification.checks.map((c, i) => (
@@ -183,8 +201,8 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical }: {
               ))}
             </ul>
           ) : <Missing text="没有已记录的结构化检查项；不把日志里的一句 PASS 当作检查通过。" />}
-          {verification?.evidence_url && safeRun && (
-            <a href={`${API_BASE}${verification.evidence_url}`} download className="mt-3 inline-block text-sm text-accent underline underline-offset-4">下载本次核验输入 JSON</a>
+          {evidencePath && !isDemo && (
+            <a href={`${API_BASE}${evidencePath}`} download className="mt-3 inline-block text-sm text-accent underline underline-offset-4">下载本次核验输入 JSON</a>
           )}
           <button type="button" onClick={onTechnical} className="mt-3 block cursor-pointer text-sm text-ink-mid underline underline-offset-4 hover:text-ink">查看全部技术事件与原始错误</button>
         </Section>
@@ -194,14 +212,20 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical }: {
           <p className={clsx("text-sm font-medium", replay.tone === "success" ? "text-pass" : replay.tone === "error" ? "text-reject" : replay.tone === "warning" ? "text-warn" : "text-ink-mid")}>{replay.label}</p>
           <p className="mt-1 text-xs leading-6 text-ink-mid">材料完整性：{bundle.label}（与复跑通过与否是两个独立结论）。</p>
         </Section>
-        <ReplayPanel result={result} runId={safeRun} />
+        <ReplayPanel result={result} runId={safeRun} isDemo={isDemo} />
 
         {/* 6. 下载报告、补丁、环境信息和复跑材料 */}
         <Section n={6} title="下载">
-          <DownloadRow label="结果报告" href={reportUrl} available={Boolean(reportUrl)} note="后端收尾时写入的 report.md 原文" />
-          <DownloadRow label="补丁" href={patchUrl} available={Boolean(patchUrl)} note="无改动时为空补丁，是正常结果" />
-          <DownloadRow label="环境信息" href={envUrl} available={Boolean(envUrl)} note="已采集的 Python、镜像、依赖与允许环境变量" />
-          <DownloadRow label="复跑材料" href={bundleUrl} available={Boolean(bundleUrl)} note={bundle.downloadable ? "完整性已通过，仅含声明范围内的相对路径" : "材料不完整或被阻止，不提供下载"} />
+          <DownloadRow label="结果报告" href={reportUrl} available={Boolean(reportUrl) && !isDemo} note="后端收尾时写入的 report.md 原文" />
+          <DownloadRow label="补丁" href={patchUrl} available={Boolean(patchUrl) && !isDemo} note="无改动时为空补丁，是正常结果" />
+          <DownloadRow label="环境信息" href={envUrl} available={Boolean(envUrl) && !isDemo} note="已采集的 Python、镜像、依赖与允许环境变量" />
+          {bundleUrl && !isDemo ? (
+            <div className="py-2.5 text-sm">
+              <p className="text-ink">复跑材料</p>
+              <p className="mt-0.5 text-xs leading-6 text-ink-muted">完整性已通过；下载时再次核对服务端文件。</p>
+              <BundleDownload runId={safeRun} bundle={result?.bundle} />
+            </div>
+          ) : <DownloadRow label="复跑材料" href={null} available={false} note="材料不完整或被阻止，不提供下载" />}
         </Section>
 
         {/* 7. 可执行的下一步 */}
@@ -215,7 +239,7 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical }: {
             <button type="button" onClick={onNewRun} className="cursor-pointer rounded-md bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent/85">补充条件后新建运行</button>
             <button type="button" onClick={() => void copyConfig()} className="cursor-pointer rounded-md border border-rule-hi px-4 py-2 text-sm text-ink-mid hover:text-ink">{copied ? "已复制" : "复制运行配置"}</button>
           </div>
-          <p className="mt-2 text-xs leading-6 text-ink-muted">补充资料或更换计划会创建带 parent_run_id 的新运行，不覆盖旧记录，也不伪装成原运行无缝恢复。</p>
+          <p className="mt-2 text-xs leading-6 text-ink-muted">返回选择页补充条件，再创建新的运行；已有记录保留。</p>
         </Section>
       </div>
     </main>

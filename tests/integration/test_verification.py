@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock
@@ -23,6 +25,25 @@ ROOT = Path(__file__).resolve().parents[2]
 GOOD = json.dumps({
     "schema_version": 1, "coefficients": [[0, -2, 0, 0, 0, 0], [0, 0, 1, 0, 0, 0]],
 }).encode()
+_GIT_ENV = {
+    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+    "PATH": os.environ.get("PATH", ""),
+}
+
+
+def _init_repo(workspace: Path) -> None:
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "main.py").write_bytes(b"print('base')\n")
+    (workspace / "requirements.txt").write_bytes(b"numpy\n")
+    for args in (
+        ("init", "-q"), ("add", "-A"),
+        ("-c", "core.autocrlf=false", "commit", "-q", "-m", "base"),
+    ):
+        subprocess.run(
+            ["git", "-C", str(workspace), *args], check=True,
+            capture_output=True, text=True, timeout=30, env=_GIT_ENV,
+        )
 
 
 def make_run(tmp_path, *, output=GOOD, result_status="passed", stale=False, cleanup_error=False):
@@ -52,6 +73,7 @@ def make_run(tmp_path, *, output=GOOD, result_status="passed", stale=False, clea
         return session
 
     def cloner(request, run_dir):
+        _init_repo(run_dir / "workspace")
         if stale:
             (run_dir / "workspace" / "coefficients.json").write_bytes(GOOD)
         return target.revision
@@ -89,14 +111,19 @@ def test_confirmed_task_verifies_only_after_producer_stops(tmp_path):
     result = runner.run(run_id, record.request)
     assert result.verified and result.verification.level == "target"
     assert result.verification.status == "passed"
-    assert calls == [GOOD]
-    assert sessions[0].closed
+    assert result.replay is not None and result.replay.status == "passed"
+    assert calls == [GOOD, GOOD]
+    assert len(sessions) == 2 and all(session.closed for session in sessions)
     assert result.verification.artifact_sha256 == hashlib.sha256(GOOD).hexdigest()
     assert result.verification.validator_digest == record.view.verification.validator_digest
     assert store.read_status(run_id)["state"] == "succeeded"
     events = store.read_events(run_id)
-    assert [e.kind for e in events][-3:] == ["verification_started", "verification", "final"]
-    assert events[-2].state == RunState.VERIFYING
+    kinds = [event.kind for event in events]
+    assert kinds[-2:] == ["bundle_ready", "final"]
+    assert kinds.index("verification") < kinds.index("replay_started")
+    assert kinds.index("replay_started") < kinds.index("replay_finished")
+    assert kinds.index("replay_finished") < kinds.index("bundle_ready")
+    assert next(e for e in events if e.kind == "verification").state == RunState.VERIFYING
     assert json.loads(store.read_text(run_id, "verification.json")) == result.verification.model_dump(mode="json")
     assert "target/passed" in store.read_text(run_id, "report.md")
     assert record.view.verification.source.startswith("维护者")
@@ -209,7 +236,7 @@ def test_evidence_api_returns_snapshot_not_mutable_workspace(tmp_path):
     assert response.headers["x-content-type-options"] == "nosniff"
     assert "attachment" in response.headers["content-disposition"]
     status = client.get(f"/api/runs/{run_id}").json()
-    assert status["guidance"]["title"] == "指定任务指标达标"
+    assert status["guidance"]["title"] == "指定等级通过，干净复跑通过"
     (store.run_dir(run_id) / "verification-input.json").write_text("corrupted")
     assert client.get(result.verification.evidence_url).status_code == 409
     assert client.get("/api/runs/missing/verification").status_code == 404

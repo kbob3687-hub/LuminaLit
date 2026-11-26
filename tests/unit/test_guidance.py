@@ -3,7 +3,15 @@ from datetime import UTC, datetime
 import pytest
 
 from paperharness.app.guidance import build_run_guidance, explain_event
-from paperharness.contracts.run import EventExplanation, RunEvent, RunGuidance, RunResult, RunState
+from paperharness.contracts.run import (
+    EventExplanation,
+    ReplayResult,
+    RunEvent,
+    RunGuidance,
+    RunResult,
+    RunState,
+)
+from paperharness.contracts.verification import VerificationResult
 
 
 def event(kind, data=None, message="technical detail", state=RunState.REPAIRING, sequence=1):
@@ -18,6 +26,77 @@ def result(category=None, outcome="failed"):
         run_id="run", outcome=outcome, verified=outcome == "succeeded",
         attempts=9, failure_category=category, report_url="/report",
     )
+
+
+def verified_result(outcome="failed", category=None, replay=None):
+    return RunResult(
+        run_id="run", outcome=outcome, verified=True, attempts=1,
+        failure_category=category, report_url="/report",
+        verification=VerificationResult(
+            level="target", status="passed", summary="固定系数指标达标"
+        ),
+        replay=replay,
+    )
+
+
+def test_success_with_clean_replay_is_full_success():
+    guidance = build_run_guidance(
+        RunState.SUCCEEDED,
+        verified_result("succeeded", replay=ReplayResult(status="passed")),
+        [],
+    )
+
+    assert guidance.title == "指定等级通过，干净复跑通过"
+    assert guidance.tone == "success"
+    assert "同一验收规则" in guidance.detail
+    assert any("复跑材料" in step for step in guidance.next_steps)
+
+
+def test_success_without_replay_is_labelled_trial():
+    guidance = build_run_guidance(
+        RunState.SUCCEEDED,
+        verified_result("succeeded", replay=ReplayResult(status="not_requested")),
+        [],
+    )
+
+    assert guidance.title == "试跑通过，未验证可复跑性"
+    assert "未进行干净环境复跑" in guidance.detail
+
+
+def test_replay_failure_keeps_current_verification_evidence():
+    guidance = build_run_guidance(
+        RunState.FAILED,
+        verified_result(
+            "failed", "replay_failed",
+            ReplayResult(status="failed", reason="metric_failed"),
+        ),
+        [],
+    )
+
+    assert guidance.title == "当前运行通过，干净复跑失败"
+    assert guidance.tone == "error"
+    assert "本次环境已达到声明指标" in guidance.detail
+    assert "不会自动" in guidance.next_steps[0]
+
+
+@pytest.mark.parametrize("reason, marker", [
+    ("replay_material_incomplete", "冻结材料不完整"),
+    ("replay_clone_failed", "代码检出失败"),
+    ("replay_verifier_error", "验收器发生故障"),
+])
+def test_replay_blocked_explains_condition(reason, marker):
+    guidance = build_run_guidance(
+        RunState.FAILED,
+        verified_result(
+            "failed", "replay_blocked",
+            ReplayResult(status="blocked", reason=reason),
+        ),
+        [],
+    )
+
+    assert guidance.title == "当前运行通过，复跑条件不足"
+    assert guidance.tone == "warning"
+    assert marker in guidance.detail
 
 
 @pytest.mark.parametrize("category, title", [

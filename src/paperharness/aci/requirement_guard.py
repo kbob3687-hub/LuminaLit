@@ -7,7 +7,6 @@
 from packaging.requirements import InvalidRequirement, Requirement
 
 FORBIDDEN_SUBSTRINGS = ("\n", "\r", ";", "&&", "|", "`", "$(")
-_FORBIDDEN_SUBSTRINGS = FORBIDDEN_SUBSTRINGS
 
 
 class RequirementNotAllowed(Exception):

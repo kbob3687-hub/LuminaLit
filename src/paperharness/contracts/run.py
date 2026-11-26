@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, JsonValue, field_validator
 
+from paperharness.contracts.bundle import BundleResult
 from paperharness.contracts.verification import VerificationResult
 
 # 已知不可能是 Git 仓库的 host：收单后必然 clone_failed，在 API 边界直接拒掉。
@@ -75,9 +76,42 @@ class RunState(StrEnum):
     DIAGNOSING = "diagnosing"
     REPAIRING = "repairing"
     VERIFYING = "verifying"
+    REPLAYING = "replaying"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class ReplayStatus(StrEnum):
+    NOT_REQUESTED = "not_requested"
+    PENDING = "pending"
+    RUNNING = "running"
+    PASSED = "passed"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+
+
+class ReplayCheck(BaseModel):
+    name: str
+    status: Literal["passed", "failed", "blocked", "not_run"]
+    detail: str
+
+
+class ReplayResult(BaseModel):
+    status: ReplayStatus
+    reason: str | None = None
+    session_id: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    base_revision: str | None = None
+    repair_manifest_digest: str | None = None
+    image_digest: str | None = None
+    dataset_digest: str | None = None
+    dependency_digest: str | None = None
+    verification: VerificationResult | None = None
+    checks: list[ReplayCheck] = Field(default_factory=list)
+    differences: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
 
 
 class RunEvent(BaseModel):
@@ -134,6 +168,9 @@ class RunResult(BaseModel):
     environment_url: str | None = None
     report_url: str
     verification: VerificationResult | None = None
+    bundle: BundleResult | None = None
+    bundle_url: str | None = None
+    replay: ReplayResult | None = None
 
 
 class ReadFileAction(BaseModel):

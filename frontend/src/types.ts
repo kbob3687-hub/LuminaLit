@@ -96,8 +96,7 @@ export interface ReplayCheck {
  * `ReplayResult`（评审稿 §7.4 / §8.6）：新会话、原始 commit、冻结修复清单、
  * 镜像/数据/依赖摘要、同一规则下的每项验证结果与不一致原因。
  *
- * 全部字段可选：本轮后端尚未下发复跑记录（#30 仍是开放缺口），历史 run
- * 更不会补造。界面必须按「未下发」显示，不能拿 verified 或 state 猜一个。
+ * 旧记录可能缺少这些字段；缺失时不能拿 verified 或 state 推断复跑结论。
  */
 export interface ReplayResult {
   status: ReplayStatus;
@@ -122,6 +121,8 @@ export type BundleIntegrity = "complete" | "incomplete" | "blocked";
 
 export interface BundleResult {
   integrity: BundleIntegrity;
+  items?: Array<{ path: string; kind: "source" | "artifact" | "metadata"; status: "included" | "missing" | "blocked"; reason: string | null; size: number; sha256: string | null }>;
+  total_bytes?: number;
   /** 只有 integrity=complete 且压缩包写入完成，后端才会给可下载 URL。 */
   url: string | null;
   sha256: string | null;
@@ -207,6 +208,7 @@ export interface RunResult {
   /** 以下为评审稿 §9.2 的增量字段，旧记录一律没有，界面按「未记录」处理。 */
   replay?: ReplayResult | null;
   bundle?: BundleResult | null;
+  bundle_url?: string | null;
   effective_plan_digest?: string | null;
   code_under_test?: string | null;
   budget_usage?: BudgetUsage | null;

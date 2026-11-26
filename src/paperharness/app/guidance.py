@@ -148,6 +148,16 @@ _UNKNOWN_FAILURE = (
     "具体失败原因尚未确认，现有记录不足以给出可靠结论。",
     ("打开最后的失败步骤详情，核对运行命令和错误信息；携带任务编号请维护者协助定位。",),
 )
+_REPLAY_REASONS = {
+    "replay_material_incomplete": "复跑所需的冻结材料不完整。",
+    "replay_clone_failed": "复跑代码检出失败。",
+    "replay_sandbox_unavailable": "复跑运行环境不可用。",
+    "replay_verifier_error": "复跑验收器发生故障。",
+    "replay_error": "复跑阶段发生未预期错误。",
+    "not_started_before_termination": "任务在复跑开始前已终止。",
+    "budget_exceeded": "复跑阶段总预算已耗尽。",
+    "cancelled": "复跑阶段收到取消请求。",
+}
 _TERMINAL = {RunState.SUCCEEDED, RunState.FAILED, RunState.CANCELLED}
 _CHANGES = {"replace_exact", "install_requirement", "set_environment"}
 _ACTIONS = {
@@ -353,11 +363,29 @@ def build_run_guidance(
     if state == RunState.SUCCEEDED:
         if result and result.verification and result.verification.status == "passed":
             target_passed = result.verification.level == "target"
+            replay_passed = result.replay is not None and result.replay.status == "passed"
+            if target_passed and replay_passed:
+                steps = ["下载复跑材料，核对冻结清单、产物哈希与复跑检查项。"]
+                if result.bundle is not None and result.bundle.integrity != "complete":
+                    steps.append("复跑已通过，但材料尚未完整交付；查看缺项说明后重试打包。")
+                return guidance(
+                    "指定等级通过，干净复跑通过",
+                    result.verification.summary
+                    + "；同一冻结清单在干净环境中按同一验收规则通过。",
+                    "success", tuple(steps),
+                )
+            if target_passed:
+                return guidance(
+                    "试跑通过，未验证可复跑性",
+                    result.verification.summary + "；未进行干净环境复跑，不等于完整复现论文。",
+                    "success",
+                    ("查看验收检查项、实测指标和原始证据；仅对本次声明的小任务成立。",),
+                )
             return guidance(
-                "指定任务指标达标" if target_passed else "程序运行通过",
+                "程序运行通过",
                 result.verification.summary + "；未进行干净环境复跑，不等于完整复现论文。",
-                "success", ("查看验收检查项、实测指标和原始证据；仅对本次声明的小任务成立。",)
-                if target_passed else ("当前只完成执行检查，尚未独立验证科研指标。",),
+                "success",
+                ("当前只完成执行检查，尚未独立验证科研指标。",),
             )
         return guidance(
             "本次验证通过", "仅通过本次设置的验证条件，不等于完整复现论文或确认论文结论。", "success",
@@ -379,6 +407,26 @@ def build_run_guidance(
                     and not last_test.data.get("timed_out") and plan
                     and plan.data.get("expected_artifact")):
                 category = "artifact_missing"
+        if (
+            result and result.verified and result.replay is not None
+            and category in {"replay_failed", "replay_blocked"}
+        ):
+            reason = _REPLAY_REASONS.get(result.replay.reason or "", "")
+            if category == "replay_failed":
+                return guidance(
+                    "当前运行通过，干净复跑失败",
+                    "本次环境已达到声明指标，但同一冻结清单的改动在新目录、新容器中"
+                    "未通过同一验收；不能据此认定可复现。",
+                    "error",
+                    ("查看干净复跑的检查项和指标实测值；本次验收证据仍保留，系统不会自动开启第二轮修复。",),
+                )
+            return guidance(
+                "当前运行通过，复跑条件不足",
+                "本次环境已达到声明指标，但干净复跑未完成，"
+                "尚不能判断改动在其他环境中是否有效。" + reason,
+                "warning",
+                ("查看复跑检查项与缺项说明；补齐冻结材料、依赖源或恢复运行环境后重新提交。",),
+            )
         title, detail, steps = _failure(category, failure_event)
         if result and result.outcome == "budget_exceeded" and category != "time_budget_exhausted":
             detail += "本次自动尝试预算已用完，未继续修复。"

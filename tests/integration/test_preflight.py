@@ -20,6 +20,8 @@ from paperharness.app.api import create_app
 from paperharness.contracts.preflight import PreflightResult
 from paperharness.contracts.run import RunState
 from paperharness.harness import preflight as preflight_module
+from paperharness.harness import runner as runner_module
+from paperharness.harness.bundle import ManifestBuildError
 from paperharness.harness.preflight import MAX_TARGET_FILE_BYTES, PreflightRecord
 from paperharness.harness.runner import INSTALL_COMMAND, HarnessRunner
 from paperharness.harness.store import RunStore
@@ -55,6 +57,11 @@ def harness(tmp_path, monkeypatch):
 
     monkeypatch.setattr(socket, "create_connection", forbidden_io)
     monkeypatch.setattr(subprocess, "run", forbidden_io)
+    monkeypatch.setattr(
+        runner_module,
+        "build_repair_manifest",
+        Mock(side_effect=ManifestBuildError("preflight fixture has no git workspace")),
+    )
     source_dir = tmp_path / "private-target"
     source_dir.mkdir()
     (source_dir / "check.py").write_bytes(CHECK_BYTES)

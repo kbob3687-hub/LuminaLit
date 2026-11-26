@@ -1,18 +1,31 @@
 import json
 import subprocess
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
+from paperharness.aci.paper_aci import PaperACI
 from paperharness.agent.fake import FakeLLM
-from paperharness.contracts.run import ExecResult, RunRequest, RunState
+from paperharness.contracts.run import (
+    ExecResult,
+    FinishRepairAction,
+    RunPlan,
+    RunRequest,
+    RunState,
+    SetEnvironmentAction,
+)
 from paperharness.harness import runner as runner_mod
 from paperharness.harness.runner import INSTALL_COMMAND, HarnessRunner, git_clone
 from paperharness.harness.store import RunStore
+from paperharness.sandbox.base import SandboxUnavailableError
 from paperharness.sandbox.fake import FakeSandboxSession
 
 
-def make_runner(tmp_path, results=None, artifact_path=None, cloner=None, factory=None):
+def make_runner(
+    tmp_path, results=None, artifact_path=None, cloner=None, factory=None, llm=None,
+    aci_factory=None,
+):
     store = RunStore(tmp_path)
 
     def default_factory(request, run_dir):
@@ -27,9 +40,10 @@ def make_runner(tmp_path, results=None, artifact_path=None, cloner=None, factory
 
     runner = HarnessRunner(
         store=store,
-        llm=FakeLLM(),
+        llm=llm or FakeLLM(),
         sandbox_factory=factory or default_factory,
         cloner=cloner or default_cloner,
+        aci_factory=aci_factory,
     )
     return runner, store
 
@@ -390,6 +404,82 @@ def test_install_network_restored_off_when_execute_raises(tmp_path):
     assert result.failure_category == "timeout"
     # install 抛异常后网络必须回到断网，不许留在开态
     assert holder[0].network_state is False
+
+
+def test_repair_records_whitelisted_environment_value(tmp_path):
+    runner, store = make_runner(
+        tmp_path / "runs",
+        results=[ExecResult(
+            exit_code=0, timed_out=False, duration_ms=1,
+            stdout_path="logs/t.out", stderr_path="logs/t.err",
+        )],
+        llm=FakeLLM(actions=[
+            SetEnvironmentAction(action="set_environment", name="OMP_NUM_THREADS", value="1"),
+            FinishRepairAction(action="finish_repair", summary="set thread count"),
+        ]),
+        aci_factory=PaperACI,
+    )
+    request = RunRequest(
+        repo_url="https://github.com/a/b", command=["python", "main.py"], max_repairs=1,
+    )
+    run_id = store.create_run(request)
+    workspace = store.run_dir(run_id) / "workspace"
+    session = FakeSandboxSession(workspace=workspace)
+    plan = RunPlan(
+        resolved_revision="a" * 40, python_version="3.10", command=request.command, source="user",
+    )
+    failure = ExecResult(
+        exit_code=1, timed_out=False, duration_ms=1,
+        stdout_path="logs/f.out", stderr_path="logs/f.err", stderr_tail="boom",
+    )
+
+    healed = runner._self_heal(
+        run_id, request, session, workspace, plan, failure, "test", [0],
+        runner_mod.time.monotonic() + 60,
+    )
+
+    assert healed["verified"] is True
+    event = next(event for event in store.read_events(run_id) if event.kind == "set_environment")
+    assert event.data["env_name"] == "OMP_NUM_THREADS"
+    assert event.data["env_value"] == "1"
+
+
+def test_declared_install_keeps_nonzero_result_when_network_restore_fails(tmp_path):
+    runner, store = make_runner(tmp_path)
+    request = RunRequest(repo_url="https://github.com/a/b", command=["python", "main.py"])
+    run_id = store.create_run(request)
+    install = ExecResult(
+        exit_code=1, timed_out=False, duration_ms=1,
+        stdout_path="logs/i.out", stderr_path="logs/i.err", stderr_tail="install failed",
+    )
+    session = FakeSandboxSession()
+    session.execute = Mock(return_value=install)
+    session.set_network = Mock(side_effect=[None, SandboxUnavailableError("restore failed")])
+
+    result = runner._run_declared_install(
+        run_id, request, session, ["repair-dependency==1.0"],
+        runner_mod.time.monotonic() + 60,
+    )
+
+    assert result is install
+    assert session.set_network.call_args_list == [((True,),), ((False,),)]
+
+
+def test_declared_install_preserves_original_execute_error(tmp_path):
+    runner, store = make_runner(tmp_path)
+    request = RunRequest(repo_url="https://github.com/a/b", command=["python", "main.py"])
+    run_id = store.create_run(request)
+    session = FakeSandboxSession()
+    session.execute = Mock(side_effect=SandboxUnavailableError("original execute failure"))
+    session.set_network = Mock(side_effect=[None, SandboxUnavailableError("restore failed")])
+
+    with pytest.raises(SandboxUnavailableError, match="original execute failure"):
+        runner._run_declared_install(
+            run_id, request, session, ["repair-dependency==1.0"],
+            runner_mod.time.monotonic() + 60,
+        )
+
+    assert session.set_network.call_args_list == [((True,),), ((False,),)]
 
 
 def test_git_clone_uses_shallow_http11_env_and_mirror_fallback(tmp_path, monkeypatch):

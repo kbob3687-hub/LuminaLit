@@ -13,6 +13,7 @@ from fastapi.responses import PlainTextResponse, Response
 
 from paperharness.app.guidance import build_run_guidance, explain_event
 from paperharness.app.worker import RunWorker
+from paperharness.contracts.bundle import BundleResult
 from paperharness.contracts.preflight import (
     ConfirmedRunRequest,
     DirectRunRequest,
@@ -274,6 +275,42 @@ def create_app(
             "Content-Disposition": 'attachment; filename="verification-input.json"',
             "X-Content-Type-Options": "nosniff",
         })
+
+    @app.get("/api/runs/{run_id}/bundle")
+    def get_bundle(run_id: str):
+        _read_status_or_404(run_id)
+        raw = store.read_text(run_id, "bundle.json")
+        if raw is None:
+            raise HTTPException(status_code=404, detail={"code": "bundle_not_ready"})
+        bundle = BundleResult.model_validate_json(raw)
+        if bundle.integrity != "complete":
+            # 材料不完整/被阻止：只给缺项清单，不提供误导性的部分下载。
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": f"bundle_{bundle.integrity}",
+                    "items": [item.model_dump(mode="json") for item in bundle.items
+                              if item.status != "included"],
+                },
+            )
+        path = store.run_dir(run_id) / "reproduce.zip"
+        if not path.is_file() or path.is_symlink():
+            raise HTTPException(status_code=409, detail={"code": "bundle_incomplete"})
+        raw = path.read_bytes()
+        # 落盘后仍可能被替换或截断：只提供与 bundle.json 记录一致的原始字节。
+        # total_bytes 是材料字节合计，不是压缩包大小，完整性以压缩包哈希为准。
+        if bundle.sha256 is None or hashlib.sha256(raw).hexdigest() != bundle.sha256:
+            raise HTTPException(status_code=409, detail={"code": "bundle_corrupted"})
+        return Response(
+            raw,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": 'attachment; filename="reproduce.zip"',
+                "X-Content-Type-Options": "nosniff",
+                "X-Bundle-Integrity": "complete",
+                "X-Bundle-SHA256": bundle.sha256,
+            },
+        )
 
     @app.get("/api/runs/{run_id}/environment")
     def get_environment(run_id: str):

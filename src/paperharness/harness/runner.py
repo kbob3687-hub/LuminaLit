@@ -12,10 +12,16 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from paperharness.aci.paper_aci import is_safe_environment_value
+from paperharness.aci.requirement_guard import RequirementNotAllowed, validate
 from paperharness.agent.classifier import UNREPAIRABLE, FailureContext, classify_by_rules
+from paperharness.contracts.bundle import BundleItem, BundleResult, RepairManifest
 from paperharness.contracts.run import (
     ExecResult,
     Observation,
+    ReplayCheck,
+    ReplayResult,
+    ReplayStatus,
     RunPlan,
     RunRequest,
     RunResult,
@@ -27,7 +33,18 @@ from paperharness.contracts.verification import (
     VerificationResult,
     VerificationSpec,
 )
+from paperharness.harness.bundle import (
+    ManifestBuildError,
+    build_repair_manifest,
+    manifest_digest,
+    pack_bundle,
+)
 from paperharness.harness.preflight import PreflightRecord
+from paperharness.harness.replay import (
+    ReplayMaterializationError,
+    apply_repair_manifest,
+    dependency_digest,
+)
 from paperharness.harness.requirements_guard import (
     RequirementsNotAllowed,
     validate_requirements_file,
@@ -61,6 +78,14 @@ class TimeBudgetExceeded(RuntimeError):
 
 class _RunCancelled(RuntimeError):
     """用户请求取消：在阶段边界抛出，由 run() 收敛到 CANCELLED 终态。"""
+
+
+class _ReplayBlocked(RuntimeError):
+    """复跑条件不足：用 blocked 记录原因，不把基础设施问题算成复跑失败。"""
+
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
 
 
 class _RequirementsRejected(RuntimeError):
@@ -434,6 +459,7 @@ class HarnessRunner:
         request: RunRequest | None = None,
         plan: RunPlan | None = None,
         resolved_revision: str | None = None,
+        replay: ReplayResult | None = None,
     ) -> RunResult:
         """CANCELLED 终态：不 export 不到的 patch 就留空，不留僵尸状态。"""
         verification = self._stored_verification(run_id)
@@ -447,6 +473,7 @@ class HarnessRunner:
             patch_url=f"/api/runs/{run_id}/patch",
             environment_url=f"/api/runs/{run_id}/environment",
             report_url=f"/api/runs/{run_id}/report",
+            replay=replay,
         )
         patch = ""
         if session is not None:
@@ -553,6 +580,8 @@ class HarnessRunner:
         confirmed_plan: RunPlan | None = None
         verification_rule: VerificationSpec | None = None
         last_test: ExecResult | None = None
+        repair_manifest: RepairManifest | None = None
+        replay_result = ReplayResult(status=ReplayStatus.NOT_REQUESTED)
         try:
             self._check_cancel(run_id)
             if confirmation_json:
@@ -795,7 +824,72 @@ class HarnessRunner:
             self._check_cancel(run_id)
             if verification_rule and time.monotonic() >= deadline:
                 raise TimeBudgetExceeded("total wall-clock budget exhausted during verification")
-            state = RunState.SUCCEEDED if verified else RunState.FAILED
+            if verification_rule:
+                repair_manifest = self._freeze_manifest(
+                    run_id, workspace, plan, plan.resolved_revision, request
+                )
+                if not verified:
+                    replay_result = ReplayResult(
+                        status=ReplayStatus.BLOCKED,
+                        reason="not_started_current_verification_failed",
+                    )
+                    self.store.write_text(
+                        run_id, "replay_result.json", replay_result.model_dump_json(indent=2)
+                    )
+                elif repair_manifest is None:
+                    replay_result = ReplayResult(
+                        status=ReplayStatus.BLOCKED,
+                        reason="repair_manifest_unavailable",
+                    )
+                    self.store.write_status(run_id, RunState.REPLAYING, {})
+                    self.store.write_text(
+                        run_id, "replay_result.json", replay_result.model_dump_json(indent=2)
+                    )
+                    self.store.append_event(
+                        run_id, RunState.REPLAYING, "replay_started",
+                        "clean-environment replay requested",
+                    )
+                    self.store.append_event(
+                        run_id, RunState.REPLAYING, "replay_finished",
+                        "repair manifest unavailable", replay_result.model_dump(mode="json"),
+                    )
+                else:
+                    # 先建结果对象再跑复跑：取消/预算在复跑中途抛出时，
+                    # 外层处理器仍能拿到已被标记为 blocked 的同一对象。
+                    replay_result = ReplayResult(
+                        status=ReplayStatus.RUNNING,
+                        session_id=f"replay-{run_id}",
+                        base_revision=repair_manifest.base_revision,
+                        repair_manifest_digest=manifest_digest(repair_manifest),
+                        dependency_digest=dependency_digest(repair_manifest),
+                        started_at=datetime.now(UTC),
+                        limitations=["当前任务未提供可核验的镜像摘要与数据文件摘要。"],
+                    )
+                    self._run_replay(
+                        run_id,
+                        request,
+                        plan,
+                        verification_rule,
+                        repair_manifest,
+                        workspace,
+                        verification,
+                        deadline,
+                        cancel,
+                        replay_result,
+                    )
+                if verified and replay_result.status is not ReplayStatus.PASSED:
+                    outcome = "failed"
+                    failure_category = (
+                        "replay_failed" if replay_result.status is ReplayStatus.FAILED
+                        else "replay_blocked"
+                    )
+            state = (
+                RunState.SUCCEEDED
+                if verified and replay_result.status in (
+                    ReplayStatus.PASSED, ReplayStatus.NOT_REQUESTED
+                )
+                else RunState.FAILED
+            )
             self.store.write_text(
                 run_id,
                 "report.md",
@@ -804,9 +898,15 @@ class HarnessRunner:
                 f"failure_category={failure_category}\n\n"
                 f"verification={verification.level}/{verification.status}\n"
                 f"{verification.summary}\n\n"
+                f"replay={replay_result.status.value}\n"
+                f"replay_reason={replay_result.reason}\n\n"
                 "```json\n" + verification.model_dump_json(indent=2) + "\n```\n",
             )
 
+            bundle = self._finalize_bundle(
+                run_id, workspace, plan, plan.resolved_revision, state,
+                request=request, manifest=repair_manifest,
+            )
             result = RunResult(
                 run_id=run_id,
                 outcome=outcome,
@@ -818,6 +918,9 @@ class HarnessRunner:
                 environment_url=f"/api/runs/{run_id}/environment",
                 report_url=f"/api/runs/{run_id}/report",
                 verification=verification,
+                bundle=bundle,
+                bundle_url=f"/api/runs/{run_id}/bundle",
+                replay=replay_result,
             )
             self.store.write_status(run_id, state, {"verified": verified})
             self.store.append_event(
@@ -836,6 +939,10 @@ class HarnessRunner:
             return self._fail(
                 run_id, "artifact_invalid", str(exc), session=session, request=request,
                 plan=plan, resolved_revision=resolved_revision, attempts=attempts_tracker[0],
+                replay=self._replay_on_termination(
+                    run_id, replay_result,
+                    required=verification_rule is not None, state=RunState.FAILED,
+                ),
             )
         except _RunCancelled:
             return self._cancelled(
@@ -845,6 +952,10 @@ class HarnessRunner:
                 request=request,
                 plan=plan,
                 resolved_revision=resolved_revision,
+                replay=self._replay_on_termination(
+                    run_id, replay_result,
+                    required=verification_rule is not None, state=RunState.CANCELLED,
+                ),
             )
         except TimeBudgetExceeded as exc:
             return self._fail(
@@ -857,6 +968,10 @@ class HarnessRunner:
                 plan=plan,
                 resolved_revision=resolved_revision,
                 attempts=attempts_tracker[0],
+                replay=self._replay_on_termination(
+                    run_id, replay_result,
+                    required=verification_rule is not None, state=RunState.FAILED,
+                ),
             )
         except _RequirementsRejected as exc:
             return self._fail(
@@ -868,6 +983,10 @@ class HarnessRunner:
                 plan=plan,
                 resolved_revision=resolved_revision,
                 attempts=attempts_tracker[0],
+                replay=self._replay_on_termination(
+                    run_id, replay_result,
+                    required=verification_rule is not None, state=RunState.FAILED,
+                ),
             )
         except SandboxClosedError as exc:
             if self._cancel_requested(run_id):
@@ -878,6 +997,10 @@ class HarnessRunner:
                     request=request,
                     plan=plan,
                     resolved_revision=resolved_revision,
+                    replay=self._replay_on_termination(
+                        run_id, replay_result,
+                        required=verification_rule is not None, state=RunState.CANCELLED,
+                    ),
                 )
             return self._fail(
                 run_id,
@@ -888,6 +1011,10 @@ class HarnessRunner:
                 plan=plan,
                 resolved_revision=resolved_revision,
                 attempts=attempts_tracker[0],
+                replay=self._replay_on_termination(
+                    run_id, replay_result,
+                    required=verification_rule is not None, state=RunState.FAILED,
+                ),
             )
         except SandboxUnavailableError as exc:
             if self._cancel_requested(run_id):
@@ -898,6 +1025,10 @@ class HarnessRunner:
                     request=request,
                     plan=plan,
                     resolved_revision=resolved_revision,
+                    replay=self._replay_on_termination(
+                        run_id, replay_result,
+                        required=verification_rule is not None, state=RunState.CANCELLED,
+                    ),
                 )
             return self._fail(
                 run_id,
@@ -908,6 +1039,10 @@ class HarnessRunner:
                 plan=plan,
                 resolved_revision=resolved_revision,
                 attempts=attempts_tracker[0],
+                replay=self._replay_on_termination(
+                    run_id, replay_result,
+                    required=verification_rule is not None, state=RunState.FAILED,
+                ),
             )
         finally:
             if session is not None:
@@ -957,6 +1092,37 @@ class HarnessRunner:
             run_id, RunState.VERIFYING, "verification_started", "independent verification started",
             {"rule_id": spec.rule_id, "validator_digest": spec.validator_digest},
         )
+        result = self._verify_workspace(
+            run_id,
+            request,
+            session,
+            spec,
+            deadline,
+            workspace=self.store.run_dir(run_id) / "workspace",
+            input_name="verification-input.json",
+            evidence_url=f"/api/runs/{run_id}/verification/input",
+            result_name="verification.json",
+        )
+        self.store.write_text(run_id, "verification.json", result.model_dump_json(indent=2))
+        self.store.append_event(
+            run_id, RunState.VERIFYING, "verification", result.summary,
+            result.model_dump(mode="json"),
+        )
+        return result
+
+    def _verify_workspace(
+        self,
+        run_id: str,
+        request: RunRequest,
+        session,
+        spec: VerificationSpec,
+        deadline: float,
+        *,
+        workspace: Path,
+        input_name: str,
+        evidence_url: str | None,
+        result_name: str | None = None,
+    ) -> VerificationResult:
         result = VerificationResult(
             level="target", status="blocked", summary="独立指标验收尚未完成",
             rule_id=spec.rule_id, validator_digest=spec.validator_digest,
@@ -964,7 +1130,8 @@ class HarnessRunner:
             checked_at=datetime.now(UTC),
             limitations=["未进行干净环境复跑，不等于完整复现论文。"],
         )
-        self.store.write_text(run_id, "verification.json", result.model_dump_json(indent=2))
+        if result_name is not None:
+            self.store.write_text(run_id, result_name, result.model_dump_json(indent=2))
         # 先停止生产端的所有进程，再读取快照，避免后台进程在验收期间改写产物。
         session.close()
         self._check_cancel(run_id)
@@ -973,29 +1140,211 @@ class HarnessRunner:
             result.failure_category = "verification_error"
         else:
             try:
-                raw = snapshot_artifact(self.store.run_dir(run_id) / "workspace", spec)
+                raw = snapshot_artifact(workspace, spec)
             except ArtifactRejected as exc:
                 result.status = "failed"
                 result.summary = str(exc)
                 result.failure_category = "artifact_invalid"
                 result.checks = [VerificationCheck(name="本次产物安全读取", passed=False, detail=str(exc))]
             else:
-                (self.store.run_dir(run_id) / "verification-input.json").write_bytes(raw)
+                (self.store.run_dir(run_id) / input_name).write_bytes(raw)
                 result = self.verifier(
                     raw, spec, timeout_seconds=min(20, self._step_timeout(request, deadline)),
                     cancelled=lambda: self._cancel_requested(run_id),
                 )
                 result.artifact_sha256 = hashlib.sha256(raw).hexdigest()
-                result.evidence_url = f"/api/runs/{run_id}/verification/input"
+                result.evidence_url = evidence_url
         result.checks.insert(0, VerificationCheck(
             name="本次命令执行", passed=True, detail="退出码 0，未超时；旧产物在本次执行前已清除。",
         ))
-        self.store.write_text(run_id, "verification.json", result.model_dump_json(indent=2))
-        self.store.append_event(
-            run_id, RunState.VERIFYING, "verification", result.summary,
-            result.model_dump(mode="json"),
-        )
         return result
+
+    def _run_replay(
+        self,
+        run_id: str,
+        request: RunRequest,
+        plan: RunPlan,
+        spec: VerificationSpec,
+        manifest: RepairManifest,
+        source_workspace: Path,
+        current_verification: VerificationResult,
+        deadline: float,
+        cancel: threading.Event,
+        result: ReplayResult,
+    ) -> ReplayResult:
+        run_dir = self.store.run_dir(run_id)
+        assert result.session_id is not None
+        replay_root = run_dir / "replay" / result.session_id
+        replay_workspace = replay_root / "workspace"
+        self.store.write_status(run_id, RunState.REPLAYING, {})
+        self.store.write_text(run_id, "replay_result.json", result.model_dump_json(indent=2))
+        self.store.append_event(
+            run_id, RunState.REPLAYING, "replay_started", "clean-environment replay started",
+            {"manifest_digest": result.repair_manifest_digest},
+        )
+        replay_session = None
+        try:
+            try:
+                resolved_revision = self.cloner(request, replay_root)
+            except (_RunCancelled, TimeBudgetExceeded):
+                raise
+            except Exception as exc:
+                raise _ReplayBlocked("replay_clone_failed", f"复跑检出失败: {exc}") from exc
+            if resolved_revision != manifest.base_revision:
+                raise ReplayMaterializationError("复跑检出 revision 与冻结基准不一致")
+            result.checks.append(ReplayCheck(
+                name="冻结基准检出", status="passed", detail=resolved_revision,
+            ))
+            apply_repair_manifest(source_workspace, replay_workspace, manifest)
+            result.checks.append(ReplayCheck(
+                name="修复材料还原", status="passed", detail="只应用冻结清单中的声明变更。",
+            ))
+            sandbox_request = request.model_copy(update={"python_version": plan.python_version})
+            replay_session = self.sandbox_factory(sandbox_request, replay_root)
+            self._register_active(run_id, cancel, replay_session)
+            self._check_cancel(run_id)
+            for name, value in manifest.environment.items():
+                if not is_safe_environment_value(name, value):
+                    raise ReplayMaterializationError(
+                        f"复跑环境变量值缺失或不受支持: {name}"
+                    )
+                replay_session.set_environment(name, value)
+            result.checks.append(ReplayCheck(
+                name="环境变量还原", status="passed", detail="只恢复白名单内已冻结的非敏感值。",
+            ))
+            install = self._run_install(
+                run_id, request, replay_session, replay_workspace, deadline,
+                state=RunState.REPLAYING,
+            )
+            if install is None or install.exit_code == 0:
+                declared_install = self._run_declared_install(
+                    run_id, request, replay_session, manifest.dependencies, deadline
+                )
+                if declared_install is not None:
+                    install = declared_install
+            if install is not None and install.exit_code != 0:
+                result.status = ReplayStatus.FAILED
+                result.reason = "replay_install_failed"
+                result.checks.append(ReplayCheck(
+                    name="依赖安装", status="failed", detail=install.stderr_tail[-2000:],
+                ))
+            else:
+                result.checks.append(ReplayCheck(
+                    name="依赖安装", status="passed", detail="冻结依赖安装完成。",
+                ))
+                test = self._run_test(
+                    run_id, request, replay_session, plan, deadline,
+                    verification_rule=spec, workspace=replay_workspace,
+                    state=RunState.REPLAYING,
+                )
+                if test.exit_code != 0 or test.timed_out:
+                    result.status = ReplayStatus.FAILED
+                    result.reason = "replay_command_failed"
+                    result.checks.append(ReplayCheck(
+                        name="同一命令执行", status="failed",
+                        detail=f"退出码 {test.exit_code}；超时：{test.timed_out}",
+                    ))
+                else:
+                    result.checks.append(ReplayCheck(
+                        name="同一命令执行", status="passed", detail="退出码 0，未超时。",
+                    ))
+                    try:
+                        verification = self._verify_workspace(
+                            run_id,
+                            request,
+                            replay_session,
+                            spec,
+                            deadline,
+                            workspace=replay_workspace,
+                            input_name="replay-verification-input.json",
+                            evidence_url=None,
+                        )
+                    except (_RunCancelled, TimeBudgetExceeded):
+                        raise
+                    except Exception as exc:
+                        raise _ReplayBlocked(
+                            "replay_verifier_error", f"复跑验收器故障: {exc}"
+                        ) from exc
+                    result.verification = verification
+                    result.image_digest = verification.verifier_image_id
+                    passed = verification.status == "passed"
+                    result.status = ReplayStatus.PASSED if passed else (
+                        ReplayStatus.FAILED if verification.status == "failed"
+                        else ReplayStatus.BLOCKED
+                    )
+                    result.reason = None if passed else verification.failure_category
+                    result.checks.append(ReplayCheck(
+                        name="同一可信验收", status=verification.status,
+                        detail=verification.summary,
+                    ))
+                    if (
+                        current_verification.artifact_sha256 is not None
+                        and verification.artifact_sha256 is not None
+                        and verification.artifact_sha256 != current_verification.artifact_sha256
+                    ):
+                        result.differences.append(
+                            "当前运行与干净复跑的产物 SHA-256 不同；按确认口径仅记录差异。"
+                        )
+        except ReplayMaterializationError as exc:
+            self._block_replay(result, "replay_material_incomplete", str(exc))
+        except SandboxUnavailableError as exc:
+            self._block_replay(result, "replay_sandbox_unavailable", str(exc))
+        except _ReplayBlocked as exc:
+            self._block_replay(result, exc.reason, str(exc))
+        except _RunCancelled:
+            self._block_replay(result, "cancelled", "复跑阶段收到取消请求，未完成干净复跑。")
+            raise
+        except TimeBudgetExceeded:
+            self._block_replay(result, "budget_exceeded", "复跑阶段总预算耗尽，未完成干净复跑。")
+            raise
+        except Exception as exc:  # noqa: BLE001 - 未知故障按条件不足收敛，不伪装成复跑失败
+            self._block_replay(result, "replay_error", f"复跑阶段发生未预期错误: {exc}")
+        finally:
+            if replay_session is not None:
+                replay_session.close()
+                self._record_cleanup_failures(run_id, replay_session)
+            # 无论正常结束还是取消/预算异常上抛，都先把证据落盘再交给外层终态。
+            result.finished_at = datetime.now(UTC)
+            self.store.write_text(run_id, "replay_result.json", result.model_dump_json(indent=2))
+            self.store.append_event(
+                run_id, RunState.REPLAYING, "replay_finished",
+                result.reason or result.status.value,
+                result.model_dump(mode="json"),
+            )
+        return result
+
+    @staticmethod
+    def _block_replay(result: ReplayResult, reason: str, message: str) -> None:
+        result.status = ReplayStatus.BLOCKED
+        result.reason = reason
+        result.checks.append(
+            ReplayCheck(name="复跑执行", status="blocked", detail=message[:2000])
+        )
+        result.limitations.append(message[:2000])
+
+    def _replay_on_termination(
+        self,
+        run_id: str,
+        replay_result: ReplayResult,
+        *,
+        required: bool,
+        state: RunState,
+    ) -> ReplayResult | None:
+        """正式任务在复跑开始前被终止时补记 blocked，不能退回 not_requested。"""
+        if replay_result.status is not ReplayStatus.NOT_REQUESTED:
+            return replay_result
+        if not required:
+            return None
+        blocked = ReplayResult(
+            status=ReplayStatus.BLOCKED,
+            reason="not_started_before_termination",
+        )
+        self.store.write_text(run_id, "replay_result.json", blocked.model_dump_json(indent=2))
+        self.store.append_event(
+            run_id, state, "replay_finished",
+            "replay not started before termination", blocked.model_dump(mode="json"),
+        )
+        return blocked
 
     def _stored_verification(self, run_id: str) -> VerificationResult:
         data = self.store.read_text(run_id, "verification.json")
@@ -1107,6 +1456,12 @@ class HarnessRunner:
                     val = getattr(action, field, None)
                     if val is not None:
                         event_data[key] = val
+                if (
+                    action.action == "set_environment"
+                    and observation.ok
+                    and is_safe_environment_value(action.name, action.value)
+                ):
+                    event_data["env_value"] = action.value
                 self.store.append_event(
                     run_id,
                     RunState.REPAIRING,
@@ -1179,14 +1534,22 @@ class HarnessRunner:
             "outcome": outcome,
         }
 
-    def _run_install(self, run_id: str, request: RunRequest, session, workspace: Path, deadline: float):
+    def _run_install(
+        self,
+        run_id: str,
+        request: RunRequest,
+        session,
+        workspace: Path,
+        deadline: float,
+        state: RunState = RunState.INSTALLING,
+    ):
         """跑依赖安装。没有 requirements.txt 时返回 None（无依赖清单，不算失败）。"""
-        self.store.write_status(run_id, RunState.INSTALLING, {})
+        self.store.write_status(run_id, state, {})
         req_path = workspace / "requirements.txt"
         if not req_path.exists():
             self.store.append_event(
                 run_id,
-                RunState.INSTALLING,
+                state,
                 "install",
                 "no requirements.txt, install skipped",
             )
@@ -1200,7 +1563,7 @@ class HarnessRunner:
         except RequirementsNotAllowed as exc:
             self.store.append_event(
                 run_id,
-                RunState.INSTALLING,
+                state,
                 "install",
                 f"requirements.txt rejected: {exc}",
                 {
@@ -1225,10 +1588,62 @@ class HarnessRunner:
         self._check_cancel(run_id)
         self.store.append_event(
             run_id,
-            RunState.INSTALLING,
+            state,
             "install",
             "dependency install finished",
             {"exit_code": install.exit_code, "stderr_tail": install.stderr_tail[-500:]},
+        )
+        return install
+
+    def _run_declared_install(
+        self,
+        run_id: str,
+        request: RunRequest,
+        session,
+        dependencies: list[str],
+        deadline: float,
+    ):
+        if not dependencies:
+            return None
+        try:
+            validated = [validate(dependency) for dependency in dependencies]
+        except RequirementNotAllowed as exc:
+            raise ReplayMaterializationError(
+                f"冻结依赖字符串不合法: {exc.raw[:200]}"
+            ) from exc
+        session.set_network(True)
+        install = None
+        execute_error: Exception | None = None
+        try:
+            install = session.execute(
+                ["python", "-m", "pip", "install", *validated],
+                timeout_seconds=self._step_timeout(request, deadline),
+            )
+        except Exception as exc:  # noqa: BLE001 - 先保留原始异常，再尝试恢复网络
+            execute_error = exc
+        finally:
+            try:
+                session.set_network(False)
+            except SandboxClosedError:
+                pass
+            except Exception as exc:
+                self.store.append_event(
+                    run_id, RunState.REPLAYING, "network_restore_failed",
+                    str(exc)[:2000], {"phase": "declared_install"},
+                )
+                if execute_error is None and install is None:
+                    raise
+        if execute_error is not None:
+            raise execute_error
+        assert install is not None
+        self._check_cancel(run_id)
+        self.store.append_event(
+            run_id,
+            RunState.REPLAYING,
+            "install",
+            "declared repair dependencies installed",
+            {"exit_code": install.exit_code, "dependencies": validated,
+             "stderr_tail": install.stderr_tail[-500:]},
         )
         return install
 
@@ -1242,9 +1657,13 @@ class HarnessRunner:
         attempt: int | None = None,
         target: TargetManifest | None = None,
         verification_rule: VerificationSpec | None = None,
+        workspace: Path | None = None,
+        state: RunState = RunState.TESTING,
     ):
-        self.store.write_status(run_id, RunState.TESTING, {"attempt": attempt} if attempt else {})
-        workspace = self.store.run_dir(run_id) / "workspace"
+        self.store.write_status(
+            run_id, state, {"attempt": attempt} if attempt else {}
+        )
+        workspace = workspace or self.store.run_dir(run_id) / "workspace"
         if target is not None and target.source_dir is not None:
             check_src = target.source_dir / "check.py"
             if check_src.is_file():
@@ -1260,7 +1679,7 @@ class HarnessRunner:
         self._check_cancel(run_id)
         self.store.append_event(
             run_id,
-            RunState.TESTING,
+            state,
             "test",
             f"smoke test finished (attempt {attempt})" if attempt else "smoke test finished",
             {"exit_code": test.exit_code, "timed_out": test.timed_out,
@@ -1346,13 +1765,114 @@ class HarnessRunner:
         if session is not None:
             get_env = getattr(session, "get_environment", None)
             if callable(get_env):
-                manifest["environment"] = get_env()
+                environment = get_env()
             elif hasattr(session, "environment"):
-                manifest["environment"] = dict(session.environment)
+                environment = dict(session.environment)
+            else:
+                environment = None
+            if isinstance(environment, dict):
+                manifest["environment"] = {
+                    name: value if is_safe_environment_value(name, value) else ""
+                    for name, value in environment.items()
+                }
             collect_pkgs = getattr(session, "collect_packages", None)
             if callable(collect_pkgs):
                 manifest["packages"] = collect_pkgs()
         return manifest
+
+    # ------------------------------------------------------------ 修复材料
+
+    def _collect_repair_actions(self, run_id: str) -> tuple[list[str], dict[str, str]]:
+        """从修复事件流收集依赖与白名单环境变量；非敏感值随清单冻结。"""
+        dependencies: list[str] = []
+        environment: dict[str, str] = {}
+        for event in self.store.read_events(run_id):
+            if event.state is not RunState.REPAIRING or not event.data.get("ok"):
+                continue
+            if event.kind == "install_requirement":
+                requirement = event.data.get("requirement")
+                if isinstance(requirement, str) and requirement:
+                    dependencies.append(requirement)
+            elif event.kind == "set_environment":
+                name = event.data.get("env_name")
+                if isinstance(name, str) and name:
+                    value = event.data.get("env_value")
+                    environment[name] = (
+                        value if is_safe_environment_value(name, value) else ""
+                    )
+        return dependencies, environment
+
+    def _freeze_manifest(
+        self,
+        run_id: str,
+        workspace: Path,
+        plan: RunPlan,
+        base_revision: str,
+        request: RunRequest,
+    ) -> RepairManifest | None:
+        dependencies, environment = self._collect_repair_actions(run_id)
+        try:
+            manifest = build_repair_manifest(
+                run_id=run_id,
+                workspace=workspace,
+                base_revision=base_revision,
+                repository_url=request.repo_url,
+                command=plan.command,
+                python_version=plan.python_version,
+                dependencies=dependencies,
+                environment=environment,
+                expected_artifacts=[plan.expected_artifact] if plan.expected_artifact else [],
+            )
+        except ManifestBuildError:
+            return None
+        self.store.write_text(run_id, "repair_manifest.json", manifest.model_dump_json(indent=2))
+        return manifest
+
+    def _finalize_bundle(
+        self,
+        run_id: str,
+        workspace: Path,
+        plan: RunPlan,
+        base_revision: str,
+        state: RunState,
+        *,
+        request: RunRequest | None = None,
+        manifest: RepairManifest | None = None,
+    ) -> BundleResult:
+        """复用冻结清单打包；完整性不是 complete 也如实落记录（设计 7.4）。"""
+        if manifest is None and request is not None:
+            manifest = self._freeze_manifest(
+                run_id, workspace, plan, base_revision, request
+            )
+        if manifest is None:
+            result = BundleResult(
+                integrity="blocked",
+                items=[BundleItem(
+                    path="repair_manifest.json", kind="metadata", status="blocked",
+                    reason="工作区不是可审计的 git 仓库，无法冻结复跑材料。",
+                )],
+            )
+            self.store.write_text(run_id, "bundle.json", result.model_dump_json(indent=2))
+            return result
+        metadata = {
+            name: self.store.read_text(run_id, name)
+            for name in ("run_plan.json", "environment.json", "patch.diff", "verification.json")
+        }
+        replay_result = self.store.read_text(run_id, "replay_result.json")
+        if replay_result is not None:
+            metadata["replay_result.json"] = replay_result
+        result = pack_bundle(self.store.run_dir(run_id), workspace, manifest, metadata)
+        self.store.write_text(run_id, "bundle.json", result.model_dump_json(indent=2))
+        if result.integrity == "complete":
+            self.store.append_event(
+                run_id,
+                state,
+                "bundle_ready",
+                "复跑材料已打包并通过完整性校验",
+                {"integrity": "complete", "total_bytes": result.total_bytes,
+                 "manifest_digest": result.manifest_digest},
+            )
+        return result
 
     def _fail(
         self,
@@ -1365,6 +1885,7 @@ class HarnessRunner:
         plan: RunPlan | None = None,
         resolved_revision: str | None = None,
         attempts: int = 1,
+        replay: ReplayResult | None = None,
     ) -> RunResult:
         verification = self._stored_verification(run_id)
         result = RunResult(
@@ -1378,6 +1899,7 @@ class HarnessRunner:
             patch_url=f"/api/runs/{run_id}/patch",
             environment_url=f"/api/runs/{run_id}/environment",
             report_url=f"/api/runs/{run_id}/report",
+            replay=replay,
         )
         patch = ""
         if session is not None:
@@ -1395,6 +1917,15 @@ class HarnessRunner:
                 indent=2,
             ),
         )
+        bundle = None
+        fail_workspace = self.store.run_dir(run_id) / "workspace"
+        if plan is not None and fail_workspace.is_dir():
+            bundle = self._finalize_bundle(
+                run_id, fail_workspace, plan, plan.resolved_revision, RunState.FAILED,
+                request=request,
+            )
+        result.bundle = bundle
+        result.bundle_url = f"/api/runs/{run_id}/bundle" if bundle is not None else None
         self.store.write_text(
             run_id,
             "report.md",

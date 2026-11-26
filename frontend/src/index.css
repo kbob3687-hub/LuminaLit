@@ -6,25 +6,25 @@
    ═══════════════════════════════════════════════════════════ */
 @theme {
   /* 画布与表面：卡片 / 嵌套块三级灰阶 */
-  --color-void: #09090b;
-  --color-surface: #111114;
-  --color-surface-hi: #141418;
-  --color-inset: #17171b;
+  --color-void: #080b13;
+  --color-surface: #0e1421;
+  --color-surface-hi: #141d2e;
+  --color-inset: #101827;
 
   /* 文字 */
-  --color-ink: #e4e4e7;
-  --color-ink-mid: #a1a1aa;
-  --color-ink-muted: #71717a;
+  --color-ink: #edf1fc;
+  --color-ink-mid: #a4afc6;
+  --color-ink-muted: #8490aa;
 
   /* 1px 细边框（区分层级的唯一手段） */
   --color-rule: rgb(255 255 255 / 0.08);
   --color-rule-hi: rgb(255 255 255 / 0.14);
 
   /* 语义色：blue-500 / amber-400 / rose-400 / emerald-400（克制，配低透明底） */
-  --color-accent: #3b82f6;
+  --color-accent: #6c8fff;
   --color-warn: #fbbf24;
-  --color-reject: #fb7185;
-  --color-pass: #34d399;
+  --color-reject: #ff725d;
+  --color-pass: #2ee6a8;
 
   --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, Consolas, monospace;
   --font-sans: Inter, "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", system-ui, sans-serif;
@@ -49,10 +49,15 @@ body {
   background: rgb(59 130 246 / 0.3);
 }
 
-.run-workspace :is(button, summary, a):focus-visible {
+.run-workspace :is(button, summary, a, [role="button"]):focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 3px;
 }
+
+.console-hero { background: radial-gradient(ellipse at 8% 0%, rgb(108 143 255 / .10), transparent 70%); }
+.console-header { background: rgb(8 11 19 / .75); }
+.console-evidence { background: rgb(14 20 33 / .65); }
+.run-console [aria-label="执行拓扑"] { background: radial-gradient(ellipse at 50% 45%, rgb(108 143 255 / .04), transparent 75%); }
 
 @media (prefers-reduced-motion: reduce) {
   .run-workspace *, .run-workspace *::before, .run-workspace *::after {

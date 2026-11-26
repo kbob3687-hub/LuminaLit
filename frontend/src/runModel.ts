@@ -58,7 +58,7 @@ export function verificationEvidencePath(runId: string | null, evidenceUrl: stri
  * 下面几条是硬约束，改之前请先读评审稿：
  *   - `verified` 只代表当前环境验收 passed，不能因复跑失败被抹掉，也不能
  *     单独用来显示「完整成功」。
- *   - 后端本轮尚未下发 replay / bundle 字段（Issue #30 仍开放），缺字段时
+ *   - 历史结果可能没有 replay / bundle 字段，缺字段时
  *     一律显示「未记录」，绝不推断成 passed 或 not_requested。
  *   - 只有 replay.status=passed 且 bundle.integrity=complete 才算可交付的
  *     完整成功；材料缺项必须留在 gaps 里，不能用绿色徽标盖住。
@@ -87,7 +87,14 @@ const REPLAY_COPY: Record<ReplayResult["status"], { label: string; tone: EventEx
 export function replayConclusion(replay: ReplayResult | null | undefined) {
   if (!replay) return { label: "后端未下发复跑结果", detail: "这次运行没有干净复跑记录，不能据此判断可复跑性。", tone: "neutral" as const };
   const base = REPLAY_COPY[replay.status] ?? REPLAY_COPY.pending;
-  const reason = replay.reason ? `（${replay.reason}）` : "";
+  const reasons: Record<string, string> = {
+    cancelled: "已取消", budget_exceeded: "预算已用完",
+    not_started_before_termination: "任务结束前尚未开始复跑",
+    replay_clone_failed: "代码检出失败", replay_verifier_error: "验收器故障",
+    replay_error: "复跑服务发生异常", replay_material_incomplete: "冻结材料不完整",
+    replay_sandbox_unavailable: "复跑环境不可用",
+  };
+  const reason = replay.reason ? `（${reasons[replay.reason] ?? replay.reason}）` : "";
   return { label: `${base.label}${reason}`, tone: base.tone, detail: replay.differences?.join("；") || "" };
 }
 
@@ -117,6 +124,7 @@ export function overallConclusion(status: RunStatus | null, isReplay: boolean): 
     if (state === "replaying") return { label: "干净复跑进行中", detail: "当前环境已有结果，正在新目录与新容器中按同一规则复验。", tone: "neutral", completeSuccess: false, gaps: [] };
     return { label: "正在运行", detail: "结论会在运行结束、结果与收尾记录写完后给出。", tone: "neutral", completeSuccess: false, gaps: [] };
   }
+  if (!result) return { label: "运行已结束，正在整理结果", detail: "尚未取得最终结果，请稍候。", tone: "neutral", completeSuccess: false, gaps: [] };
 
   const outcome = result?.outcome;
   if (outcome === "cancelled") return { label: "已取消，同时保留已有证据", detail: "已完成的检查不会被抹去。", tone: "neutral", completeSuccess: false, gaps: [] };
@@ -197,6 +205,9 @@ export const BLOCK_LABELS: ReadonlySet<string> = new Set([
   "path_escape",
   "env_not_allowed",
   "invalid_argument",
+  "protected_file",
+  "action_not_allowed",
+  "change_not_allowed",
 ]);
 
 export function isActionEvent(e: RunEvent): boolean {
@@ -562,8 +573,8 @@ export function buildLoop(events: RunEvent[], state: RunState | undefined): Loop
 
   const current = state ?? "queued";
   // 核验是独立阶段，不是又一轮修复；即使缺少 repair_round / final 事件也不保留“进行中”。
-  if (current === "verifying" || TERMINAL.has(current)) {
-    const boundary = events.find((event) => event.state === "verifying" || TERMINAL.has(event.state))?.timestamp
+  if (current === "verifying" || current === "replaying" || TERMINAL.has(current)) {
+    const boundary = events.find((event) => event.state === "verifying" || event.state === "replaying" || TERMINAL.has(event.state))?.timestamp
       ?? events.at(-1)?.timestamp;
     if (boundary) for (const round of rounds) round.finishedAt ??= boundary;
   }
