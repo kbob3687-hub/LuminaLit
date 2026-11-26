@@ -8,7 +8,7 @@
   "integration_branch": "codex/workbench-integration",
   "integration_head": "0721d12e32038596d4501c8034776c47269f75f7",
   "remote_mutations": [],
-  "new_commits_created": false,
+  "new_commits_created": true,
   "sources": [
     {
       "source": "original uncommitted backend",
@@ -219,7 +219,7 @@
     "Use #32-#36 contracts and evidence panels with the user-approved #31 topology, particles and action flow. RunScene routes to one combined RunConsole implementation.",
     "Merged PRs #37–#39 were merged into feature branches, not main.",
     "Preserve the original workspace and its unrelated files; integration stays in an isolated worktree.",
-    "No GitHub PR was merged, closed, retargeted, or commented on."
+    "Before consolidation no remote PR mutations had been made; the subsequent consolidation is documented separately."
   ],
   "integration_changes": [
     "Consume RunResult.replay/bundle without upgrading verified to complete success.",
@@ -282,5 +282,6 @@
     "agent": "fake",
     "api_running_at_visual_handoff": false,
     "visual_preview": "http://127.0.0.1:5187/?demo=1&scene=run"
-  }
+  },
+  "snapshot_scope": "Historical inventory before GitHub consolidation; see github-consolidation-2026-11-26.md for the current disposition."
 }

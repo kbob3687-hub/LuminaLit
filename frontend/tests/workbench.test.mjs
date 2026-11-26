@@ -9,7 +9,7 @@ import { build } from "esbuild";
 const temp = await mkdtemp(path.join(tmpdir(), "paperharness-workbench-"));
 const modules = {};
 try {
-  for (const name of ["runModel", "api", "components/FlowGraph"]) {
+  for (const name of ["runModel", "api", "deepLink", "components/FlowGraph"]) {
     const key = path.basename(name);
     const outfile = path.join(temp, `${key}.mjs`);
     await build({ entryPoints: [path.resolve(import.meta.dirname, `../src/${name}.${key === "FlowGraph" ? "tsx" : "ts"}`)], bundle: true,
@@ -23,6 +23,30 @@ const { overallConclusion, buildLoop, isBlockedEvent } = modules.runModel;
 const { bundleDownloadUrl, fetchBundle } = modules.api;
 const id = "a".repeat(32);
 const { buildGraph } = modules.FlowGraph;
+test("保留旧前端修复：扁平动作参数优先，历史嵌套字段仍可读取", () => {
+  const { targetOf, actionParams } = modules.runModel;
+  const event = { kind:"search_text", message:"3 matches", data:{query:"ImportError",request:{query:"stale"}} };
+  assert.equal(actionParams(event).query,"ImportError");
+  assert.equal(targetOf(event),'搜索 "ImportError"');
+  assert.equal(targetOf({...event,data:{path:"src/main.py"}}),"src/main.py");
+  assert.equal(targetOf({...event,data:{request:{path:"legacy.py",start_line:12}}}),"legacy.py:12");
+  assert.equal(targetOf({kind:"set_environment",message:"set OMP_NUM_THREADS=2",data:{env_name:"OMP_NUM_THREADS",env_value:"2"}}),"OMP_NUM_THREADS=2");
+});
+test("保留旧前端修复：完整动作表不截断，错误类别与阶段不丢失", () => {
+  const { buildRows, explainFailure, buildStages, failureText } = modules.runModel;
+  const events = Array.from({length:100},(_,i)=>({run_id:id,sequence:i+1,timestamp:new Date(i*1000).toISOString(),state:"repairing",kind:"read_file",message:"read file",data:{ok:true}}));
+  assert.equal(buildRows(events).length,100);
+  for (const category of ["invalid_expected_artifact","timeout","internal_error","unknown","none"]) {
+    assert.ok(!explainFailure(category,[]).verdict.includes("没有对应的解释"));
+    assert.notEqual(failureText(category),category);
+  }
+  const failed = [{...events[0],state:"failed",kind:"final",message:"failed",data:{failure_category:"invalid_expected_artifact"}}];
+  assert.equal(buildStages(failed,"failed").find(s=>s.id==="planning").status,"bad");
+});
+test("保留 main 的环境清单直链，非法文件标签回退报告", () => {
+  assert.equal(modules.deepLink.parseTab(new URLSearchParams("tab=env")),"env");
+  assert.equal(modules.deepLink.parseTab(new URLSearchParams("tab=../../secret")),"report");
+});
 test("拓扑不凭终态点亮验证；复跑失败保留当前通过", () => {
   const base = { state: "succeeded", stages: [{ id: "verifying", status: "done" }, { id: "replaying", status: "done" }], loop: { rounds: [] }, rows: [], events: [] };
   const empty = buildGraph(base);

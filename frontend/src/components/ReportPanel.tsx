@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
-import { ApiError, getPatch, getReport } from "../api";
+import { ApiError, getPatch, getReport, getEnvironment } from "../api";
 import type { RunStatus } from "../types";
 import { VerificationPanel } from "./VerificationPanel";
 import { ReplayPanel } from "./ReplayPanel";
@@ -25,6 +25,7 @@ type Tab = TabId;
 const TABS: { id: Tab; label: string; file: (rid: string) => string }[] = [
   { id: "report", label: "结果报告", file: (r) => `paperharness-${r.slice(0, 8)}-report.md` },
   { id: "patch", label: "补丁", file: (r) => `paperharness-${r.slice(0, 8)}-patch.diff` },
+  { id: "env", label: "环境清单", file: (r) => `paperharness-${r.slice(0, 8)}-environment.json` },
   { id: "json", label: "结果 JSON", file: (r) => `paperharness-${r.slice(0, 8)}-result.json` },
 ];
 
@@ -163,7 +164,7 @@ function TechnicalFile({ runId, tab, terminal, jsonText }: {
     setDoc(null);
     const load = async () => {
       try {
-        const text = tab === "report" ? await getReport(runId) : await getPatch(runId);
+        const text = tab === "report" ? await getReport(runId) : tab === "env" ? JSON.stringify(await getEnvironment(runId), null, 2) : await getPatch(runId);
         if (!cancelled) setDoc(text);
       } catch (error) {
         if (cancelled) return;
@@ -243,6 +244,10 @@ function TechnicalFile({ runId, tab, terminal, jsonText }: {
           {jsonText || (terminal ? "运行已结束，正在整理最终结果。" : "结果会在运行结束后生成。")}
         </pre>
       )}
+      {!loading && !err && tab === "env" && doc !== null && <div className="space-y-2">
+        <p className="text-xs leading-6 text-ink-muted">运行环境快照；已安装依赖不等于本次新增或修改的依赖。</p>
+        <pre className="max-h-[52vh] overflow-auto rounded-lg border border-rule bg-void/60 p-3 font-mono text-xs whitespace-pre-wrap break-all text-ink-mid">{doc}</pre>
+      </div>}
     </div>
   );
 }

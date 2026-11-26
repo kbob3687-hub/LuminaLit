@@ -129,6 +129,18 @@ try {
     await f.page.screenshot({path:path.resolve(root,"../runs-test/browser/console-replay-failed.png")});
     assert.deepEqual(f.errors,[]); await f.context.close();
   });
+  await check("保留 main 的环境清单页签与旧链的阶段直链", async () => {
+    const f = await fixture();
+    await f.page.goto(`${base}/?live=1&scene=run&run=${id}&panel=report&tab=env&still=1`);
+    await f.page.getByRole("dialog",{name:"结果与文件"}).waitFor();
+    await f.page.getByRole("button",{name:"环境清单",exact:true}).waitFor();
+    await f.page.getByText(/numpy==1.26.4/).waitFor();
+    assert.ok(f.requests.some(r=>r.path.endsWith('/environment')));
+    assert.ok(!f.requests.some(r=>r.path.endsWith('/patch')));
+    await f.page.goto(`${base}/?live=1&scene=run&run=${id}&panel=stage&id=testing&still=1`);
+    await f.page.getByRole("dialog",{name:"运行并检查结果"}).waitFor();
+    assert.deepEqual(f.errors,[]); await f.context.close();
+  });
   await check("390px 首页与运行台无页面溢出；减弱动效时禁用粒子和循环动画", async () => {
     const f = await fixture({}, {mobile:true});
     await f.page.emulateMedia({reducedMotion:"reduce"});

@@ -16,7 +16,7 @@
 | 交付物 | 位置 | 完成标准 |
 |---|---|---|
 | ACI 校验层 | `src/paperharness/aci/` | 契约 2.1/2.2 每条规则至少一个单元测试；全用 `FakeSandboxSession`，不依赖 Docker |
-| 沙箱安全测试 | `tests/integration/test_docker_sandbox.py` | 契约第 3 节 13 条清单每条一个可运行用例；PR 里逐条说明断言了什么 |
+| 沙箱安全测试 | `tests/integration/test_docker_sandbox.py` | 契约第 3 节 14 条清单每条一个可运行用例；PR 里逐条说明断言了什么 |
 | 前端 | 独立前端仓库/目录 | 契约第 4 节 8 个 API 全接、1000ms 轮询、终态停轮询、失败必须展示 `failure_category` |
 | 演示材料 | 仓库外或 `docs/` 之外 | 截图、PPT 素材、演示脚本 |
 
@@ -42,7 +42,7 @@ spike 九项全 PASS 说明环境正确。这个脚本就是你以后审沙箱�
 
 ## 5. 安全测试怎么写
 
-- 契约第 3 节 13 条清单，一条一个用例，全绿不是通过标准——你审的是实现，不是跑测试。
+- 契约第 3 节 14 条清单，一条一个用例，全绿不是通过标准——你审的是实现，不是跑测试。
 - 残留断言用契约 1.3 写死的 label：`docker ps -a --filter "label=paperharness.run_id=<run_id>"`。
 - 发现实现问题：PR 评论或 issue 给队长，不直接改 `docker_sandbox.py`。
 

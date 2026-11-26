@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { useEffect, useMemo, useState } from "react";
-import { TERMINAL, type RunEvent, type RunStatus } from "../types";
+import { TERMINAL, type RunEvent, type RunState, type RunStatus } from "../types";
 import { buildLoop, buildProgress, buildRows, buildStages, bundleConclusion, isActionEvent, isBlockedEvent, overallConclusion, replayConclusion, verificationConclusion } from "../runModel";
 import { FlowGraph } from "./FlowGraph";
 import { ActionRowItem } from "./ActionRowItem";
@@ -22,7 +22,9 @@ export function RunConsole({ mode, status, events, onCancel, cancelling, pollErr
 }) {
   const [panel, setPanel] = useState<ConsolePanel>(() => {
     const p = parsePanel(new URLSearchParams(window.location.search));
-    if (p?.type === "event") return { type: "event", seq: p.seq };
+    if (p?.type === "event" && p.seq > 0) return { type: "event", seq: p.seq };
+    const id = new URLSearchParams(window.location.search).get("id");
+    if (p?.type === "stage" && id && Object.hasOwn(STATE_COPY, id)) return { type: "stage", id: id as RunState };
     if (p?.type === "report") return { type: "report" };
     if (p?.type === "technical") return { type: "technical" };
     return null;
@@ -108,7 +110,7 @@ export function RunConsole({ mode, status, events, onCancel, cancelling, pollErr
             {tab === "actions" ? rows.length > 0 ? (
               <div className="overflow-x-auto px-3.5">
                 <div className="min-w-[740px]">
-                  {rows.map(row => <ActionRowItem key={row.seq} row={row} event={events.find(e => e.sequence === row.seq)}
+                  {rows.slice(-80).map(row => <ActionRowItem key={row.seq} row={row} event={events.find(e => e.sequence === row.seq)}
                     expanded={expanded.has(row.seq)} height={heights[row.seq] ?? null}
                     onToggle={() => setExpanded(previous => { const next = new Set(previous); if (next.has(row.seq)) next.delete(row.seq); else next.add(row.seq); return next; })}
                     onResize={height => setHeights(previous => ({ ...previous, [row.seq]: height }))}
@@ -117,7 +119,7 @@ export function RunConsole({ mode, status, events, onCancel, cancelling, pollErr
               </div>
             ) : <p className="py-5 text-sm leading-7 text-ink-mid">尚无安装、测试或修复动作。{events.length > 0 ? "可切换到运行经过查看准备阶段。" : "任务开始后会显示真实记录。"}</p>
             : <ol>{events.map((event, index) => <EventCard key={event.sequence} event={event} index={index} onOpen={seq => setPanel({ type: "event", seq })} />)}</ol>}
-            {rows.length >= 80 && <p className="mt-3 text-xs text-ink-muted">动作流展示最近 80 条；完整事件保留在运行经过中。</p>}
+            {rows.length > 80 && <p className="mt-3 text-xs text-ink-muted">动作流展示最近 80 条，另有 {rows.length - 80} 条；完整事件保留在运行经过中。</p>}
           </section>
           <aside aria-label="验证与交付" className="console-evidence min-w-0 border-t border-rule px-6 py-5 lg:border-t-0 lg:border-l">
             <h2 className="mb-4 text-sm font-medium text-ink">验证与交付</h2>

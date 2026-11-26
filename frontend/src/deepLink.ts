@@ -14,7 +14,7 @@ export type Scene = "select" | "preflight" | "welcome" | "run" | "result";
 const RUN_ID_RE = /^[0-9a-f]{32}$/;
 const SCENES: ReadonlySet<string> = new Set(["select", "preflight", "welcome", "run", "result"]);
 const PANELS: ReadonlySet<string> = new Set(["event", "stage", "technical", "report"]);
-const TABS: ReadonlySet<string> = new Set(["report", "patch", "json"]);
+const TABS: ReadonlySet<string> = new Set(["report", "patch", "env", "json"]);
 
 export function isRunId(value: string | null | undefined): value is string {
   return typeof value === "string" && RUN_ID_RE.test(value);
@@ -52,7 +52,7 @@ export function parsePanel(q: URLSearchParams): { type: PanelId; seq: number } |
   return { type: mapped as PanelId, seq: Number.isSafeInteger(seq) && seq > 0 ? seq : 0 };
 }
 
-export type TabId = "report" | "patch" | "json";
+export type TabId = "report" | "patch" | "env" | "json";
 
 export function parseTab(q: URLSearchParams): TabId {
   const raw = q.get("tab");
