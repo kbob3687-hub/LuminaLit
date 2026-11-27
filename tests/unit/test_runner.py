@@ -1,18 +1,31 @@
 import json
 import subprocess
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
+from paperharness.aci.paper_aci import PaperACI
 from paperharness.agent.fake import FakeLLM
-from paperharness.contracts.run import ExecResult, RunRequest, RunState
+from paperharness.contracts.run import (
+    ExecResult,
+    FinishRepairAction,
+    RunPlan,
+    RunRequest,
+    RunState,
+    SetEnvironmentAction,
+)
 from paperharness.harness import runner as runner_mod
 from paperharness.harness.runner import INSTALL_COMMAND, HarnessRunner, git_clone
 from paperharness.harness.store import RunStore
+from paperharness.sandbox.base import SandboxUnavailableError
 from paperharness.sandbox.fake import FakeSandboxSession
 
 
-def make_runner(tmp_path, results=None, artifact_path=None, cloner=None, factory=None):
+def make_runner(
+    tmp_path, results=None, artifact_path=None, cloner=None, factory=None, llm=None,
+    aci_factory=None,
+):
     store = RunStore(tmp_path)
 
     def default_factory(request, run_dir):
@@ -27,11 +40,55 @@ def make_runner(tmp_path, results=None, artifact_path=None, cloner=None, factory
 
     runner = HarnessRunner(
         store=store,
-        llm=FakeLLM(),
+        llm=llm or FakeLLM(),
         sandbox_factory=factory or default_factory,
         cloner=cloner or default_cloner,
+        aci_factory=aci_factory,
     )
     return runner, store
+
+
+def test_target_destination_rejects_directory(tmp_path):
+    (tmp_path / "check.py").mkdir()
+    with pytest.raises(ValueError, match="unsafe target injection"):
+        runner_mod._target_destination(tmp_path, "check.py")
+
+
+def test_target_destination_rejects_symlink(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("original", encoding="utf-8")
+    try:
+        (workspace / "check.py").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises(ValueError, match="unsafe target injection"):
+        runner_mod._target_destination(workspace, "check.py")
+    assert outside.read_text(encoding="utf-8") == "original"
+
+
+def test_injected_requirements_start_on_new_line(tmp_path):
+    from paperharness.targets.manifest import TargetManifest
+
+    runner, store = make_runner(tmp_path / "runs")
+    request = RunRequest(repo_url="https://github.com/a/b")
+    run_id = store.create_run(request)
+    workspace = store.run_dir(run_id) / "workspace"
+    (workspace / "requirements.txt").write_text("numpy==1.26.4", encoding="utf-8")
+    source = tmp_path / "target"
+    source.mkdir()
+    (source / "requirements.txt").write_text("scipy==1.12.0\n", encoding="utf-8")
+    target = TargetManifest(
+        id="example", repo_url=request.repo_url, revision="a" * 40,
+        python_version="3.10", command=["python", "main.py"],
+        failure_class="none", repairable=True, allowed_actions=[],
+        expected_final="succeeded", source_dir=source,
+    )
+    runner._inject_target_files(run_id, workspace, target)
+    assert (workspace / "requirements.txt").read_text(encoding="utf-8") == (
+        "scipy==1.12.0\nnumpy==1.26.4"
+    )
 
 
 def test_runner_success_verifies_artifact(tmp_path):
@@ -84,6 +141,24 @@ def test_clone_failure_marks_failed(tmp_path):
     assert result.outcome == "failed"
     assert result.failure_category == "clone_failed"
     assert store.read_status(run_id)["failure_category"] == "clone_failed"
+
+
+def test_sandbox_start_is_visible_before_factory_returns(tmp_path):
+    def factory(request, run_dir):
+        events = store.read_events(run_dir.name)
+        assert store.read_status(run_dir.name)["state"] == "planning"
+        assert events[-1].kind == "sandbox_start"
+        assert events[-1].data == {}
+        assert all(event.kind != "sandbox_ready" for event in events)
+        return FakeSandboxSession(workspace=run_dir / "workspace")
+
+    runner, store = make_runner(tmp_path, factory=factory)
+    request = RunRequest(repo_url="https://github.com/a/b", command=["python", "main.py"])
+    run_id = store.create_run(request)
+    runner.run(run_id, request)
+    ready = next(event for event in store.read_events(run_id) if event.kind == "sandbox_ready")
+    assert ready.state == RunState.PLANNING
+    assert ready.data == {}  # 不虚构容器 ID 或健康遥测。
 
 
 def test_sandbox_unavailable_marks_service_interrupted(tmp_path):
@@ -331,9 +406,127 @@ def test_install_network_restored_off_when_execute_raises(tmp_path):
     assert holder[0].network_state is False
 
 
+def test_repair_records_whitelisted_environment_value(tmp_path):
+    runner, store = make_runner(
+        tmp_path / "runs",
+        results=[ExecResult(
+            exit_code=0, timed_out=False, duration_ms=1,
+            stdout_path="logs/t.out", stderr_path="logs/t.err",
+        )],
+        llm=FakeLLM(actions=[
+            SetEnvironmentAction(action="set_environment", name="OMP_NUM_THREADS", value="1"),
+            FinishRepairAction(action="finish_repair", summary="set thread count"),
+        ]),
+        aci_factory=PaperACI,
+    )
+    request = RunRequest(
+        repo_url="https://github.com/a/b", command=["python", "main.py"], max_repairs=1,
+    )
+    run_id = store.create_run(request)
+    workspace = store.run_dir(run_id) / "workspace"
+    session = FakeSandboxSession(workspace=workspace)
+    plan = RunPlan(
+        resolved_revision="a" * 40, python_version="3.10", command=request.command, source="user",
+    )
+    failure = ExecResult(
+        exit_code=1, timed_out=False, duration_ms=1,
+        stdout_path="logs/f.out", stderr_path="logs/f.err", stderr_tail="boom",
+    )
+
+    healed = runner._self_heal(
+        run_id, request, session, workspace, plan, failure, "test", [0],
+        runner_mod.time.monotonic() + 60,
+    )
+
+    assert healed["verified"] is True
+    event = next(event for event in store.read_events(run_id) if event.kind == "set_environment")
+    assert event.data["env_name"] == "OMP_NUM_THREADS"
+    assert event.data["env_value"] == "1"
+
+
+def test_declared_install_keeps_nonzero_result_when_network_restore_fails(tmp_path):
+    runner, store = make_runner(tmp_path)
+    request = RunRequest(repo_url="https://github.com/a/b", command=["python", "main.py"])
+    run_id = store.create_run(request)
+    install = ExecResult(
+        exit_code=1, timed_out=False, duration_ms=1,
+        stdout_path="logs/i.out", stderr_path="logs/i.err", stderr_tail="install failed",
+    )
+    session = FakeSandboxSession()
+    session.execute = Mock(return_value=install)
+    session.set_network = Mock(side_effect=[None, SandboxUnavailableError("restore failed")])
+
+    result = runner._run_declared_install(
+        run_id, request, session, ["repair-dependency==1.0"],
+        runner_mod.time.monotonic() + 60,
+    )
+
+    assert result is install
+    assert session.set_network.call_args_list == [((True,),), ((False,),)]
+
+
+def test_declared_install_preserves_original_execute_error(tmp_path):
+    runner, store = make_runner(tmp_path)
+    request = RunRequest(repo_url="https://github.com/a/b", command=["python", "main.py"])
+    run_id = store.create_run(request)
+    session = FakeSandboxSession()
+    session.execute = Mock(side_effect=SandboxUnavailableError("original execute failure"))
+    session.set_network = Mock(side_effect=[None, SandboxUnavailableError("restore failed")])
+
+    with pytest.raises(SandboxUnavailableError, match="original execute failure"):
+        runner._run_declared_install(
+            run_id, request, session, ["repair-dependency==1.0"],
+            runner_mod.time.monotonic() + 60,
+        )
+
+    assert session.set_network.call_args_list == [((True,),), ((False,),)]
+
+
+def test_fixed_sparse_clone_keeps_commit_and_explicit_http_transport(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "init" in cmd:
+            Path(cmd[-1]).mkdir(parents=True)
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout="a" * 40 if "rev-parse" in cmd else "", stderr="",
+        )
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", fake_run)
+    revision = "a" * 40
+    actual = runner_mod._clone_once(
+        "https://github.com/owner/repo", revision, tmp_path / "workspace",
+        {"PAPERHARNESS_GIT_HTTP_VERSION": "HTTP/2"}, ["pysindy", "examples/case.ipynb"],
+    )
+    assert actual == revision
+    fetch = next(cmd for cmd in calls if "fetch" in cmd)
+    assert "--filter=blob:none" in fetch and fetch[-1] == revision
+    assert "http.version=HTTP/2" in fetch
+    sparse = next(cmd for cmd in calls if "sparse-checkout" in cmd)
+    assert sparse[-3:] == ["--", "/pysindy", "/examples/case.ipynb"]
+    checkout = next(cmd for cmd in calls if "checkout" in cmd)
+    assert "http.version=HTTP/2" in checkout
+    assert checkout[-1] == "FETCH_HEAD"
+
+
+def test_invalid_http_transport_fails_before_removing_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    marker = workspace / "keep.txt"
+    marker.write_text("keep")
+    with pytest.raises(ValueError, match="HTTP"):
+        runner_mod._clone_once(
+            "https://github.com/owner/repo", "a" * 40, workspace,
+            {"PAPERHARNESS_GIT_HTTP_VERSION": "arbitrary"},
+        )
+    assert marker.read_text() == "keep"
+
+
 def test_git_clone_uses_shallow_http11_env_and_mirror_fallback(tmp_path, monkeypatch):
     """git_clone 使用浅克隆 + HTTP/1.1 + 非交互环境变量，直连两次失败后切镜像并脱敏错误。"""
     monkeypatch.setenv("PAPERHARNESS_GIT_MIRROR", "https://ghfast.top/")
+    monkeypatch.delenv("PAPERHARNESS_GIT_HTTP_VERSION", raising=False)
     calls: list[tuple[list[str], dict | None]] = []
 
     def fake_run(cmd, check=False, capture_output=False, text=False, timeout=None, env=None):

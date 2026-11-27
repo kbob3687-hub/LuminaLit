@@ -17,7 +17,7 @@ from paperharness.sandbox.fake import FakeSandboxSession
 class FakeACI:
     """契约第 2 节协议的最小假实现：记录动作并全部回 ok。"""
 
-    def __init__(self, session, workspace, plan, timeout_seconds):
+    def __init__(self, session, workspace, plan, timeout_seconds, policy):
         self.actions = []
 
     def execute(self, action):
@@ -51,8 +51,8 @@ def make_heal_runner(tmp_path, results, actions, max_repairs=3):
         llm=FakeLLM(actions=actions),
         sandbox_factory=factory,
         cloner=lambda request, run_dir: "fake-commit",
-        aci_factory=lambda session, workspace, plan, timeout: FakeACI(
-            session, workspace, plan, timeout
+        aci_factory=lambda session, workspace, plan, timeout, policy: FakeACI(
+            session, workspace, plan, timeout, policy
         ),
     )
     return runner, store
@@ -83,6 +83,41 @@ def test_heal_success_after_one_repair(tmp_path):
     assert result.failure_category == "missing_dependency"
     states = [e.state for e in store.read_events(run_id)]
     assert "diagnosing" in states and "repairing" in states
+
+
+def test_repair_events_preserve_observation_tails_and_log_path(tmp_path):
+    observation = Observation(
+        ok=False, action="install_requirement", summary="install PyYAML exited with 1",
+        exit_code=1, timed_out=False, stdout_tail="output" * 500,
+        stderr_tail="bounded error tail", log_path="logs/repair.out",
+    )
+
+    class ObservedACI(FakeACI):
+        def execute(self, action):
+            if action.action == "install_requirement":
+                return observation
+            return super().execute(action)
+
+    runner, store = make_heal_runner(
+        tmp_path,
+        results=[make_result(0), make_result(1, "ModuleNotFoundError: yaml"), make_result(0)],
+        actions=[
+            InstallRequirementAction(action="install_requirement", requirement="PyYAML"),
+            FinishRepairAction(action="finish_repair", summary="no change"),
+        ],
+    )
+    runner.aci_factory = ObservedACI
+    request = RunRequest(repo_url="https://github.com/a/b", command=["python", "main.py"])
+    run_id = store.create_run(request)
+    runner.run(run_id, request)
+    event = next(event for event in store.read_events(run_id) if event.kind == "install_requirement")
+    assert event.data == {
+        "ok": False, "exit_code": 1, "timed_out": False,
+        "stdout_tail": observation.stdout_tail, "stderr_tail": observation.stderr_tail,
+        "requirement": "PyYAML",
+    }
+    assert event.log_path == observation.log_path
+    assert event.message == observation.summary
 
 
 def test_heal_budget_exceeded(tmp_path):

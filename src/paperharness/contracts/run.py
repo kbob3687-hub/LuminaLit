@@ -5,6 +5,9 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, JsonValue, field_validator
 
+from paperharness.contracts.bundle import BundleResult
+from paperharness.contracts.verification import VerificationResult
+
 # 已知不可能是 Git 仓库的 host：收单后必然 clone_failed，在 API 边界直接拒掉。
 # 只收录有明确证据的（用户实测会贴上来的），不猜。
 _NON_GIT_HOSTS = frozenset({"arxiv.org", "www.arxiv.org"})
@@ -72,9 +75,43 @@ class RunState(StrEnum):
     TESTING = "testing"
     DIAGNOSING = "diagnosing"
     REPAIRING = "repairing"
+    VERIFYING = "verifying"
+    REPLAYING = "replaying"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class ReplayStatus(StrEnum):
+    NOT_REQUESTED = "not_requested"
+    PENDING = "pending"
+    RUNNING = "running"
+    PASSED = "passed"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+
+
+class ReplayCheck(BaseModel):
+    name: str
+    status: Literal["passed", "failed", "blocked", "not_run"]
+    detail: str
+
+
+class ReplayResult(BaseModel):
+    status: ReplayStatus
+    reason: str | None = None
+    session_id: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    base_revision: str | None = None
+    repair_manifest_digest: str | None = None
+    image_digest: str | None = None
+    dataset_digest: str | None = None
+    dependency_digest: str | None = None
+    verification: VerificationResult | None = None
+    checks: list[ReplayCheck] = Field(default_factory=list)
+    differences: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
 
 
 class RunEvent(BaseModel):
@@ -86,6 +123,17 @@ class RunEvent(BaseModel):
     message: str
     data: dict[str, JsonValue] = Field(default_factory=dict)
     log_path: str | None = None
+
+
+class EventExplanation(BaseModel):
+    title: str
+    detail: str
+    tone: Literal["neutral", "success", "warning", "error"]
+
+
+class RunGuidance(EventExplanation):
+    next_steps: list[str]
+    repair_summary: str
 
 
 class ExecResult(BaseModel):
@@ -119,6 +167,10 @@ class RunResult(BaseModel):
     patch_url: str | None = None
     environment_url: str | None = None
     report_url: str
+    verification: VerificationResult | None = None
+    bundle: BundleResult | None = None
+    bundle_url: str | None = None
+    replay: ReplayResult | None = None
 
 
 class ReadFileAction(BaseModel):

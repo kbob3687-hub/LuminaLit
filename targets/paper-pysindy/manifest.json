@@ -4,10 +4,11 @@
   "revision": "c4421fcec275c8f4cc5c1e93bebb961b212067ae",
   "python_version": "3.10",
   "command": ["python", "-I", "check.py"],
-  "expected_artifact": "out.txt",
+  "expected_artifact": "coefficients.json",
+  "verification_rule": "pysindy-linear-v1",
   "failure_class": "none",
   "repairable": true,
   "allowed_actions": [],
   "expected_final": "succeeded",
-  "notes": "真实论文靶场：arXiv:2004.08424 PySINDy，README 最小例子（线性系统 x'=-2x, y'=y 的 SINDy 识别）。2026-11-17 真机验证：一次通过，系数误差 3.67e-06/1.65e-07。"
+  "notes": "PySINDy 发布包最小线性系统任务，非检出源码或完整论文实验；输出系数交给独立验证器，按解析方程检查两行全部系数的最大误差 < 1e-4。"
 }

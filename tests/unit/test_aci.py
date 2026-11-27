@@ -367,6 +367,24 @@ def test_16_set_environment_allowed(aci, session):
     assert session.environment == {"CUDA_VISIBLE_DEVICES": "-1"}
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("OMP_NUM_THREADS", "/tmp/secret"),
+        ("MKL_NUM_THREADS", "token=secret"),
+        ("TOKENIZERS_PARALLELISM", "true\nSECRET=1"),
+        ("CUDA_VISIBLE_DEVICES", "GPU-abc123"),
+        ("OMP_NUM_THREADS", ""),
+    ],
+)
+def test_16_set_environment_rejects_unsafe_values(aci, session, name, value):
+    result = aci.execute(SetEnvironmentAction(action="set_environment", name=name, value=value))
+
+    assert result.ok is False
+    assert result.summary == "invalid_argument:environment_value"
+    assert session.environment == {}
+
+
 def test_17_set_environment_rejects_path(aci, session):
     result = aci.execute(
         SetEnvironmentAction(action="set_environment", name="PATH", value="/tmp/bin")

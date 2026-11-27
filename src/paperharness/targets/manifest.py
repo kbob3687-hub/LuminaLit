@@ -5,11 +5,13 @@
 - failure_class 取值八种
 - repairable=false 时 expected_final 必须是 failed（对称地，repairable=true 必须 succeeded，
   否则评测预期自相矛盾）
-- allowed_actions 只能取 contracts/run.py 冻结的动作名，它是评测判定修复越界的依据
+- allowed_actions 只能取冻结动作名；执行前约束模型副作用动作。空列表禁止副作用，
+  只读观察和 finish_repair 始终允许；Harness 的确定性安装和重验不受此列表控制
 - GET /api/targets 只暴露 public_view 的四个字段，答案字段不出网
 """
 
 import json
+import re
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Self
@@ -53,15 +55,34 @@ class TargetManifest(BaseModel):
     allowed_actions: list[str]
     expected_final: Literal["succeeded", "failed"]
     notes: str | None = None
+    verification_rule: Literal["pysindy-linear-v1", "sindy-lorenz-v1"] | None = None
+    # Maintainer-only sparse checkout; frozen with the target, not accepted by RunRequest.
+    checkout_paths: list[str] | None = None
     # 运行时注记：manifest 所在目录，由 load_targets 填充，供 Harness 定位注入物
     # （check.py / requirements.txt），不出现在 JSON 契约里。
     source_dir: Path | None = None
 
     @model_validator(mode="after")
     def _check_rules(self) -> Self:
+        if self.checkout_paths is not None:
+            if not 1 <= len(self.checkout_paths) <= 16:
+                raise ValueError("checkout_paths requires 1 to 16 literal repository paths")
+            for path in self.checkout_paths:
+                if (
+                    len(path) > 200 or not re.fullmatch(r"[A-Za-z0-9_./-]+", path)
+                    or path.startswith(("/", "-"))
+                    or any(part in {"", ".", "..", ".git"} for part in path.split("/"))
+                ):
+                    raise ValueError("checkout_paths must be literal relative repository paths")
         expected = "succeeded" if self.repairable else "failed"
         if self.expected_final != expected:
             raise ValueError(f"repairable={self.repairable} 要求 expected_final={expected}")
+        if self.verification_rule is not None and (
+            self.command != ["python", "-I", "check.py"]
+            or self.expected_artifact != "coefficients.json"
+            or self.python_version != "3.10"
+        ):
+            raise ValueError("verification rule requires its maintained command and JSON artifact")
         unknown = set(self.allowed_actions) - ACTION_NAMES
         if unknown:
             raise ValueError(f"unknown actions: {sorted(unknown)}")

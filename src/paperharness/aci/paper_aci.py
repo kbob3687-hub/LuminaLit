@@ -15,11 +15,13 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 from paperharness.aci import errors, path_guard, requirement_guard
+from paperharness.aci.policy import ActionPolicy
 from paperharness.contracts.run import (
     ExecResult,
     Observation,
@@ -44,6 +46,24 @@ ALLOWED_ENV_NAMES = frozenset(
         "TOKENIZERS_PARALLELISM",
     }
 )
+_ENV_VALUE_PATTERNS = {
+    "CUDA_VISIBLE_DEVICES": re.compile(r"(?:-1|[0-9]{1,3}(?:,[0-9]{1,3})*)"),
+    "OMP_NUM_THREADS": re.compile(r"[1-9][0-9]{0,3}"),
+    "MKL_NUM_THREADS": re.compile(r"[1-9][0-9]{0,3}"),
+    "TOKENIZERS_PARALLELISM": re.compile(r"(?:true|false|0|1)"),
+}
+
+
+def is_safe_environment_value(name: str, value: object) -> bool:
+    pattern = _ENV_VALUE_PATTERNS.get(name)
+    return (
+        pattern is not None
+        and isinstance(value, str)
+        and len(value) <= 64
+        and pattern.fullmatch(value) is not None
+    )
+
+
 # install 不单独设超时下限。runner 每个动作前会把 aci.timeout_seconds 覆写成
 # step_timeout（剩余墙钟预算），它是 TimeBudgetExceeded 收敛的唯一抓手；
 # 若在这里用 max(step_timeout, 120) 把预算抬回去，临近 deadline 时一次 pip
@@ -58,12 +78,15 @@ class PaperACI:
         workspace: Path,
         plan: RunPlan,
         timeout_seconds: int,
+        policy: ActionPolicy | None = None,
     ):
         self.session = session
         # workspace 先 resolve 一次并缓存：符号链接会让边界判断漂移。
         self.workspace = Path(workspace).resolve(strict=False)
         self.plan = plan
         self.timeout_seconds = timeout_seconds
+        # runner 显式传入冻结任务策略；直接构造时也保护 check.py 与预期产物。
+        self.policy = policy if policy is not None else ActionPolicy.for_plan(plan)
         # ACI 自己维护网络状态。**不向会话查询**：契约 §1.2 写死沙箱不暴露状态
         # 查询接口，`getattr(session, "network_enabled", True)` 在真沙箱上永远拿到
         # 默认值 True，会让 install 之后把本该断开的网永久打开。
@@ -74,9 +97,26 @@ class PaperACI:
     # ------------------------------------------------------------------ 入口
 
     def execute(self, action: ToolAction) -> Observation:
-        handler = getattr(self, f"_do_{getattr(action, 'action', '')}", None)
+        name = getattr(action, "action", "")
+        handler = getattr(self, f"_do_{name}", None)
         if handler is None:
-            return self._fail(getattr(action, "action", "unknown"), errors.UNKNOWN_ACTION)
+            return self._fail(name, errors.UNKNOWN_ACTION)
+        # 执行权限是整条流水线的第 0 步：任何拒绝都必须发生在读文件、
+        # 写文件、开网、改环境变量之前，不能「用一次非法写入换一次合法读」。
+        # replace_exact 先把路径解析到真实文件再交给策略：只比词法路径时，
+        # `alias/check.py`（alias -> .）能绕过 check.py 的保护。
+        resolved: Path | None = None
+        if name == "replace_exact":
+            raw = getattr(action, "path", "")
+            if isinstance(raw, str):
+                try:
+                    resolved = path_guard.resolve(self.workspace, raw)
+                except path_guard.PathEscape:
+                    # 越界仍由动作自己的 _guard 返回 path_escape，保持原标签。
+                    resolved = None
+        rejected = self.policy.rejection(action, resolved=resolved, workspace=self.workspace)
+        if rejected is not None:
+            return self._fail(name, rejected)
         return handler(action)
 
     # ------------------------------------------------------------- 动作实现
@@ -99,9 +139,7 @@ class PaperACI:
 
         start = action.start_line - 1
         chunk = lines.splitlines()[start : start + action.line_count]
-        body = "\n".join(
-            f"{start + offset + 1}: {line}" for offset, line in enumerate(chunk)
-        )
+        body = "\n".join(f"{start + offset + 1}: {line}" for offset, line in enumerate(chunk))
         return Observation(
             ok=True,
             action=action.action,
@@ -192,8 +230,11 @@ class PaperACI:
         return self._from_exec(action.action, result, f"install {requirement}")
 
     def _do_set_environment(self, action) -> Observation:
-        if action.name not in ALLOWED_ENV_NAMES:
+        # 白名单与策略共用同一份判定（rejection 已先跑过一次，这里不重复开洞）。
+        if action.name not in self.policy.allowed_env_names:
             return self._fail(action.action, errors.env_not_allowed(action.name))
+        if not is_safe_environment_value(action.name, action.value):
+            return self._fail(action.action, errors.invalid_argument("environment_value"))
         self.session.set_environment(action.name, action.value)
         return Observation(
             ok=True,
@@ -266,9 +307,7 @@ class PaperACI:
             return
         for current, dirs, files in os.walk(root):
             # 不跟随 workspace 内的目录符号链接：避免把宿主目录整棵读进来。
-            dirs[:] = [
-                name for name in dirs if not (Path(current) / name).is_symlink()
-            ]
+            dirs[:] = [name for name in dirs if not (Path(current) / name).is_symlink()]
             for name in files:
                 candidate = Path(current) / name
                 if candidate.is_file() and not candidate.is_symlink():

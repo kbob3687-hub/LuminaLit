@@ -7,7 +7,179 @@
  * 这里改成：某阶段只有真的收到过该阶段的事件、且已经离开它，才算完成。
  */
 
-import { labelOf, TERMINAL, type RunEvent, type RunState } from "./types";
+import {
+  labelOf,
+  TERMINAL,
+  type BundleResult,
+  type EventExplanation,
+  type ReplayResult,
+  type RunEvent,
+  type RunState,
+  type RunStatus,
+  type VerificationResult,
+} from "./types";
+
+export const VERIFICATION_TYPES: Record<VerificationResult["level"], string> = {
+  none: "未指定检查类型",
+  execution: "执行检查",
+  artifact: "产物检查",
+  target: "目标指标检查",
+};
+
+/** level 是检查类型；绝不能仅凭 target 或旧 verified 字段称为达标。 */
+export function verificationConclusion(verification: VerificationResult | null | undefined): {
+  label: string;
+  tone: EventExplanation["tone"];
+} {
+  if (!verification) return { label: "未记录分级验证", tone: "neutral" };
+  const status = {
+    not_run: { label: "未运行", tone: "neutral" },
+    passed: { label: "通过", tone: "success" },
+    failed: { label: "未通过", tone: "error" },
+    blocked: { label: "受阻", tone: "warning" },
+  } as const;
+  const conclusion = status[verification.status];
+  if (verification.level === "none") {
+    return { label: verification.status === "passed" ? "未指定检查类型" : `验证${conclusion.label}`, tone: verification.status === "passed" ? "neutral" : conclusion.tone };
+  }
+  return { label: `${VERIFICATION_TYPES[verification.level]}${conclusion.label}`, tone: conclusion.tone };
+}
+
+/** 只允许当前真实任务的固定同源快照端点，不接受任意 URL 或路径。 */
+export function verificationEvidencePath(runId: string | null, evidenceUrl: string | null | undefined): string | null {
+  if (!runId || !/^[0-9a-f]{32}$/.test(runId)) return null;
+  const path = `/api/runs/${runId}/verification/input`;
+  return evidenceUrl === path ? path : null;
+}
+
+/* ─────────────────────────── 评审稿 §3.3 / §3.4：结论语义 ───────────────────────────
+ *
+ * 顶部结论必须由「当前环境验收 + 干净复跑 + 结束原因」三者共同决定。
+ * 下面几条是硬约束，改之前请先读评审稿：
+ *   - `verified` 只代表当前环境验收 passed，不能因复跑失败被抹掉，也不能
+ *     单独用来显示「完整成功」。
+ *   - 历史结果可能没有 replay / bundle 字段，缺字段时
+ *     一律显示「未记录」，绝不推断成 passed 或 not_requested。
+ *   - 只有 replay.status=passed 且 bundle.integrity=complete 才算可交付的
+ *     完整成功；材料缺项必须留在 gaps 里，不能用绿色徽标盖住。
+ *   - 复跑失败 / 条件不足 / 未要求复跑，分别有各自的固定文案。
+ */
+
+export interface OverallConclusion {
+  label: string;
+  detail: string;
+  tone: EventExplanation["tone"];
+  /** 是否允许展示「完整可复跑成功」。 */
+  completeSuccess: boolean;
+  /** 未验证、未记录或缺失的事项，必须原样留在结论里。 */
+  gaps: string[];
+}
+
+const REPLAY_COPY: Record<ReplayResult["status"], { label: string; tone: EventExplanation["tone"] }> = {
+  not_requested: { label: "未要求干净复跑", tone: "neutral" },
+  pending: { label: "等待干净复跑", tone: "neutral" },
+  running: { label: "干净复跑进行中", tone: "neutral" },
+  passed: { label: "干净复跑通过", tone: "success" },
+  failed: { label: "干净复跑未通过", tone: "error" },
+  blocked: { label: "复跑条件不足", tone: "warning" },
+};
+
+export function replayConclusion(replay: ReplayResult | null | undefined) {
+  if (!replay) return { label: "后端未下发复跑结果", detail: "这次运行没有干净复跑记录，不能据此判断可复跑性。", tone: "neutral" as const };
+  const base = REPLAY_COPY[replay.status] ?? REPLAY_COPY.pending;
+  const reasons: Record<string, string> = {
+    cancelled: "已取消", budget_exceeded: "预算已用完",
+    not_started_before_termination: "任务结束前尚未开始复跑",
+    replay_clone_failed: "代码检出失败", replay_verifier_error: "验收器故障",
+    replay_error: "复跑服务发生异常", replay_material_incomplete: "冻结材料不完整",
+    replay_sandbox_unavailable: "复跑环境不可用",
+  };
+  const reason = replay.reason ? `（${reasons[replay.reason] ?? replay.reason}）` : "";
+  return { label: `${base.label}${reason}`, tone: base.tone, detail: replay.differences?.join("；") || "" };
+}
+
+/** 材料完整性是独立结论：不完整不提供下载，也不能冒充已交付。 */
+export function bundleConclusion(bundle: BundleResult | null | undefined): {
+  label: string;
+  tone: EventExplanation["tone"];
+  downloadable: boolean;
+} {
+  if (!bundle) return { label: "后端未下发材料清单", tone: "neutral", downloadable: false };
+  if (bundle.integrity === "complete" && bundle.url) {
+    return { label: "复跑材料完整", tone: "success", downloadable: true };
+  }
+  if (bundle.integrity === "blocked") {
+    return { label: "复跑材料被阻止导出", tone: "warning", downloadable: false };
+  }
+  return { label: "复跑材料不完整", tone: "warning", downloadable: false };
+}
+
+/** 顶部唯一结论：页面、报告、抽屉都用它，避免各自维护一套成功语义（§11.1）。 */
+export function overallConclusion(status: RunStatus | null, isReplay: boolean): OverallConclusion {
+  if (!status) return { label: "连接中", detail: "尚未取得这次运行的记录。", tone: "neutral", completeSuccess: false, gaps: [] };
+  const state = status.state;
+  const result = status.result;
+  if (isReplay) return { label: "示例回放", detail: "离线预设记录，不代表本机执行或验证结果。", tone: "warning", completeSuccess: false, gaps: [] };
+  if (!TERMINAL.has(state)) {
+    if (state === "replaying") return { label: "干净复跑进行中", detail: "当前环境已有结果，正在新目录与新容器中按同一规则复验。", tone: "neutral", completeSuccess: false, gaps: [] };
+    return { label: "正在运行", detail: "结论会在运行结束、结果与收尾记录写完后给出。", tone: "neutral", completeSuccess: false, gaps: [] };
+  }
+  if (!result) return { label: "运行已结束，正在整理结果", detail: "尚未取得最终结果，请稍候。", tone: "neutral", completeSuccess: false, gaps: [] };
+
+  const outcome = result?.outcome;
+  if (outcome === "cancelled") return { label: "已取消，同时保留已有证据", detail: "已完成的检查不会被抹去。", tone: "neutral", completeSuccess: false, gaps: [] };
+  if (outcome === "budget_exceeded") return { label: "预算已用完，同时保留已通过检查", detail: "未完成的复跑不得记为通过。", tone: "warning", completeSuccess: false, gaps: ["总预算耗尽"] };
+  if (outcome === "unrepairable") return { label: "当前任务条件不足或超出支持范围", detail: "不评价论文真实性。", tone: "warning", completeSuccess: false, gaps: [] };
+
+  const verification = result?.verification ?? null;
+  const verificationPassed = verification?.status === "passed";
+  // 历史 run 只有 verified=true、没有结构化 verification：不能升格为「已验证」。
+  const legacyOnly = !verification && result?.verified === true;
+  const replay = result?.replay ?? null;
+  const bundle = result?.bundle ?? null;
+  const gaps: string[] = [];
+  if (legacyOnly) gaps.push("历史结果未记录分级验证");
+  if (!replay) gaps.push("后端未下发干净复跑结果");
+  if (!bundle) gaps.push("后端未下发材料完整性清单");
+
+  if (!verificationPassed) {
+    const stage = result?.failure_category ?? verification?.failure_category;
+    return {
+      label: legacyOnly ? "当前运行通过，但缺少分级验证记录" : "当前运行未通过验收",
+      detail: stage ? `实际失败阶段/类别：${stage}。` : "展示实际失败阶段；验收器故障不得归因于仓库。",
+      tone: verification?.status === "blocked" ? "warning" : "error",
+      completeSuccess: false,
+      gaps,
+    };
+  }
+
+  // 当前验收 passed：从此处起，结论只由复跑与材料决定。
+  if (!replay || replay.status === "pending" || replay.status === "running") {
+    return { label: "当前运行通过，复跑结论未记录", detail: "当前环境的证据已保留，但还不能证明修复在新环境可复现。", tone: "warning", completeSuccess: false, gaps };
+  }
+  if (replay.status === "not_requested") {
+    return { label: "试跑通过，未验证可复跑性", detail: "这是事先确认不要求干净复跑的探索试跑。", tone: "warning", completeSuccess: false, gaps };
+  }
+  if (replay.status === "failed") {
+    return { label: "当前运行通过，干净复跑失败", detail: "不得显示完整成功；当前环境已通过的检查仍然有效。", tone: "error", completeSuccess: false, gaps };
+  }
+  if (replay.status === "blocked") {
+    return { label: "当前运行通过，复跑条件不足", detail: "网络或数据来源不可用导致无法复跑，不能断言修复无效。", tone: "warning", completeSuccess: false, gaps };
+  }
+
+  const bundleResult = bundleConclusion(bundle);
+  if (!bundleResult.downloadable) {
+    gaps.push(bundleResult.label);
+    return { label: "指定等级通过，干净复跑通过，材料未齐全", detail: "复跑通过的事实保留，但材料尚未完整交付，不提供误导性的完整材料下载。", tone: "warning", completeSuccess: false, gaps };
+  }
+  return {
+    label: "指定等级通过，干净复跑通过",
+    detail: "仅代表指定版本、数据与运行配置下的指定任务通过，不等于整篇论文结论得到验证。",
+    tone: "success",
+    completeSuccess: true,
+    gaps,
+  };
+}
 
 export const ACTIONS = [
   "read_file",
@@ -33,6 +205,9 @@ export const BLOCK_LABELS: ReadonlySet<string> = new Set([
   "path_escape",
   "env_not_allowed",
   "invalid_argument",
+  "protected_file",
+  "action_not_allowed",
+  "change_not_allowed",
 ]);
 
 export function isActionEvent(e: RunEvent): boolean {
@@ -53,24 +228,50 @@ export function isBlockedEvent(e: RunEvent): boolean {
 /**
  * 事件里可用于展示的"目标"。
  *
- * 后端目前只回 `{ok, exit_code}` + 一句 Observation（契约 §7），动作参数
- * 并不单列。所以这里从 summary 里把目标读回来——**读不出来就返回空串**，
- * 不编一个看着像真的路径。
+ * 优先读取后端事件的扁平参数；嵌套 request 仅兼容历史记录。
+ * 未记录的字段不从界面状态或模板数据补造。
  */
+export function actionParams(e: RunEvent): Record<string, string> {
+  const out: Record<string, string> = {};
+  const d = (e.data ?? {}) as Record<string, unknown>;
+  for (const key of ["path", "requirement", "query", "env_name", "env_value"] as const) {
+    const v = d[key];
+    if (typeof v === "string" && v) out[key] = v;
+  }
+  // 早期版本（或外部构造的事件）可能带 request 嵌套对象
+  const nested = d.request;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    for (const [k, v] of Object.entries(nested as Record<string, unknown>)) {
+      if ((typeof v === "string" || typeof v === "number") && !(k in out)) out[k] = String(v);
+    }
+  }
+  return out;
+}
+
+
 export function targetOf(e: RunEvent): string {
-  const r = (e.data?.request ?? {}) as Record<string, unknown>;
-  if (typeof r.path === "string" && r.path) {
-    const start = typeof r.start_line === "number" && r.start_line > 1 ? `:${r.start_line}` : "";
-    return `${r.path}${start}`;
+  const p = actionParams(e);
+  if (p.path) {
+    // start_line 只在早期 request 嵌套里出现过；后端扁平事件不下发它，
+    // 没有就不拼，不编一个行号出来。
+    const start = p.start_line && Number(p.start_line) > 1 ? `:${p.start_line}` : "";
+    return `${p.path}${start}`;
   }
-  if (typeof r.requirement === "string" && r.requirement) return r.requirement;
-  if (typeof r.name === "string" && r.name) {
-    return typeof r.value === "string" ? `${r.name}=${r.value}` : r.name;
+  if (p.requirement) return p.requirement;
+  if (p.query) return `搜索 "${p.query}"`;
+  if (p.env_name) {
+    if (p.env_value && !isBlockedEvent(e)) return `${p.env_name}=${p.env_value}`;
+    // 后端只下发变量名（env_name），值不单列。Observation 的 message 是
+    // `set FOO=1` 这种真实文本，从那里读回值；读不到就只显示变量名。
+    const set = /^set (\S+=.+)$/.exec(e.message);
+    if (set && set[1].startsWith(`${p.env_name}=`)) return set[1];
+    return p.value ? `${p.env_name}=${p.value}` : p.env_name;
   }
-  if (typeof r.summary === "string" && r.summary) return `"${r.summary}"`;
+  if (p.name) return p.value ? `${p.name}=${p.value}` : p.name;
+  if (p.summary) return `"${p.summary}"`;
 
   const m = e.message;
-  // 越界时回显模型给的原始串（errors.path_escape 的格式，逐字固定）。
+  // 老 run 的兜底：越界时回显模型给的原始串（errors.path_escape 的固定格式）。
   const escape = /^path_escape:(.*)$/.exec(m);
   if (escape) return escape[1];
   const env = /^env_not_allowed:(.*)$/.exec(m);
@@ -92,7 +293,7 @@ export function targetOf(e: RunEvent): string {
 export interface StageView {
   id: RunState | "succeeded";
   label: string;
-  status: "todo" | "active" | "done" | "bad";
+  status: "todo" | "active" | "done" | "bad" | "skipped";
   /** 进入该阶段的次数：自愈回环里 installing / testing 会 > 1。 */
   count: number;
   /** 首次进入的绝对时间（ms），没有事件时为 null。 */
@@ -102,14 +303,16 @@ export interface StageView {
 }
 
 export const STAGE_ORDER: { id: RunState | "succeeded"; label: string }[] = [
-  { id: "queued", label: "排队" },
-  { id: "preparing", label: "准备环境" },
-  { id: "planning", label: "生成计划" },
-  { id: "installing", label: "安装依赖" },
-  { id: "testing", label: "运行测试" },
-  { id: "diagnosing", label: "诊断失败" },
-  { id: "repairing", label: "修复中" },
-  { id: "succeeded", label: "成功" },
+  { id: "queued", label: "等待开始" },
+  { id: "preparing", label: "获取项目代码" },
+  { id: "planning", label: "确定运行方式" },
+  { id: "installing", label: "安装所需依赖" },
+  { id: "testing", label: "运行并检查结果" },
+  { id: "diagnosing", label: "分析失败原因" },
+  { id: "repairing", label: "尝试自动修复" },
+  { id: "verifying", label: "独立核验科学指标" },
+  { id: "replaying", label: "干净环境复跑" },
+  { id: "succeeded", label: "运行结束，查看结论" },
 ];
 
 /** 失败类别 → 它发生在哪个阶段（用来把断掉的那一格标红）。 */
@@ -119,21 +322,22 @@ function stageOfFailure(category: string | null | undefined): RunState | null {
   switch (stem) {
     case "clone_failed":
       return "preparing";
+    case "missing_run_command":
+    case "invalid_expected_artifact":
+    case "llm_unavailable":
+      return "planning";
     case "install_failed":
     case "requirement_rejected":
+    case "version_conflict":
       return "installing";
     case "smoke_test_failed":
     case "missing_dependency":
-    case "missing_module":
-    case "missing_attribute":
-    case "import_error":
-    case "syntax_error":
-    case "runtime_error":
-    case "assertion_failed":
-    case "artifact_missing":
+    case "hardcoded_path":
+    case "cuda_only":
+    case "deprecated_api":
+    case "missing_private_data":
+    case "requires_gpu":
       return "testing";
-    case "llm_unavailable":
-      return "planning";
     default:
       return null;
   }
@@ -159,15 +363,16 @@ export function buildStages(events: RunEvent[], state: RunState | undefined): St
   }
 
   // 失败落在哪一格：先按 failure_category 映射，映射不出来就退到最后有事件的那格。
-  const lastWithEvents = [...STAGE_ORDER]
-    .reverse()
-    .find((s) => byState.has(s.id) && s.id !== "succeeded")?.id as RunState | undefined;
-  const failureStage =
-    current === "failed"
-      ? (stageOfFailure((events.at(-1)?.data?.failure_category as string | undefined) ?? null) ??
-        lastWithEvents ??
-        null)
-      : null;
+  const lastWithEvents = [...events].reverse().find((event) => !TERMINAL.has(event.state));
+  const failedCommand = [...events].reverse().find((event) =>
+    (event.kind === "test" || event.kind === "install") &&
+    (event.data.timed_out === true || (typeof event.data.exit_code === "number" && event.data.exit_code !== 0)),
+  );
+  const failureStage = current === "failed"
+    ? (lastWithEvents?.kind === "diagnosis"
+      ? failedCommand?.state ?? "testing"
+      : lastWithEvents?.state ?? stageOfFailure((events.at(-1)?.data?.failure_category as string | undefined) ?? null))
+    : null;
 
   const starts = STAGE_ORDER.map((s) => {
     const list = byState.get(s.id) ?? [];
@@ -183,20 +388,23 @@ export function buildStages(events: RunEvent[], state: RunState | undefined): St
     const list = byState.get(s.id) ?? [];
     const startedAt = starts[i];
     const nextStart = starts.slice(i + 1).find((t) => t !== null) ?? null;
-    const end = nextStart ?? (startedAt !== null && !terminal ? Date.now() : null);
+    const end = nextStart ?? (startedAt !== null ? (terminal ? Date.parse(events.at(-1)!.timestamp) : Date.now()) : null);
     const durationMs = startedAt !== null && end !== null ? Math.max(0, end - startedAt) : null;
 
     let status: StageView["status"];
     if (s.id === current && !terminal) {
       status = "active";
     } else if (s.id === "succeeded") {
-      status = current === "succeeded" ? "active" : "todo";
+      status = current === "succeeded" ? "done" : "todo";
     } else if (failureStage === s.id) {
       status = "bad";
     } else if (list.length > 0) {
-      // 离开该阶段后才看最后一次执行结果：exit 0 才算做完，非 0 是坏的。
-      const code = list.at(-1)?.data?.exit_code;
-      status = typeof code === "number" && code !== 0 ? "bad" : "done";
+      const last = list.at(-1)!;
+      const skipped = last.kind === "install" && last.message.includes("no requirements.txt") && last.message.includes("skipped");
+      const code = last.data.exit_code;
+      const verificationFailed = s.id === "verifying" && (last.data.status === "failed" || last.data.status === "blocked");
+      const interrupted = current === "cancelled" && s.id === lastWithEvents?.state;
+      status = skipped || interrupted ? "skipped" : (verificationFailed || last.data.ok === false || last.data.timed_out === true || (typeof code === "number" && code !== 0)) ? "bad" : "done";
     } else if (s.id === "queued" && current !== "queued" && i < currentIdx) {
       // queued 是状态机里唯一不写事件的阶段：只有它允许"没事件也算走过"。
       status = "done";
@@ -250,19 +458,23 @@ const STAGE_EST: Partial<Record<RunState, number>> = {
   testing: 22_000,
   diagnosing: 6_000,
   repairing: 45_000,
+  verifying: 8_000,
+  replaying: 60_000, // 新容器里重新安装 + 运行 + 同规则验收
 };
 
-/** 各阶段在总进度里的权重（合计 90，余下 10 是收尾）。 */
+/** 各阶段在总进度里的权重（合计 96，余下 4 是收尾）。 */
 const STAGE_WEIGHT: Partial<Record<RunState, number>> = {
   queued: 2,
   preparing: 26,
   planning: 6,
   installing: 34,
   testing: 22,
+  verifying: 5,
+  replaying: 5,
 };
 
 /** 进度条上的阶段分界刻度（0–1），与上面权重逐项对应。 */
-export const PROGRESS_TICKS = [0.022, 0.311, 0.378, 0.756];
+export const PROGRESS_TICKS = [0.02, 0.28, 0.34, 0.68, 0.90];
 
 export function buildProgress(
   events: RunEvent[],
@@ -293,7 +505,7 @@ export function buildProgress(
       const ratio = est > 0 ? Math.min(0.92, Math.max(0.08, ran / est)) : 0.12;
       pct += w * ratio;
       if (est > 0) remaining += Math.max(0, est - ran);
-    } else if (!terminal) {
+    } else if (!terminal && current !== "verifying") {
       remaining += est;
     }
   }
@@ -416,6 +628,12 @@ export function buildLoop(events: RunEvent[], state: RunState | undefined): Loop
   }
 
   const current = state ?? "queued";
+  // 核验是独立阶段，不是又一轮修复；即使缺少 repair_round / final 事件也不保留“进行中”。
+  if (current === "verifying" || current === "replaying" || TERMINAL.has(current)) {
+    const boundary = events.find((event) => event.state === "verifying" || event.state === "replaying" || TERMINAL.has(event.state))?.timestamp
+      ?? events.at(-1)?.timestamp;
+    if (boundary) for (const round of rounds) round.finishedAt ??= boundary;
+  }
   const last = rounds.at(-1) ?? null;
   const inLoop = current === "diagnosing" || current === "repairing";
 
@@ -491,7 +709,7 @@ export function buildRows(events: RunEvent[]): ActionRow[] {
       reason: blocked ? e.message : undefined,
     });
   }
-  return rows.slice(-80);
+  return rows;
 }
 
 // ─────────────────────────────────────────────────── ACI 校验轨迹
@@ -644,21 +862,37 @@ export interface FailureExplain {
 /**
  * 已知失败类别 → 一句话结论。类别名与后端逐字相同，不做映射。
  *
- * 键必须覆盖后端所有会写进 `failure_category` 的值：`_fail` 的四个直接类别
- * （clone_failed / missing_run_command / requirement_rejected / time_budget_exceeded）
- * 加上 classifier 的八类靶场分类里的七个（`none` 不会作为失败出现）。
- * 漏一个，界面就只能说"没有对应的解释文本"——那等于把后端已经给出的结论吞掉。
+ * 键必须覆盖后端所有会写进 `failure_category` 的值。来源不只 `_fail`：
+ *   - `_fail` 直接类别：clone_failed / missing_run_command /
+ *     invalid_expected_artifact / service_interrupted / requirement_rejected /
+ *     timeout / smoke_test_failed / install_failed
+ *   - 常量兜底：TIME_BUDGET_EXHAUSTED、LLM_UNAVAILABLE
+ *   - worker 未捕获异常兜底：internal_error（app/worker.py:66）
+ *   - 分类器返回值：classifier 的 7 类 + `none`（规则表没命中时模型的合法
+ *     取值）+ `unknown`（分类失败或模型返回非法值）
+ *
+ * 上一版漏了 invalid_expected_artifact / timeout / internal_error /
+ * unknown / none 五个，注释还写「`none` 不会作为失败出现」——实测 fake
+ * 沙箱跑 paper-pysindy 时 `failure_category` 就是 `none`，界面显示
+ * 「后端回了失败类别，但没有对应的解释文本」。漏一个就等于把后端已经
+ * 给出的结论吞掉。
  *
  * 写这些句子时守同一条规矩：**只陈述后端凭什么这么判**（命中哪条规则、
- * 哪一步退出码非零），不替它分析成因。
+ * 哪一步退出码非零、哪个兜底分支），不替它分析成因。
  */
-const FAILURE_VERDICTS: Record<string, string> = {
+export const FAILURE_VERDICTS: Record<string, string> = {
   clone_failed: "克隆失败：git clone 直接返回非零退出码，没有进入安装与测试阶段。",
   missing_run_command:
     "没能确定运行命令：仓库里没有可识别的入口，规划阶段拿到的命令是空的，因此没有执行任何东西。",
+  invalid_expected_artifact:
+    "期望产物路径不合法：后端要求它是 workspace 内的相对路径，规划阶段给出的值不满足，因此没有进入安装与测试。",
+  timeout:
+    "沙箱会话提前关闭：后端在等待命令返回时收到 SandboxClosedError，把这次运行记为 timeout。",
   smoke_test_failed: "测试命令跑完了，但退出码非零，产物校验没过。",
   install_failed: "依赖没装上：requirements 里的包在沙箱内装不下来，或不在允许的依赖清单里。",
   requirement_rejected: "依赖字符串被校验层拦下（含命令分隔符等），这一步没有产生副作用。",
+  internal_error:
+    "工作线程遇到未分类的异常：后端把 runner 抛出的异常兜底记成 internal_error，只留了异常类型和短消息。",
   missing_dependency:
     "缺依赖导致 import 失败：stderr 命中 ModuleNotFoundError / ImportError（自愈回环开着时会先尝试补齐）。",
   version_conflict:
@@ -674,7 +908,50 @@ const FAILURE_VERDICTS: Record<string, string> = {
   llm_unavailable: "生成运行计划时模型不可用（网关或配额），没进入执行阶段。",
   service_interrupted: "沙箱不可用或后端服务中断，本次运行被打断，可重试。",
   time_budget_exceeded: "整体墙钟预算耗尽被强制结束——通常是某一步一直没有返回。",
+  unknown:
+    "分类器没能给出有效结论：模型返回了不在允许清单里的值，或分类调用本身失败，后端统一记成 unknown。",
+  none:
+    "分类器没能把这次失败归进任何已知类别：规则表未命中，且失败上下文里没有可匹配的错误特征（例如退出码为 0、没有 stderr）。",
 };
+
+/** 类别 → 中文短标签，供标题、回环 chip、报告摘要复用（括号内保留后端原名）。 */
+const FAILURE_SHORT: Record<string, string> = {
+  clone_failed: "克隆失败",
+  missing_run_command: "无运行命令",
+  invalid_expected_artifact: "产物路径非法",
+  timeout: "沙箱超时",
+  smoke_test_failed: "测试未通过",
+  install_failed: "安装失败",
+  requirement_rejected: "依赖被拒",
+  internal_error: "内部异常",
+  missing_dependency: "缺依赖",
+  version_conflict: "版本冲突",
+  hardcoded_path: "硬编码路径",
+  cuda_only: "需要 CUDA",
+  deprecated_api: "旧 API",
+  missing_private_data: "私有数据缺失",
+  requires_gpu: "需要 GPU",
+  llm_unavailable: "模型不可用",
+  service_interrupted: "服务中断",
+  time_budget_exceeded: "预算耗尽",
+  unknown: "无法分类",
+  none: "未归类",
+};
+
+/**
+ * 界面上展示失败类别时统一走这里。
+ *
+ * `short=true` 只给中文短标签（Hero 大标题里放不下括号原名）；默认返回
+ * 「中文（后端原名）」，方便对照后端与日志。未收录的类别原样返回，
+ * 不编一个看着像真的中文名。
+ */
+export function failureText(category: string | null | undefined, short = false): string {
+  if (!category) return "";
+  const stem = labelOf(category);
+  const label = FAILURE_SHORT[stem];
+  if (!label) return stem;
+  return short ? label : `${label}（${stem}）`;
+}
 
 const FAILURE_DETAILS: Record<string, string> = {
   smoke_test_failed:
@@ -809,10 +1086,16 @@ export function explainFailure(category: string, events: RunEvent[]): FailureExp
     };
   }
 
+  // 兜底只该在后端新增了类别、前端还没来得及收录时出现：把类别本身说出来，
+  // 不留「没有对应的解释文本」这种把结论吞掉的句子。
+  const verdict =
+    FAILURE_VERDICTS[category] ??
+    `后端给出的失败类别是「${failureText(category) || category}」，前端还没有收录它的解释文本。`;
+
   const last = lastStderr(events);
   if (last) {
     return {
-      verdict: FAILURE_VERDICTS[category] ?? "后端回了失败类别，但没有对应的解释文本。",
+      verdict,
       detail:
         "下面是这次运行里最后一条非零退出动作的 stderr 尾段（后端在 install / test 事件里带 stderr_tail），" +
         "判断依据就在这段原文里，界面不做二次解读。",
@@ -823,7 +1106,7 @@ export function explainFailure(category: string, events: RunEvent[]): FailureExp
   }
 
   return {
-    verdict: FAILURE_VERDICTS[category] ?? "后端回了失败类别，但没有对应的解释文本。",
+    verdict,
     detail:
       FAILURE_DETAILS[category] ??
       "这次失败的事件里没有带 stderr_tail（只有 install / test 动作会带），后端也只记了失败类别，" +

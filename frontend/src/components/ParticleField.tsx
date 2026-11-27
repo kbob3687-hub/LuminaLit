@@ -199,5 +199,5 @@ export function ParticleField({ bursts }: { bursts: ParticleBurst[] }) {
     }
   }, [bursts]);
 
-  return <canvas ref={canvasRef} className="pointer-events-none fixed inset-0 z-[1]" />;
+  return <canvas aria-hidden="true" ref={canvasRef} className="pointer-events-none fixed inset-0 z-[1] opacity-60" />;
 }

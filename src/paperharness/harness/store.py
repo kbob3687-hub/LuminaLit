@@ -24,15 +24,39 @@ class RunStore:
             raise ValueError(f"invalid run_id: {run_id!r}")
         return self.root / run_id
 
-    def create_run(self, request: RunRequest) -> str:
-        run_id = uuid.uuid4().hex
+    def create_run(
+        self,
+        request: RunRequest,
+        *,
+        run_id: str | None = None,
+        confirmation: dict | None = None,
+    ) -> str:
+        # 确认请求可以补齐预留 ID 的半创建目录；普通 direct 创建仍要求新目录。
+        resumable = run_id is not None and confirmation is not None
+        run_id = run_id if run_id is not None else uuid.uuid4().hex
         run_dir = self.run_dir(run_id)
-        run_dir.mkdir(parents=True)
-        (run_dir / "logs").mkdir()
-        (run_dir / "workspace").mkdir()
+        run_dir.mkdir(parents=True, exist_ok=resumable)
+        (run_dir / "logs").mkdir(exist_ok=resumable)
+        (run_dir / "workspace").mkdir(exist_ok=resumable)
         self._write_json(run_dir / "request.json", request.model_dump(mode="json"))
+        if confirmation is not None:
+            self._write_json(run_dir / "preflight.json", confirmation)
+        # queued 是创建完成的标记，必须在 request 和确认快照原子落盘后写入。
         self.write_status(run_id, RunState.QUEUED, {})
         return run_id
+
+    def write_preflight(self, preflight_id: str, data: dict) -> None:
+        if not re.fullmatch(r"[0-9a-f]{32}", preflight_id):
+            raise ValueError("invalid preflight_id")
+        with self._lock:
+            self._write_json(self.root / "preflights" / f"{preflight_id}.json", data)
+
+    def read_preflight(self, preflight_id: str) -> dict | None:
+        if not re.fullmatch(r"[0-9a-f]{32}", preflight_id):
+            raise ValueError("invalid preflight_id")
+        with self._lock:
+            path = self.root / "preflights" / f"{preflight_id}.json"
+            return self._read_json(path) if path.is_file() else None
 
     def append_event(
         self,

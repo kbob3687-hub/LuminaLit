@@ -5,9 +5,8 @@ import {
   type RunEvent,
   type RunState,
   type RunStatus,
-  labelOf,
 } from "../types";
-import type { AciTrace, LoopView, StageView } from "../runModel";
+import { actionParams, failureText, type AciTrace, type LoopView, type StageView } from "../runModel";
 import { dur } from "./StageTrack";
 
 const labelZh = (label: string | null): string =>
@@ -17,7 +16,7 @@ const labelZh = (label: string | null): string =>
 
 export function AciPanel({ trace, event }: { trace: AciTrace; event: RunEvent }) {
   const blocked = trace.verdict === "block";
-  const request = (event.data?.request ?? {}) as Record<string, unknown>;
+  const request = actionParams(event);
 
   return (
     <div className="space-y-5">
@@ -26,8 +25,8 @@ export function AciPanel({ trace, event }: { trace: AciTrace; event: RunEvent })
         className={clsx(
           "rounded-[10px] border px-4 py-3.5",
           blocked
-            ? "border-reject/45 bg-gradient-to-br from-reject/[.13] to-transparent"
-            : "border-pass/35 bg-gradient-to-br from-pass/[.09] to-transparent",
+            ? "border-reject/45 bg-reject/[.07]"
+            : "border-pass/35 bg-pass/[.06]",
         )}
       >
         <div className="flex items-center gap-2.5">
@@ -61,15 +60,14 @@ export function AciPanel({ trace, event }: { trace: AciTrace; event: RunEvent })
       {/* 动作目标 */}
       <div>
         <SectionTitle>
-          {Object.keys(request).length ? "模型的原始请求" : "动作目标（从 Observation 反推）"}
+          {Object.keys(request).length ? "动作参数（后端事件记录）" : "动作目标"}
         </SectionTitle>
         <div className="mt-2 overflow-hidden rounded-[9px] border border-rule">
           {Object.entries(request).length === 0 ? (
             <div className="px-3 py-2.5 font-mono text-[11.5px] leading-relaxed text-ink-mid">
               <span className="text-ink">{trace.target || "—"}</span>
               <div className="mt-1 text-[10.5px] text-ink-muted">
-                契约 §7 只把一句 summary 回给模型，动作参数不单列；这里的路径/依赖串是从
-                summary 的固定格式里读回来的。
+                本条事件没有结构化参数；目标来自实际 Observation，未记录的内容保持为空。
               </div>
             </div>
           ) : (
@@ -146,9 +144,9 @@ export function AciPanel({ trace, event }: { trace: AciTrace; event: RunEvent })
           {trace.exitCode !== null && (
             <div className="mt-1 text-ink-muted">exit_code = {trace.exitCode}</div>
           )}
-          {typeof event.data?.output_tail === "string" && event.data.output_tail && (
+          {Boolean(event.data?.stdout_tail || event.data?.stderr_tail) && (
             <pre className="mt-2 max-h-40 overflow-y-auto border-t border-white/[.06] pt-2 text-[10.5px] whitespace-pre-wrap text-ink-muted">
-              {event.data.output_tail}
+              {[event.data.stdout_tail, event.data.stderr_tail].filter(v => typeof v === "string").join("\n")}
             </pre>
           )}
         </div>
@@ -186,7 +184,7 @@ export function LoopPanel({
       <div className="rounded-[9px] border border-accent/30 bg-accent/[.06] px-3 py-2.5 font-mono text-[11px] text-ink-mid">
         已用 <b className="text-ink">{loop.rounds.length}</b> / {loop.budget} 轮预算 ·{" "}
         {state === "diagnosing" || state === "repairing" ? (
-          <span className="text-[#9db4ff]">{loop.doing}</span>
+          <span className="text-accent">{loop.doing}</span>
         ) : (
           <span>回环已结束</span>
         )}
@@ -197,7 +195,7 @@ export function LoopPanel({
           <div className="flex items-center gap-2.5 border-b border-rule px-3.5 py-2.5">
             <span className="font-mono text-[11px] text-ink">第 {r.round} 轮</span>
             <span className="rounded-[4px] border border-warn/40 bg-warn/[.07] px-1.5 py-[1px] font-mono text-[10px] text-warn">
-              {r.failureClass}
+              {failureText(r.failureClass)}
             </span>
             <span className="font-mono text-[10px] text-ink-muted">
               {r.phase === "install" ? "安装失败" : "测试失败"}
@@ -314,24 +312,22 @@ export function StagePanel({
 
 /* ───────────────────────────────────────────── 执行计划 */
 
-export function PlanPanel({ status }: { status: RunStatus | null }) {
-  const result = status?.result;
+export function PlanPanel({ status, events }: { status: RunStatus | null; events: RunEvent[] }) {
+  const plan = events.find((event) => event.kind === "plan")?.data;
+  const command = Array.isArray(plan?.command) ? plan.command.join(" ") : "尚未确定";
+  const sandbox = events.some((event) => event.kind === "sandbox_ready");
   return (
     <div className="space-y-3">
+      <h3 className="text-sm font-semibold text-ink">本次运行方式</h3>
       <div className="divide-y divide-white/[.045] overflow-hidden rounded-[9px] border border-rule">
-        <KV k="resolved_revision" v={result?.resolved_revision ?? "—"} />
-        <KV k="outcome" v={result?.outcome ?? "运行中"} />
-        <KV k="verified" v={result ? String(result.verified) : "—"} />
-        <KV k="attempts" v={result ? String(result.attempts) : "—"} />
-        <KV
-          k="failure_category"
-          v={result?.failure_category ? `${labelOf(result.failure_category)}` : "—"}
-        />
+        <KV k="运行命令" v={command} />
+        <KV k="Python 版本" v={typeof plan?.python_version === "string" ? plan.python_version : "尚未确定"} />
+        <KV k="结果文件" v={typeof plan?.expected_artifact === "string" ? plan.expected_artifact : plan ? "未指定结果文件" : "尚未确定"} />
+        <KV k="源码版本" v={status?.result?.resolved_revision ?? (typeof plan?.resolved_revision === "string" ? plan.resolved_revision : "尚未确认")} />
+        <KV k="运行环境" v={sandbox ? "已记录创建成功（不代表当前仍在运行）" : "暂无创建完成记录"} />
+        <KV k="最终错误类别" v={status?.result?.failure_category ? failureText(status.result.failure_category) : "无"} />
       </div>
-      <p className="text-[10.5px] leading-relaxed text-ink-muted">
-        运行计划（命令、Python 版本、期望产物）在 planning 阶段由后端确定并落盘为
-        run_plan.json；详情见「生成计划」阶段的 plan 事件。
-      </p>
+      <p className="text-xs leading-6 text-ink-muted">本次验证检查程序退出状态和指定结果文件；不代表已验证论文中的全部实验指标。</p>
     </div>
   );
 }

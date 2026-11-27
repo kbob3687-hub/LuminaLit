@@ -1,239 +1,253 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
-import { ApiError, getEnvironment, getPatch, getReport } from "../api";
-import type { EnvironmentManifest, RunStatus } from "../types";
+import { ApiError, getPatch, getReport, getEnvironment } from "../api";
+import type { RunStatus } from "../types";
+import { VerificationPanel } from "./VerificationPanel";
+import { ReplayPanel } from "./ReplayPanel";
+import { overallConclusion } from "../runModel";
+import { guidanceOf } from "./RunSceneParts";
+import { parseTab, type TabId } from "../deepLink";
 
 /**
- * 结果报告面板：把后端落盘的四个文件搬到界面上。
+ * 结果报告面板：把后端落盘的三个文件搬到界面上。
  *
- * 四个端点各管一件事，不要混：
- *   GET /api/runs/{id}/report       → report.md 原文（收尾才落盘，运行中 404）
- *   GET /api/runs/{id}/patch        → patch.diff（无改动回空串，不是 404）
- *   GET /api/runs/{id}/environment  → environment.json（收尾才落盘，运行中 404）
- *   GET /api/runs/{id}              → result.json 里的字段（已在 status 里）
+ * 三个端点各管一件事，不要混：
+ *   GET /api/runs/{id}/report  → report.md 原文（收尾才落盘，运行中 404）
+ *   GET /api/runs/{id}/patch   → patch.diff（无改动回空串，不是 404）
+ *   GET /api/runs/{id}         → result.json 里的字段（已在 status 里）
  *
- * 报告原文很朴素（`outcome=...` 几行），所以这里做两层：
- * 上层是把 key=value 解析成表格的摘要，下层是「原文」——原文永远可下载，
- * 界面再怎么美化也不改文件内容。
- *
- * 环境清单是唯一一个结构化端点（JSON 而非纯文本）。它回答的是报告里看不到的
- * 那半句：这份结论是在哪个镜像、哪个 commit、装了哪些包的前提下得到的。
+ * 首屏展示后端 guidance；原始表格、JSON、补丁都收在技术文件中。
+ * 下载只使用真实取得的文本，不改写内容，也不为回放生成假文件。
  */
 
-type Tab = "report" | "patch" | "env" | "json";
+type Tab = TabId;
 
 const TABS: { id: Tab; label: string; file: (rid: string) => string }[] = [
   { id: "report", label: "结果报告", file: (r) => `paperharness-${r.slice(0, 8)}-report.md` },
   { id: "patch", label: "补丁", file: (r) => `paperharness-${r.slice(0, 8)}-patch.diff` },
-  { id: "env", label: "环境", file: (r) => `paperharness-${r.slice(0, 8)}-environment.json` },
+  { id: "env", label: "环境清单", file: (r) => `paperharness-${r.slice(0, 8)}-environment.json` },
   { id: "json", label: "结果 JSON", file: (r) => `paperharness-${r.slice(0, 8)}-result.json` },
 ];
 
 export function ReportPanel({ runId, status }: { runId: string | null; status: RunStatus | null }) {
-  // 演示/截图直链：?panel=report&tab=patch
-  const [tab, setTab] = useState<Tab>(() => {
-    const t = new URLSearchParams(window.location.search).get("tab");
-    return t === "patch" || t === "json" || t === "env" ? t : "report";
-  });
-  const [docs, setDocs] = useState<Partial<Record<Tab, string>>>({});
-  const [envDoc, setEnvDoc] = useState<EnvironmentManifest | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-
+  // 显式文件直链展开技术区，普通入口默认只展示可读结论；tab 走白名单。
+  const q = new URLSearchParams(window.location.search);
+  const initialTab = parseTab(q);
+  const [tab, setTab] = useState<Tab>(() => initialTab);
+  const [filesOpen, setFilesOpen] = useState(() => initialTab !== "report");
   const result = status?.result ?? null;
-  const terminal = Boolean(
-    status && ["succeeded", "failed", "cancelled"].includes(status.state),
+  const terminal = Boolean(status && ["succeeded", "failed", "cancelled"].includes(status.state));
+  const guidance = status ? guidanceOf(status, false) : undefined;
+  const conclusion = overallConclusion(status, false);
+  const tone = terminal && result ? conclusion.tone : guidance?.tone ?? "neutral";
+  // result.json 直接来自轮询，不重新请求或改写结果字段。
+  const jsonText = result ? JSON.stringify(result, null, 2) : "";
+
+  return (
+    <div className="space-y-4">
+      <div
+        className={clsx(
+          "rounded-[10px] border px-4 py-3.5",
+          tone === "success" ? "border-pass/40 bg-pass/[.06]"
+            : tone === "error" ? "border-reject/40 bg-reject/[.06]"
+              : tone === "warning" ? "border-warn/40 bg-warn/[.06]"
+                : "border-rule bg-white/[.02]",
+        )}
+      >
+        <h3 className={clsx(
+          "text-[15px] font-semibold",
+          tone === "success" ? "text-pass" : tone === "error" ? "text-reject"
+            : tone === "warning" ? "text-warn" : "text-ink",
+        )}>
+          {terminal && result ? conclusion.label : guidance?.title ?? "运行结果将在结束后生成"}
+        </h3>
+        {guidance?.detail && (
+          <p className="mt-2 text-[13px] leading-relaxed text-ink-mid">{guidance.detail}</p>
+        )}
+        {guidance?.repair_summary && (
+          <p className="mt-2 text-[13px] leading-relaxed text-ink-mid">
+            <span className="font-medium text-ink">修复情况：</span>{guidance.repair_summary}
+          </p>
+        )}
+        {!result && (
+          <p className="mt-2 text-[12px] leading-relaxed text-ink-muted">
+            {terminal ? "运行已结束，正在整理最终结果和报告。" : "报告会在运行结束后生成，你可以先查看当前进度。"}
+          </p>
+        )}
+        {guidance && guidance.next_steps.length > 0 && (
+          <div className="mt-4 border-t border-rule pt-3">
+            <h4 className="text-[13px] font-medium text-ink">下一步</h4>
+            <ul className="mt-2 list-disc space-y-1.5 pl-5 text-[13px] leading-relaxed text-ink-mid">
+              {guidance.next_steps.map((step, i) => <li key={i}>{step}</li>)}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      {result && <VerificationPanel verification={result.verification} runId={runId === result.run_id ? runId : null} />}
+      {result && <ReplayPanel result={result} runId={runId === result.run_id ? runId : null} />}
+
+      <details
+        open={filesOpen}
+        onToggle={(event) => setFilesOpen(event.currentTarget.open)}
+        className="rounded-[9px] border border-rule bg-void/40"
+      >
+        <summary className="cursor-pointer px-3.5 py-3 text-[13px] text-ink-mid hover:text-ink">
+          技术文件与下载
+        </summary>
+        {filesOpen && (
+          <div className="space-y-3 border-t border-rule p-3.5">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {TABS.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => setTab(t.id)}
+                  aria-pressed={tab === t.id}
+                  className={clsx(
+                    "cursor-pointer rounded-[5px] border px-3 py-1.5 font-mono text-[11px] transition-colors",
+                    tab === t.id ? "border-rule-hi bg-surface-hi text-ink"
+                      : "border-transparent text-ink-muted hover:text-ink-mid",
+                  )}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            {/* 换任务/标签/进入终态/结果落盘都重建文件视图，不缓存运行中的空补丁。 */}
+            <TechnicalFile
+              key={`${runId}:${tab}:${terminal}:${Boolean(result)}`}
+              runId={runId}
+              tab={tab}
+              terminal={terminal}
+              jsonText={jsonText}
+            />
+            <p className="font-mono text-[10px] leading-relaxed text-ink-muted">
+              文件由后端写入 <code className="text-ink-mid">runs/&lt;run_id&gt;/</code> 目录；
+              界面只做展示与下载，不改写内容。
+            </p>
+          </div>
+        )}
+      </details>
+    </div>
   );
+}
 
-  // result.json 直接来自轮询拿到的 status，不用再请求
-  const jsonText = useMemo(() => (result ? JSON.stringify(result, null, 2) : ""), [result]);
+/** 每个文件视图独立持有请求与错误，切换后旧响应不能写入新标签。 */
+function TechnicalFile({ runId, tab, terminal, jsonText }: {
+  runId: string | null;
+  tab: Tab;
+  terminal: boolean;
+  jsonText: string;
+}) {
+  const [doc, setDoc] = useState<string | null>(null);
+  const [loading, setLoading] = useState(Boolean(runId && tab !== "json"));
+  const [err, setErr] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const mounted = useRef(false);
+  const copyTimer = useRef<number | null>(null);
 
-  const load = useCallback(
-    async (which: Tab) => {
-      if (!runId) return;
-      if (which === "json") return;
-      setLoading(true);
-      setErr(null);
-      try {
-        if (which === "env") {
-          const manifest = await getEnvironment(runId);
-          setEnvDoc(manifest);
-          // 复制/下载走的都是这段文本，和环境页签的表格共用一份数据
-          setDocs((d) => ({ ...d, env: JSON.stringify(manifest, null, 2) }));
-          return;
-        }
-        const text = which === "report" ? await getReport(runId) : await getPatch(runId);
-        setDocs((d) => ({ ...d, [which]: text }));
-      } catch (e) {
-        const status = (e as ApiError)?.status;
-        setErr(
-          status === 404
-            ? which === "env"
-              ? "环境清单尚未生成：后端在运行收尾时才写 environment.json，运行中请稍后再看。"
-              : "报告尚未生成：后端只在运行收尾时写 report.md，运行中请稍后再看。"
-            : `读取失败：${(e as Error)?.message ?? String(e)}`,
-        );
-      } finally {
-        setLoading(false);
-      }
-    },
-    [runId],
-  );
-
-  // 切页 / 进终态 / 换 run 时拉一次；已取到的就不重复请求
   useEffect(() => {
-    if (tab === "json") return;
-    if (docs[tab] !== undefined) return;
-    void load(tab);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, runId, terminal]);
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    };
+  }, []);
 
-  const text =
-    tab === "json" ? jsonText : (docs[tab] ?? "");
+  useEffect(() => {
+    if (!runId || tab === "json") return;
+    let cancelled = false;
+    setLoading(true);
+    setErr(null);
+    setDoc(null);
+    const load = async () => {
+      try {
+        const text = tab === "report" ? await getReport(runId) : tab === "env" ? JSON.stringify(await getEnvironment(runId), null, 2) : await getPatch(runId);
+        if (!cancelled) setDoc(text);
+      } catch (error) {
+        if (cancelled) return;
+        setErr(error instanceof ApiError && error.status === 404
+          ? terminal ? "文件尚未就绪，请稍后重试。" : "文件将在运行结束后生成，请稍后再看。"
+          : `读取失败：${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void load();
+    return () => { cancelled = true; };
+  }, [runId, tab, terminal, retry]);
+
+  const text = runId ? (tab === "json" ? jsonText : doc ?? "") : "";
   const file = TABS.find((t) => t.id === tab)!.file(runId ?? "run");
-
+  const downloadable = Boolean(text) && !loading && !err;
+  const finalised = terminal && Boolean(jsonText);
   const copy = async () => {
+    if (!downloadable) return;
+    setCopyError(null);
     try {
-      await navigator.clipboard.writeText(text || "");
+      await navigator.clipboard.writeText(text);
+      if (!mounted.current) return;
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => setCopied(false), 1600);
     } catch {
-      setErr("剪贴板不可用，请用「下载」保存文件。");
+      if (mounted.current) setCopyError("剪贴板不可用，请用「下载」保存文件。");
     }
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-end gap-1.5">
+        <button
+          onClick={copy}
+          disabled={!downloadable}
+          className="cursor-pointer rounded-[5px] border border-rule-hi px-2.5 py-1 font-mono text-[10.5px] text-ink-mid transition-colors hover:border-ink-muted hover:text-ink disabled:opacity-40"
+        >
+          {copied ? "已复制" : "复制"}
+        </button>
+        <button
+          onClick={() => download(file, text)}
+          disabled={!downloadable}
+          className="cursor-pointer rounded-[5px] border border-accent/45 bg-accent/[.10] px-2.5 py-1 font-mono text-[10.5px] text-accent transition-colors hover:bg-accent/[.18] disabled:opacity-40"
+        >
+          下载 {file.split(".").pop()}
+        </button>
+      </div>
+      {copyError && <p role="alert" className="text-[12px] text-warn">{copyError}</p>}
       {!runId && (
-        <div className="rounded-[9px] border border-rule px-3.5 py-3 font-mono text-[11px] leading-relaxed text-ink-muted">
-          还没拿到 run_id：前端只在 <code className="text-ink-mid">GET /api/runs/{"{id}"}</code>{" "}
-          返回后才知道这次运行是谁。后端没响应时这里不会有报告。
-        </div>
+        <p className="text-[12px] leading-relaxed text-ink-muted">
+          当前没有可读取的真实运行文件；回放仅演示过程，不提供文件下载。
+        </p>
       )}
-
-      {/* 结论摘要：全部取自 result.json，不额外推断 */}
-      <div
-        className={clsx(
-          "rounded-[10px] border px-4 py-3.5",
-          result?.outcome === "succeeded"
-            ? "border-pass/40 bg-gradient-to-br from-pass/[.10] to-transparent"
-            : result
-              ? "border-reject/40 bg-gradient-to-br from-reject/[.09] to-transparent"
-              : "border-rule bg-white/[.02]",
-        )}
-      >
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1.5">
-          <span
-            className={clsx(
-              "font-mono text-[15px] font-semibold",
-              result?.outcome === "succeeded" ? "text-pass" : result ? "text-reject" : "text-ink-muted",
-            )}
-          >
-            {result?.outcome ?? "运行中"}
-          </span>
-          {result && (
-            <>
-              <span className="font-mono text-[11px] text-ink-muted">
-                verified=<b className="text-ink-mid">{String(result.verified)}</b>
-              </span>
-              <span className="font-mono text-[11px] text-ink-muted">
-                attempts=<b className="text-ink-mid">{result.attempts}</b>
-              </span>
-              {result.failure_category && (
-                <span className="rounded-[4px] border border-reject/40 bg-reject/[.08] px-1.5 py-[1px] font-mono text-[10px] text-reject">
-                  {result.failure_category}
-                </span>
-              )}
-              {result.resolved_revision && (
-                <span className="ml-auto truncate font-mono text-[10.5px] text-ink-muted">
-                  rev {result.resolved_revision.slice(0, 12)}
-                </span>
-              )}
-            </>
-          )}
-        </div>
-        {!result && (
-          <p className="mt-1.5 font-mono text-[10.5px] leading-relaxed text-ink-muted">
-            运行还没收尾，result.json 尚未落盘。报告文件在终态后由后端写入。
-          </p>
-        )}
-      </div>
-
-      {/* 三份文件切换 */}
-      <div className="flex items-center gap-1.5">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => {
-              setTab(t.id);
-              setErr(null);
-            }}
-            className={clsx(
-              "cursor-pointer rounded-[5px] border px-3 py-1.5 font-mono text-[11px] transition-colors",
-              tab === t.id
-                ? "border-rule-hi bg-surface-hi text-ink"
-                : "border-transparent text-ink-muted hover:text-ink-mid",
-            )}
-          >
-            {t.label}
-            {t.id === "patch" && docs.patch === "" && (
-              <span className="ml-1 text-[9.5px] text-ink-muted">空</span>
-            )}
-          </button>
-        ))}
-
-        <div className="ml-auto flex items-center gap-1.5">
-          <button
-            onClick={copy}
-            disabled={!text}
-            className="cursor-pointer rounded-[5px] border border-rule-hi px-2.5 py-1 font-mono text-[10.5px] text-ink-mid transition-colors hover:border-ink-muted hover:text-ink disabled:opacity-40"
-          >
-            {copied ? "已复制" : "复制"}
-          </button>
-          <button
-            onClick={() => download(file, text)}
-            disabled={!text}
-            className="cursor-pointer rounded-[5px] border border-accent/45 bg-accent/[.10] px-2.5 py-1 font-mono text-[10.5px] text-[#9db4ff] transition-colors hover:bg-accent/[.18] disabled:opacity-40"
-          >
-            下载 {file.split(".").pop()}
-          </button>
-        </div>
-      </div>
-
-      {/* 文件内容 */}
-      {loading && (
-        <div className="rounded-[9px] border border-rule px-3 py-6 text-center font-mono text-[11px] text-ink-muted">
-          读取中…
-        </div>
-      )}
-
+      {loading && <p className="py-4 text-center text-[12px] text-ink-muted">读取中…</p>}
       {!loading && err && (
-        <div className="rounded-[9px] border border-warn/35 bg-warn/[.06] px-3.5 py-3 font-mono text-[11px] leading-relaxed text-ink-mid">
-          {err}
+        <div role="alert" className="rounded-[9px] border border-warn/35 bg-warn/[.06] px-3.5 py-3 text-[12px] leading-relaxed text-ink-mid">
+          <p>{err}</p>
+          <button onClick={() => setRetry((n) => n + 1)} className="mt-2 cursor-pointer text-accent underline underline-offset-4">
+            重试读取
+          </button>
         </div>
       )}
-
-      {!loading && !err && tab === "report" && docs.report !== undefined && (
-        <ReportBody md={docs.report} />
+      {!loading && !err && tab === "report" && doc !== null && <ReportBody md={doc} />}
+      {!loading && !err && tab === "patch" && doc !== null && (
+        !finalised && !doc.trim()
+          ? <p className="text-[12px] text-ink-muted">{terminal ? "正在整理最终补丁，请稍后查看。" : "运行尚未结束，请等待完成后查看最终补丁。"}</p>
+          : <div className="space-y-2">
+              {!finalised && <p className="text-[12px] text-ink-muted">{terminal ? "正在整理最终补丁，内容可能继续更新。" : "运行尚未结束，当前补丁可能继续变化。"}</p>}
+              <DiffBody diff={doc} />
+            </div>
       )}
-
-      {!loading && !err && tab === "patch" && docs.patch !== undefined && (
-        <DiffBody diff={docs.patch} />
-      )}
-
-      {!loading && !err && tab === "env" && envDoc && <EnvBody env={envDoc} />}
-
-      {!loading && !err && tab === "json" && (
+      {runId && tab === "json" && (
         <pre className="max-h-[52vh] overflow-auto rounded-[9px] border border-rule bg-void/60 px-3.5 py-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-ink-mid">
-          {jsonText || "（运行中，暂无 result.json）"}
+          {jsonText || (terminal ? "运行已结束，正在整理最终结果。" : "结果会在运行结束后生成。")}
         </pre>
       )}
-
-      <p className="font-mono text-[10px] leading-relaxed text-ink-muted">
-        文件由后端写入 <code className="text-ink-mid">runs/&lt;run_id&gt;/</code> 目录；
-        界面只做展示与下载，不改写内容。
-      </p>
+      {!loading && !err && tab === "env" && doc !== null && <div className="space-y-2">
+        <p className="text-xs leading-6 text-ink-muted">运行环境快照；已安装依赖不等于本次新增或修改的依赖。</p>
+        <pre className="max-h-[52vh] overflow-auto rounded-lg border border-rule bg-void/60 p-3 font-mono text-xs whitespace-pre-wrap break-all text-ink-mid">{doc}</pre>
+      </div>}
     </div>
   );
 }
@@ -338,133 +352,6 @@ function parseReport(md: string) {
     rest.push(line);
   }
   return { title, kv, rest: rest.join("\n").trim() };
-}
-
-/* ────────────────────────────────────────────────── 环境清单 */
-
-/**
- * environment.json 的表格版。
- *
- * 四个头字段由 harness 填（一定有），`environment` / `packages` 由沙箱会话
- * 提供（只有真实 Docker 沙箱才有）。缺了就说缺——不拿空对象冒充
- * 「没有环境变量」，那是两件事。
- */
-function EnvBody({ env }: { env: EnvironmentManifest }) {
-  // 排队阶段就被取消的 run，后端写的是 `{}`——那是"还没有沙箱"，不是"环境干净"
-  if (Object.keys(env).length === 0) {
-    return (
-      <div className="rounded-[9px] border border-rule px-3.5 py-4 font-mono text-[11px] leading-relaxed text-ink-muted">
-        这份环境清单是空的：run 在排队阶段就被取消，还没有创建沙箱会话，所以没有可记录的内容。
-      </div>
-    );
-  }
-
-  const vars = env.environment ? Object.entries(env.environment) : null;
-  const pkgs = env.packages ?? null;
-
-  const rows: [string, string][] = [
-    ["resolved_revision", env.resolved_revision || "None"],
-    ["python_version", env.python_version || "None"],
-    ["base_image", env.base_image || "（这份清单没有记录）"],
-    [
-      "command",
-      env.command && env.command.length > 0 ? env.command.join(" ") : "（没有规划出运行命令）",
-    ],
-  ];
-
-  return (
-    <div className="space-y-3">
-      <div className="overflow-hidden rounded-[9px] border border-rule">
-        <div className="border-b border-rule bg-white/[.02] px-3 py-1.5 font-mono text-[9.5px] tracking-[.16em] text-ink-muted uppercase">
-          environment.json
-        </div>
-        {rows.map(([k, v], i) => (
-          <div
-            key={k}
-            className={clsx(
-              "flex items-baseline gap-3 px-3 py-2 font-mono text-[11.5px]",
-              i > 0 && "border-t border-white/[.045]",
-            )}
-          >
-            <span className="w-[148px] shrink-0 text-ink-muted">{k}</span>
-            <span
-              className={clsx(
-                "min-w-0 flex-1 break-all",
-                v === "None" || v.startsWith("（") ? "text-ink-muted" : "text-ink",
-              )}
-            >
-              {v}
-            </span>
-          </div>
-        ))}
-      </div>
-
-      <EnvSection
-        title={vars ? `环境变量 · ${vars.length}` : "环境变量"}
-        empty={
-          vars === null
-            ? "本次沙箱没有提供环境变量清单（宿主机进程的环境不会进容器）。"
-            : vars.length === 0
-              ? "沙箱报告了空的变量表。"
-              : null
-        }
-      >
-        <div className="divide-y divide-white/[.045]">
-          {vars?.map(([k, v]) => (
-            <div key={k} className="flex items-baseline gap-3 px-3 py-1.5 font-mono text-[11px]">
-              <span className="w-[190px] shrink-0 break-all text-ink-muted">{k}</span>
-              <span className="min-w-0 flex-1 break-all text-ink-mid">{v || "（空）"}</span>
-            </div>
-          ))}
-        </div>
-      </EnvSection>
-
-      <EnvSection
-        title={pkgs ? `pip freeze · ${pkgs.length} 个包` : "pip freeze"}
-        empty={
-          pkgs === null
-            ? "本次沙箱没有采集包清单（只有真实 Docker 沙箱会跑 pip freeze）。"
-            : pkgs.length === 0
-              ? "pip freeze 返回空——数据盘镜像里没有可列的包。"
-              : null
-        }
-      >
-        <pre className="max-h-[38vh] overflow-auto px-3 py-2 font-mono text-[10.5px] leading-relaxed whitespace-pre-wrap text-ink-mid">
-          {pkgs?.join("\n")}
-        </pre>
-      </EnvSection>
-
-      <p className="font-mono text-[10px] leading-relaxed text-ink-muted">
-        这份清单说明的是「结论在什么前提下得到的」：同样是 verified=true，在不同 base_image
-        或包版本下含义并不相同。
-      </p>
-    </div>
-  );
-}
-
-function EnvSection({
-  title,
-  empty,
-  children,
-}: {
-  title: string;
-  empty: string | null;
-  children?: ReactNode;
-}) {
-  return (
-    <div className="overflow-hidden rounded-[9px] border border-rule">
-      <div className="border-b border-rule bg-white/[.02] px-3 py-1.5 font-mono text-[9.5px] tracking-[.16em] text-ink-muted uppercase">
-        {title}
-      </div>
-      {empty ? (
-        <div className="px-3 py-2.5 font-mono text-[11px] leading-relaxed text-ink-muted">
-          {empty}
-        </div>
-      ) : (
-        children
-      )}
-    </div>
-  );
 }
 
 /* ────────────────────────────────────────────────── 补丁 */

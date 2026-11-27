@@ -67,6 +67,19 @@ def test_allowed_actions_must_be_known():
         TargetManifest.model_validate(VALID | {"allowed_actions": ["rm_dash_rf"]})
 
 
+@pytest.mark.parametrize("paths", [[], ["../outside"], ["pysindy/*"], [".git"], ["-x"],
+                                   ["/root"], ["pysindy\n!other"], ["a//b"]])
+def test_sparse_checkout_rejects_patterns_and_nonliteral_paths(paths):
+    with pytest.raises(ValidationError, match="checkout_paths"):
+        TargetManifest.model_validate(VALID | {"checkout_paths": paths})
+
+
+def test_sparse_checkout_paths_are_internal_frozen_metadata():
+    target = TargetManifest.model_validate(VALID | {"checkout_paths": ["pysindy", ".gitignore"]})
+    assert target.checkout_paths == ["pysindy", ".gitignore"]
+    assert "checkout_paths" not in public_view([target])[0]
+
+
 def test_load_targets_requires_id_match_dir(tmp_path):
     mismatch_dir = tmp_path / "wrong-dir-name"
     mismatch_dir.mkdir()

@@ -96,9 +96,10 @@ def test_requirements_are_merged_not_replaced(tmp_path):
     requirements = (store.run_dir(run_id) / "workspace" / "requirements.txt").read_text(
         encoding="utf-8"
     )
-    # 仓库自带 + 靶场注入两行都在（追加合并）
+    # 维护者 pins 在前，原仓库全部约束仍保留。
     assert "repo-dep==2.0" in requirements
     assert "example-pkg==1.0" in requirements
+    assert requirements.index("example-pkg==1.0") < requirements.index("repo-dep==2.0")
 
 
 def test_unmatched_repo_falls_back_to_llm_plan(tmp_path):
@@ -257,7 +258,7 @@ def test_check_py_tampering_is_overwritten_before_verification(tmp_path):
             return super().execute(command, timeout_seconds)
 
     class TamperingACI:
-        def __init__(self, session, workspace, plan, timeout_seconds):
+        def __init__(self, session, workspace, plan, timeout_seconds, policy):
             self.workspace = workspace
 
         def execute(self, action):

@@ -1,0 +1,10 @@
+# Run checked-out pysindy source, deliberately DO NOT install the pysindy wheel.
+# Scientific stack fixed before acceptance; remaining upstream requirements are merged.
+numpy==1.24.4
+scipy==1.10.1
+scikit-learn==1.2.2
+derivative==0.6.3
+matplotlib==3.7.5
+setuptools==68.2.2
+scs==3.2.7.post2
+cmake==3.27.9
