@@ -8,6 +8,8 @@ import type {
   RunStatus,
   Target,
   VerificationResult,
+  RecordedRepairCase,
+  RepairEvidence,
 } from "./types";
 
 /** 契约 §4：基地址来自 VITE_API_BASE_URL，轮询间隔 1000ms。 */
@@ -61,6 +63,8 @@ async function responseError(res: Response): Promise<ApiError> {
   if (!code && res.status === 429) code = "queue_full";
   if (!message && code === "queue_full") message = "当前等待任务较多，请稍后重试。";
   const bundleErrors: Record<string, string> = {
+    handoff_corrupted: "交接包校验失败，本次未下载。请重新生成交接包。",
+    handoff_not_ready: "该次运行尚未准备 Windows 交接包；可先下载复跑材料。",
     bundle_corrupted: "材料包校验失败，文件可能已被修改或截断。本次未下载，请重新运行生成材料。",
     bundle_incomplete: "复跑材料尚不完整，暂时无法下载。已有报告与验证证据仍可查看。",
     bundle_blocked: "材料导出受阻，请查看材料清单中的原因。已有验证证据仍然保留。",
@@ -84,6 +88,22 @@ export function healthDetails() {
 
 export function targets() {
   return req<Target[]>("/api/targets");
+}
+
+export function recordedRepairCase() {
+  return req<RecordedRepairCase>("/api/cases/lorenz-repair");
+}
+
+export function getRepairEvidence(runId: string) {
+  return req<RepairEvidence>(`/api/runs/${runId}/repair-evidence`);
+}
+
+export async function fetchHandoff(runId: string, signal: AbortSignal) {
+  if (!/^[0-9a-f]{32}$/.test(runId)) throw new Error("运行编号无效。");
+  const response = await fetch(`${BASE}/api/runs/${runId}/handoff`, { signal });
+  if (!response.ok) throw await responseError(response);
+  if (!response.headers.get("content-type")?.includes("application/zip")) throw new Error("服务未返回 ZIP 材料，请稍后重试。");
+  return response.blob();
 }
 
 export function createPreflight(body: { target_id: string } & Partial<PreflightSettings>) {

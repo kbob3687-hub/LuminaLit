@@ -5,6 +5,7 @@ import { bundleDownloadUrl, getEnvironment } from "../api";
 import { BundleDownload } from "./BundleDownload";
 import { ReplayPanel } from "./ReplayPanel";
 import { ExperimentEvidence } from "./ExperimentEvidence";
+import { RepairEvidence } from "./RepairEvidence";
 import type { EnvironmentManifest, RunStatus } from "../types";
 
 /**
@@ -121,6 +122,7 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical, isDe
       <div className="mx-auto max-w-[920px]">
         <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
           <button type="button" onClick={onBack} className="cursor-pointer rounded-md border border-rule-hi px-3.5 py-2 text-sm text-ink-mid hover:text-ink">返回运行页</button>
+          <button type="button" onClick={onNewRun} className="cursor-pointer rounded text-sm text-ink-mid underline underline-offset-4 hover:text-ink">返回案例首页</button>
           <span className="font-mono text-xs text-ink-muted">run {safeRun ?? "未记录"}</span>
         </div>
 
@@ -134,6 +136,7 @@ export function ResultScene({ status, runId, onBack, onNewRun, onTechnical, isDe
           )}
         </header>
 
+        {!isDemo && <RepairEvidence result={result} runId={safeRun} />}
         {!isDemo && <ExperimentEvidence result={result} />}
 
         {/* 1. 结论及验证范围 */}

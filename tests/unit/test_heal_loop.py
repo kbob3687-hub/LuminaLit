@@ -501,6 +501,27 @@ def test_llm_agent_includes_stderr_and_skips_llm_when_command_given(tmp_path, mo
     assert plan.command == ["python", "demo.py"]
 
 
+def test_llm_receives_bounded_file_content_without_second_truncation(monkeypatch):
+    from paperharness.agent.llm_agent import OpenAICompatibleLLM
+
+    model = OpenAICompatibleLLM(base_url="https://example.invalid/v1", model="test")
+    captured = []
+
+    def capture(system, user):
+        captured.append(user)
+        return {"action": "finish_repair", "summary": "done"}
+
+    monkeypatch.setattr(model, "_chat_json", capture)
+    model.propose_action([
+        Observation(ok=True, action="read_file", summary="read source",
+                    stdout_tail="IMPORT_NEEDED_FOR_REPAIR\n" + "x" * 3000),
+        Observation(ok=False, action="test_failed", summary="failed",
+                    stdout_tail="UNNEEDED_LOG_PREFIX" + "y" * 900),
+    ])
+    assert "IMPORT_NEEDED_FOR_REPAIR" in captured[0]
+    assert "UNNEEDED_LOG_PREFIX" not in captured[0]
+
+
 def test_heal_round_one_includes_expected_artifact_and_workspace_files(tmp_path):
     store = RunStore(tmp_path)
     seen_summaries: list[str] = []
@@ -544,3 +565,4 @@ def test_heal_round_one_includes_expected_artifact_and_workspace_files(tmp_path)
     assert "expected_artifact='out.txt'" in seen_summaries[0]
     assert "data/input.csv" in seen_summaries[0]
     assert "main.py" in seen_summaries[0]
+    assert "allowed_side_effects=" in seen_summaries[0]

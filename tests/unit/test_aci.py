@@ -101,6 +101,18 @@ def test_02_read_file_missing(aci):
     assert result.summary == FILE_NOT_FOUND
 
 
+def test_read_file_truncation_explains_how_to_recover_missing_source(aci, workspace):
+    (workspace / "large.py").write_text("important_import\n" + "x" * 5000, encoding="utf-8")
+    result = aci.execute(ReadFileAction(action="read_file", path="large.py"))
+    assert result.ok
+    assert len(result.stdout_tail) == 4000
+    assert "truncated" in result.summary and "fewer lines" in result.summary
+    first_line = aci.execute(ReadFileAction(
+        action="read_file", path="large.py", line_count=1,
+    ))
+    assert "important_import" in first_line.stdout_tail
+
+
 def test_03_read_file_parent_escape(aci):
     result = aci.execute(ReadFileAction(action="read_file", path="../secret.txt"))
 

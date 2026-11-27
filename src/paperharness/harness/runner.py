@@ -1445,6 +1445,7 @@ class HarnessRunner:
                 obs_summary += (
                     f"; expected_artifact={plan.expected_artifact!r}"
                     f"; workspace_files={workspace_files}"
+                    f"; allowed_side_effects={sorted(policy.restricted_side_effects) if policy.restricted_side_effects is not None else 'all_supported'}"
                 )
 
             history.append(

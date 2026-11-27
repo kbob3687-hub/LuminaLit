@@ -32,6 +32,19 @@ async function fixture(overrides = {}, options = {}) {
     requests.push({ path: url.pathname, method: request.method() });
     const json = body => route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
     if (url.pathname === "/api/health") return json({ status: "ok", checks: [] });
+    if (url.pathname === "/api/cases/lorenz-repair" && options.repair) return json({ run_id: id, source_revision: "d4e64c487f03065d96f4bb2b8b9113408c2b357c", model: "API fixture", recorded_at: null });
+    if (url.pathname.endsWith("/repair-evidence") && options.repair) return json({
+      run_id: id, source_revision: "d4e64c487f03065d96f4bb2b8b9113408c2b357c", model: "API fixture", decisions_count: 4,
+      original_error: "Traceback\nAttributeError: 'STLSQ' object has no attribute '_preprocess_data'",
+      changed_files: ["pysindy/optimizers/base.py"], diff: "--- a/base.py\n+++ b/base.py\n-old_call\n+new_call",
+      actions: [{ sequence: 9, action: "replace_exact", ok: true, path: "pysindy/optimizers/base.py", summary: "replaced" },
+        { sequence: 10, action: "replace_exact", ok: false, path: "pysindy/optimizers/base.py", summary: "replace_not_found" }],
+      handoff: { status: "pending", available: true, size_bytes: 237000000, sha256: digest, download_url: `/api/runs/${id}/handoff` },
+    });
+    if (url.pathname.endsWith("/handoff")) {
+      if (options.handoffCorrupted) return route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ detail: { code: "handoff_corrupted" } }) });
+      return route.fulfill({ contentType: "application/zip", body: Buffer.from("UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==", "base64") });
+    }
     if (url.pathname === "/api/targets") return json([{ id: options.lorenz ? "paper-lorenz" : "e2e-example", repo_url: "https://github.com/paperharness-demo/fixture", command: ["python", "check.py"], expected_artifact: "coefficients.json" }]);
     if (url.pathname === "/api/preflights") return json({ preflight_id: preflightId, target_id: "e2e-example", repo_url: "https://github.com/paperharness-demo/fixture",
       created_at: new Date().toISOString(), expires_at: new Date(Date.now()+600000).toISOString(), confirmation_digest: digest,
@@ -60,6 +73,31 @@ try {
     await new Promise(resolve => setTimeout(resolve, 200));
   }
   browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "msedge", headless: true });
+  await check("真实修复历史入口只读，显示原错、补丁和待反馈状态", async () => {
+    const f = await fixture({ resolved_revision: "d4e64c487f03065d96f4bb2b8b9113408c2b357c" }, { repair: true, mobile: true });
+    await f.page.goto(`${base}/?live=1&still=1`);
+    await f.page.getByRole("button", { name: "查看这次真实修复" }).click();
+    const evidence = f.page.getByRole("region", { name: "真实修复与交接" });
+    await evidence.getByText("待队友反馈", { exact: true }).waitFor();
+    assert.match(await evidence.innerText(), /STLSQ/);
+    await evidence.getByText("查看 AI 的源码补丁", { exact: true }).click();
+    assert.match(await evidence.getByLabel("AI 源码补丁").innerText(), /new_call/);
+    await evidence.getByText("查看实际执行动作（2 条）", { exact: true }).click();
+    assert.match(await evidence.innerText(), /未执行成功/);
+    assert.equal(f.requests.filter(r => r.method === "POST").length, 0);
+    assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    assert.deepEqual(f.errors, []);
+    await f.context.close();
+  });
+  await check("交接包校验失败留在结果页，不下载错误 JSON", async () => {
+    const f = await fixture({ resolved_revision: "d4e64c487f03065d96f4bb2b8b9113408c2b357c" }, { repair: true, handoffCorrupted: true });
+    await f.page.goto(`${base}/?live=1&still=1&scene=result&run=${id}`);
+    await f.page.getByRole("button", { name: "下载 Windows 队友交接包" }).click();
+    await f.page.getByRole("alert").getByText(/交接包校验失败/).waitFor();
+    assert.equal(f.downloads.length, 0);
+    assert.match(f.page.url(), /scene=result/);
+    await f.context.close();
+  });
   await check("Lorenz 推荐实验先展示固定三方程标准，确认前不执行", async () => {
     const f = await fixture({}, { lorenz: true, mobile: true });
     await f.page.goto(`${base}/?live=1&still=1&case_preview=1`);

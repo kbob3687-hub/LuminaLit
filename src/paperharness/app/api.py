@@ -9,9 +9,10 @@ from datetime import UTC, datetime
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from paperharness.app.guidance import build_run_guidance, explain_event
+from paperharness.app.repair_case import featured_case, handoff_file, repair_evidence
 from paperharness.app.worker import RunWorker
 from paperharness.contracts.bundle import BundleResult
 from paperharness.contracts.preflight import (
@@ -89,6 +90,20 @@ def create_app(
     @app.get("/api/targets")
     def targets():
         return target_list
+
+    @app.get("/api/cases/lorenz-repair")
+    def recorded_repair_case():
+        return featured_case(store)
+
+    @app.get("/api/runs/{run_id}/repair-evidence")
+    def get_repair_evidence(run_id: str):
+        return repair_evidence(store, run_id)
+
+    @app.get("/api/runs/{run_id}/handoff")
+    def get_handoff(run_id: str):
+        path, digest = handoff_file(store, run_id)
+        return FileResponse(path, media_type="application/zip", filename="lorenz-repair-handoff.zip",
+                            headers={"X-Bundle-SHA256": digest})
 
     @app.post("/api/preflights", response_model=PreflightResult, status_code=201)
     def create_preflight(request: PreflightRequest):

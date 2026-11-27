@@ -55,6 +55,8 @@ CUDA_VISIBLE_DEVICES、OMP_NUM_THREADS、MKL_NUM_THREADS、TOKENIZERS_PARALLELIS
 search_text 只搜索文件内容（不搜索文件名）；请结合初始观测提供的 workspace_files 与 expected_artifact 定位仓库内已有的数据文件与目标产物路径。
 禁止修改 check.py（确定性验证脚本）；不要重复发出与上一条完全相同且已失败的动作。
 先读文件再改；改完用 run_smoke_test 验证；认为修好了就 finish_repair。
+初始观测中的 allowed_side_effects 是本次授权的副作用动作；不在其中的动作不能执行。
+文件内容带行号，read_file 输出有长度上限；若提示截断，缩小 line_count 并分段读取，避免重复读取同一大段。
 只输出 JSON，不要解释。"""
 
 CLASSIFY_SYSTEM_PROMPT = (
@@ -168,7 +170,10 @@ class OpenAICompatibleLLM:
                 f"timed_out={obs.timed_out} {obs.summary}"
             )
             if obs.stdout_tail:
-                entry += f"\n--- stdout ---\n{obs.stdout_tail[-800:]}"
+                # File observations are already bounded by the ACI (4000 chars).
+                # Truncating again to 800 hid imports and drove repeated reads.
+                limit = 4000 if obs.action in {"read_file", "search_text"} else 800
+                entry += f"\n--- stdout ---\n{obs.stdout_tail[-limit:]}"
             if obs.stderr_tail:
                 entry += f"\n--- stderr ---\n{obs.stderr_tail[-1200:]}"
             parts.append(entry)

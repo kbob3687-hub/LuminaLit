@@ -1,5 +1,11 @@
 # PaperHarness 两人接口交接文档
 
+> 2026-11-26 待两人 review 的只读扩展：`GET /api/cases/lorenz-repair` 返回已有真实模型
+> 修复记录的入口；`GET /api/runs/{id}/repair-evidence` 投影原始错误、实际动作、源码 diff
+> 与交接包元数据；`GET /api/runs/{id}/handoff` 提供已发布的 Windows 离线交接包。
+> 缺记录返回 404；交接包 SHA-256 不符返回 `409 handoff_corrupted`。三个接口均不创建
+> 任务、不调用模型；队友反馈尚未收集时固定为 pending，不从本机复跑推断跨机器成功。
+
 - 日期：2026-11-13（2026-11-15 修订：补充沙箱可测试性约定与协作流程）
 - 状态：生效基线，修改需两人 review
 - 配套文档：`docs/superpowers/specs/2026-11-13-paperharness-design.md`

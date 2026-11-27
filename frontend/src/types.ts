@@ -23,6 +23,31 @@ export interface Target {
   expected_artifact: string | null;
 }
 
+export interface RecordedRepairCase {
+  run_id: string;
+  source_revision: string;
+  model: string | null;
+  recorded_at: string | null;
+}
+
+export interface RepairEvidence {
+  run_id: string;
+  source_revision: string;
+  model: string | null;
+  decisions_count: number | null;
+  original_error: string | null;
+  actions: Array<{ sequence: number; action: string; ok: boolean | null; path: string | null; summary: string }>;
+  changed_files: string[];
+  diff: string | null;
+  handoff: {
+    status: "pending";
+    available: boolean;
+    size_bytes: number | null;
+    sha256: string | null;
+    download_url: string | null;
+  };
+}
+
 export interface PreflightSettings {
   /** 每个执行步骤的超时秒数，不是整个运行的总预算。 */
   timeout_seconds: number;

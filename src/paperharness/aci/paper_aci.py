@@ -140,10 +140,16 @@ class PaperACI:
         start = action.start_line - 1
         chunk = lines.splitlines()[start : start + action.line_count]
         body = "\n".join(f"{start + offset + 1}: {line}" for offset, line in enumerate(chunk))
+        summary = f"read {len(chunk)} lines from {action.path}"
+        if len(body) > MAX_TAIL_CHARS:
+            summary += (
+                f"; output truncated to last {MAX_TAIL_CHARS} characters; "
+                "request fewer lines or a different start_line for missing content"
+            )
         return Observation(
             ok=True,
             action=action.action,
-            summary=f"read {len(chunk)} lines from {action.path}",
+            summary=summary,
             stdout_tail=self._tail(body),
         )
 

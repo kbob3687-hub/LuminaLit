@@ -1,0 +1,15 @@
+{
+  "id": "paper-lorenz-repair",
+  "repo_url": "https://github.com/dynamicslab/pysindy",
+  "revision": "d4e64c487f03065d96f4bb2b8b9113408c2b357c",
+  "python_version": "3.10",
+  "command": ["python", "-I", "check.py"],
+  "expected_artifact": "coefficients.json",
+  "verification_rule": "sindy-lorenz-v1",
+  "checkout_paths": ["pysindy", "examples/3_original_paper.ipynb", "requirements.txt", ".gitignore", "LICENSE", "check.py", "coefficients.json", "experiment.json"],
+  "failure_class": "deprecated_api",
+  "repairable": true,
+  "allowed_actions": ["replace_exact", "run_smoke_test"],
+  "expected_final": "succeeded",
+  "notes": "PySINDy v1.7 原始检出源码与 scikit-learn 1.2.2 的兼容性修复案例；先保存实际失败，再允许真实模型修源码。禁止修改 check.py 和系数产物，不允许降级依赖。Lorenz 子实验仍使用固定独立规则 sindy-lorenz-v1；不是完整论文复现。"
+}

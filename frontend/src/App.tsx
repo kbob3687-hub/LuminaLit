@@ -199,6 +199,17 @@ export default function App() {
           <SceneShell key="select">
             <SelectScene
               onPick={pick}
+              onViewRecord={(id) => {
+                if (!/^[a-f0-9]{32}$/.test(id)) return;
+                const url = new URL(window.location.href);
+                url.searchParams.set("run", id);
+                url.searchParams.set("scene", "result");
+                url.searchParams.set("live", "1");
+                url.searchParams.delete("demo");
+                window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+                setRunId(id);
+                showScene("result");
+              }}
               disabled={creating || healthy === null}
               busy={creating}
               error={pickError}

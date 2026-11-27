@@ -16,6 +16,11 @@ Lorenz 系数识别的低噪声子实验。三个方程各 56 个系数，逐行
 脚本不调用模型、不演示 AI 修复；会下载源码与依赖，向 `runs/` 写入真实运行及
 `acceptance.json`。实验设置、运行说明和待补证据见 [Lorenz 实验说明](docs/lorenz-case.md)。
 
+真实 AI 修复案例：`paper-lorenz-repair` 执行 PySINDy v1.7 原始源码，复现
+scikit-learn API 兼容错误，由真实模型修改源码，再用相同数值标准和新容器复跑验收。
+运行 `python scripts/accept_repair.py`，需配置模型；原始报错、实际决策、补丁与
+Windows 队友的离线交接步骤见 [修复与交接案例](docs/lorenz-repair-case.md)。
+
 给它一个公开仓库地址，它在一个一次性 Docker 容器里装依赖、跑命令；跑挂了就分类失败、问模型、在受限动作集里自动修复、再验证，全程隔离、可控、可复核。
 
 ---
@@ -134,6 +139,7 @@ cd frontend && npm install && npm run dev -- --host 127.0.0.1 --port 5173
 | 靶场 | 论文 | 验证断言 |
 |---|---|---|
 | `paper-lorenz` | [SINDy 原始论文](https://pmc.ncbi.nlm.nih.gov/articles/PMC4839439/) 的 Lorenz 子实验 | 执行 v1.7.5 检出源码，三个方程各 56 个系数，最大误差均 < 1e-3，独立验收后自动干净复跑 |
+| `paper-lorenz-repair` | 同一 Lorenz 子实验，历史源码兼容性修复 | 执行 v1.7 原始源码先实际报错，真实模型修改源码后按同一系数规则与新容器复跑验收 |
 | `paper-pysindy` | [arXiv:2004.08424](https://arxiv.org/abs/2004.08424) PySINDy | SINDy 识别线性系统，系数误差 < 1e-4（实测 3.67e-06） |
 | `paper-umap` | [arXiv:1802.03426](https://arxiv.org/abs/1802.03426) UMAP | 合成数据 200×10→2 维，重新聚类 ARI=1.000 |
 

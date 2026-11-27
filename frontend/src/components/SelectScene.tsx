@@ -4,6 +4,7 @@ import { targets as fetchTargets } from "../api";
 import type { HealthDetails, Target } from "../types";
 import { FALLBACK_TARGETS, TARGET_META } from "../targets";
 import { HealthBanner } from "./HealthBanner";
+import { RepairCaseEntry } from "./RepairCaseEntry";
 
 /** 截图模式：关闭入场动画，避免无头渲染抓到半透明中间帧。 */
 const STILL = new URLSearchParams(window.location.search).get("still") === "1";
@@ -43,6 +44,7 @@ export interface PaperOption {
 
 interface Props {
   onPick: (paper: PaperOption) => void;
+  onViewRecord: (runId: string) => void;
   disabled?: boolean;
   busy?: boolean;
   /** 后端返回的错误（422 的 detail[0].msg / 429 queue_full 等），原样展示。 */
@@ -87,7 +89,7 @@ const FALLBACK: PaperOption[] = FALLBACK_TARGETS.map((t) => ({
   expect: TARGET_META[t.id]?.expect,
 }));
 
-export function SelectScene({ onPick, disabled, busy, error, demo, observer, onObserver, health, healthError }: Props) {
+export function SelectScene({ onPick, onViewRecord, disabled, busy, error, demo, observer, onObserver, health, healthError }: Props) {
   const [localError, setLocalError] = useState<string | null>(null);
   const [options, setOptions] = useState<PaperOption[] | null>(null);
 
@@ -109,6 +111,7 @@ export function SelectScene({ onPick, disabled, busy, error, demo, observer, onO
 
   const list = options ?? FALLBACK;
   const lorenz = options?.find(option => option.id === "paper-lorenz");
+  const repair = options?.find(option => option.id === "paper-lorenz-repair");
   const shown = localError ?? error ?? null;
 
   /** 把输入框内容当作 repo_url 提交（契约 §4.1 的唯一必填字段）。 */
@@ -175,6 +178,8 @@ export function SelectScene({ onPick, disabled, busy, error, demo, observer, onO
           接手论文仓库，查看运行问题与修复记录，按固定标准检查结果，再把复跑材料交给同学。
         </motion.p>
 
+        <RepairCaseEntry onView={onViewRecord} onRetry={repair && !disabled ? () => onPick(repair) : undefined} demo={demo} />
+
         {lorenz && <section aria-label="推荐科研实验" className="mb-9 rounded-xl border border-rule-hi bg-surface px-5 py-5 sm:px-6">
           <h2 className="text-lg font-semibold text-ink">先复跑一个具体实验</h2>
           <p className="mt-2 max-w-[65ch] text-sm leading-7 text-ink-mid">SINDy 从数据中识别 Lorenz 方程。执行固定版本的仓库源码，检查三个方程的系数，再创建全新容器复跑。</p>
@@ -182,7 +187,7 @@ export function SelectScene({ onPick, disabled, busy, error, demo, observer, onO
           <button type="button" onClick={() => onPick(lorenz)} disabled={disabled} className="mt-4 cursor-pointer rounded-lg bg-accent px-5 py-2.5 text-sm font-semibold text-white hover:brightness-110 disabled:opacity-50">{demo ? "查看离线回放" : "查看 Lorenz 实验与验收标准"}</button>
         </section>}
 
-        {CASE_PREVIEW && <p role="status" className="mb-8 text-sm leading-7 text-ink-mid">当前是 Lorenz 实验专用预览，支持真实运行、独立验收和干净复跑。</p>}
+        {CASE_PREVIEW && <p role="status" className="mb-8 text-sm leading-7 text-ink-mid">当前为科研案例预览。查看历史记录不会启动任务；重新运行需先查看并确认执行计划。</p>}
         {!CASE_PREVIEW && <motion.div {...FADE_IN(0.16)} className="mb-8">
           <label htmlFor="repo-input" className="mb-3 block text-base font-medium">运行自己的仓库</label>
           <form onSubmit={(event) => { event.preventDefault(); submit(); }}

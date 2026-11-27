@@ -59,7 +59,7 @@ def verification_spec(rule_id: str = "pysindy-linear-v1") -> VerificationSpec:
             rule_id="sindy-lorenz-v1", threshold=1e-3,
             validator_digest=hashlib.sha256(_LORENZ_VALIDATOR.read_bytes()).hexdigest(),
             code_under_test=(
-                "PySINDy v1.7.5 检出源码（4c32d2603cbf1aa476efae72bc78436cb1e6fc75）；"
+                "冻结运行计划指定的 PySINDy 检出源码（实际提交见 repair_manifest.base_revision）；"
                 "维护者适配脚本导入仓库内 SINDy / STLSQ / PolynomialLibrary / lorenz，"
                 "拒绝已安装包回退。"
             ),

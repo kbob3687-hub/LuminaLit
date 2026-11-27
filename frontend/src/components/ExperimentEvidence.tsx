@@ -7,6 +7,7 @@ export function ExperimentEvidence({ result }: { result: RunResult | null }) {
   const current = verificationConclusion(result.verification);
   const replay = replayConclusion(result.replay);
   const bundle = bundleConclusion(result.bundle);
+  const revision = /^[a-f0-9]{40}$/.test(result.resolved_revision ?? "") ? result.resolved_revision : "4c32d2603cbf1aa476efae72bc78436cb1e6fc75";
   return (
     <section aria-label="Lorenz 实验结果" className="my-7 overflow-hidden rounded-xl border border-rule-hi bg-surface">
       <div className="px-5 py-5 sm:px-6">
@@ -16,7 +17,7 @@ export function ExperimentEvidence({ result }: { result: RunResult | null }) {
         </p>
         <div className="mt-4 flex flex-wrap gap-x-6 gap-y-1 text-xs leading-6 text-ink-mid">
           <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC4839439/" target="_blank" rel="noreferrer" className="text-accent underline underline-offset-4">原始论文与 Lorenz 方程</a>
-          <a href="https://github.com/dynamicslab/pysindy/blob/4c32d2603cbf1aa476efae72bc78436cb1e6fc75/examples/3_original_paper.ipynb" target="_blank" rel="noreferrer" className="text-accent underline underline-offset-4">固定版本的上游实验</a>
+          <a href={`https://github.com/dynamicslab/pysindy/blob/${revision}/examples/3_original_paper.ipynb`} target="_blank" rel="noreferrer" className="text-accent underline underline-offset-4">固定版本的上游实验</a>
         </div>
       </div>
       <dl className="grid border-y border-rule sm:grid-cols-3">

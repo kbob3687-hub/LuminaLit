@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "recorded_date": "2026-11-26",
+  "baseline_run_id": "3d9cda2c5da440989b1c649b7b3df019",
+  "repaired_run_id": "adc512a734114cfdb05490f534f01a4e",
+  "repository": "https://github.com/dynamicslab/pysindy",
+  "source_revision": "d4e64c487f03065d96f4bb2b8b9113408c2b357c",
+  "upstream_version": "v1.7",
+  "scientific_case": "Lorenz low-noise coefficient identification subexperiment",
+  "original_error": "AttributeError: 'STLSQ' object has no attribute '_preprocess_data'",
+  "model": "deepseek-flash",
+  "successful_model_json_decisions": 12,
+  "changed_source_files": [
+    "pysindy/optimizers/base.py"
+  ],
+  "adapter_unchanged": true,
+  "verification_rule": "sindy-lorenz-v1",
+  "metrics": [
+    {
+      "name": "x方程最大系数误差",
+      "observed": 1.6198172048120796e-07,
+      "threshold": 0.001,
+      "comparison": "lt",
+      "passed": true
+    },
+    {
+      "name": "y方程最大系数误差",
+      "observed": 4.2492834495533316e-07,
+      "threshold": 0.001,
+      "comparison": "lt",
+      "passed": true
+    },
+    {
+      "name": "z方程最大系数误差",
+      "observed": 3.339405685309771e-06,
+      "threshold": 0.001,
+      "comparison": "lt",
+      "passed": true
+    }
+  ],
+  "original_artifact_sha256": "278fb2d7e3575ea210bc4f3cea846f4b871427350b9f341fd878e78ca78b0165",
+  "replay_status": "passed",
+  "replay_artifact_sha256": "278fb2d7e3575ea210bc4f3cea846f4b871427350b9f341fd878e78ca78b0165",
+  "bundle_sha256": "943db43322c49e6b12cdd5472a7bf7a733e8097567f8e9050f59446ad8f67b51",
+  "source_transport": "validated_clean_local_git_cache",
+  "elapsed_seconds": 537.88,
+  "cross_machine_handoff": "pending_windows_teammate",
+  "retained_failed_runs": [
+    {
+      "id": "e375541efe204663a5e634408ddf78b5",
+      "reason": "model repeated reads under truncated source context; total budget exceeded"
+    },
+    {
+      "id": "c7f6d5f06485415a8f3e5a2642d0ff4a",
+      "reason": "GitHub TLS handshake failed; no model decisions"
+    },
+    {
+      "id": "3d3b14ecee1f4d97a6ebb6dcf8e161a5",
+      "reason": "cache helper rejected existing empty destination; no model decisions"
+    }
+  ],
+  "historical_label_correction": "Raw verification.code_under_test label incorrectly said v1.7.5. The actual Git checkout and frozen manifest used v1.7 at d4e64c487f03065d96f4bb2b8b9113408c2b357c. Product metadata now references the actual frozen run revision. Original records retained.",
+  "limitations": [
+    "One Lorenz subexperiment, not the full paper or general correctness of the optimizer patch.",
+    "Fresh containers on one host; independent Windows teammate result is still pending.",
+    "Preinstalled scientific base image; local source cache used for repair and replay, not fresh remote source downloads.",
+    "Model decisions are successful JSON decisions, not all HTTP requests/token usage."
+  ],
+  "handoff_package": {
+    "filename": "lorenz-ai-repair-20261126.zip",
+    "bytes": 236532508,
+    "sha256": "eecaf2f15e95edca16d8bf60850df420721e724e55cee6ae8dc4363dc158b18b",
+    "image_id": "sha256:df04835876f31dc807bb3c2131b11ff2704733e76af3d2ad80fa914f036b897d",
+    "delivery_to_teammate": "prepared_not_sent",
+    "receiver_platform": "Windows x64 with Docker Desktop Linux containers and Python 3.11+"
+  },
+  "handoff_local_check": {
+    "role": "local-check",
+    "outcome": "succeeded",
+    "original_failure_reproduced": true,
+    "artifact_sha256": "278fb2d7e3575ea210bc4f3cea846f4b871427350b9f341fd878e78ca78b0165",
+    "verification": {
+      "status": "passed",
+      "failure_category": null,
+      "schema_valid": true,
+      "errors": [
+        1.6198172048120796e-07,
+        4.2492834495533316e-07,
+        3.339405685309771e-06
+      ]
+    },
+    "matches_sender_artifact": true,
+    "elapsed_seconds": 96.0
+  },
+  "validation": {
+    "full_pytest": "657 passed, 22 skipped",
+    "additional_handoff_unit_tests": "9 passed",
+    "post_metadata_fix_verifier_tests": "10 passed",
+    "ruff": "passed",
+    "diff_check": "passed",
+    "model_credentials_absent_from_handoff_config_and_text": "checked"
+  }
+}

@@ -23,6 +23,12 @@ export interface TargetMeta {
 }
 
 export const TARGET_META: Record<string, TargetMeta> = {
+  "paper-lorenz-repair": {
+    revision: "d4e64c487f03065d96f4bb2b8b9113408c2b357c",
+    blurb: "PySINDy v1.7 源码兼容性报错：由模型修改科研源码，再独立核对 Lorenz 系数并干净复跑。",
+    expect: "succeeded",
+    preflight: { timeout_seconds: 900, max_repairs: 2 },
+  },
   "paper-lorenz": {
     revision: "4c32d2603cbf1aa476efae72bc78436cb1e6fc75",
     blurb: "SINDy 论文 Lorenz 系数识别子实验：运行检出源码，独立检查三个方程，再在全新容器复跑。",
